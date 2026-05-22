@@ -103,7 +103,12 @@ export interface ProjectMetadata {
   directory: string;
   id: string;
   imageCount: number;
+  name: string;
   updatedAt: string;
+}
+
+export interface ProjectSummary extends ProjectMetadata {
+  previewSourcePaths: string[];
 }
 
 export interface ProjectSnapshot {

@@ -5,6 +5,7 @@ import type {
   PersistedImageSession,
   PersistedImageSessionChatMessage,
   ProjectMetadata,
+  ProjectSummary,
   ProjectSnapshot
 } from "../ipcTypes";
 
@@ -27,6 +28,7 @@ interface SaveProjectSnapshotInput {
 interface ProjectRow {
   created_at: string;
   id: string;
+  name: string | null;
   updated_at: string;
 }
 
@@ -53,6 +55,12 @@ interface ChatMessageRow {
   source_file_path: string | null;
 }
 
+interface PreviewSourceRow {
+  file_path: string;
+  generated_file_path: string | null;
+  show_original_in_list: number;
+}
+
 const PROJECT_DATABASE_NAME = "project.sqlite";
 
 export async function createProject(options: CreateProjectOptions): Promise<ProjectSnapshot> {
@@ -65,7 +73,12 @@ export async function createProject(options: CreateProjectOptions): Promise<Proj
   const db = openProjectDatabase(projectDirectory);
   try {
     initializeSchema(db);
-    db.prepare("insert into projects (id, created_at, updated_at) values (?, ?, ?)").run(projectId, now, now);
+    db.prepare("insert into projects (id, name, created_at, updated_at) values (?, ?, ?, ?)").run(
+      projectId,
+      formatDefaultProjectName(now),
+      now,
+      now
+    );
   } finally {
     db.close();
   }
@@ -230,6 +243,37 @@ export async function saveProjectSnapshot(
   }
 }
 
+export async function renameProject(projectDirectory: string, name: string): Promise<ProjectSnapshot> {
+  await createProjectDirectories(projectDirectory);
+
+  const db = openProjectDatabase(projectDirectory);
+  try {
+    initializeSchema(db);
+    const current = readProjectMetadata(db, projectDirectory);
+    const nextName = name.trim() || formatDefaultProjectName(current.createdAt);
+    db.prepare("update projects set name = ?, updated_at = ?").run(nextName, toIso(new Date()));
+
+    return readProjectSnapshot(db, projectDirectory);
+  } finally {
+    db.close();
+  }
+}
+
+export async function readProjectSummary(projectDirectory: string): Promise<ProjectSummary> {
+  await createProjectDirectories(projectDirectory);
+
+  const db = openProjectDatabase(projectDirectory);
+  try {
+    initializeSchema(db);
+    return {
+      ...readProjectMetadata(db, projectDirectory),
+      previewSourcePaths: readProjectPreviewSourcePaths(db)
+    };
+  } finally {
+    db.close();
+  }
+}
+
 export function getProjectGeneratedDirectory(projectDirectory: string): string {
   return path.join(projectDirectory, "images", "generated");
 }
@@ -250,6 +294,7 @@ function initializeSchema(db: DatabaseSync): void {
   db.exec(`
     create table if not exists projects (
       id text primary key,
+      name text,
       created_at text not null,
       updated_at text not null
     );
@@ -289,10 +334,24 @@ function initializeSchema(db: DatabaseSync): void {
     );
   `);
 
+  ensureProjectsNameColumn(db);
+
   const projectCount = db.prepare("select count(*) as count from projects").get() as { count: number };
   if (projectCount.count === 0) {
     const now = new Date().toISOString();
-    db.prepare("insert into projects (id, created_at, updated_at) values (?, ?, ?)").run(path.basename(process.cwd()), now, now);
+    db.prepare("insert into projects (id, name, created_at, updated_at) values (?, ?, ?, ?)").run(
+      path.basename(process.cwd()),
+      formatDefaultProjectName(now),
+      now,
+      now
+    );
+  }
+}
+
+function ensureProjectsNameColumn(db: DatabaseSync): void {
+  const columns = db.prepare("pragma table_info(projects)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "name")) {
+    db.exec("alter table projects add column name text");
   }
 }
 
@@ -306,22 +365,42 @@ async function createProjectDirectories(projectDirectory: string): Promise<void>
 }
 
 function readProjectSnapshot(db: DatabaseSync, projectDirectory: string): ProjectSnapshot {
-  const projectRow = db.prepare("select id, created_at, updated_at from projects order by created_at asc limit 1").get() as unknown as ProjectRow;
   const sessions = (db.prepare("select * from image_sessions order by sort_order asc").all() as unknown as ImageSessionRow[]).map((row) =>
     mapSessionRow(db, row)
   );
 
   return {
-    project: {
-      createdAt: projectRow.created_at,
-      directory: projectDirectory,
-      id: projectRow.id,
-      imageCount: sessions.length,
-      updatedAt: projectRow.updated_at
-    },
+    project: readProjectMetadata(db, projectDirectory, sessions.length),
     selectedSessionId: getProjectState(db, "selectedSessionId"),
     sessions
   };
+}
+
+function readProjectMetadata(db: DatabaseSync, projectDirectory: string, imageCount?: number): ProjectMetadata {
+  const projectRow = db.prepare("select id, name, created_at, updated_at from projects order by created_at asc limit 1").get() as unknown as ProjectRow;
+  const count =
+    imageCount ??
+    ((db.prepare("select count(*) as count from image_sessions").get() as { count: number }).count);
+
+  return {
+    createdAt: projectRow.created_at,
+    directory: projectDirectory,
+    id: projectRow.id,
+    imageCount: count,
+    name: projectRow.name?.trim() || formatDefaultProjectName(projectRow.created_at),
+    updatedAt: projectRow.updated_at
+  };
+}
+
+function readProjectPreviewSourcePaths(db: DatabaseSync): string[] {
+  return (db.prepare(
+    `select file_path, generated_file_path, show_original_in_list
+      from image_sessions
+      order by sort_order asc
+      limit 6`
+  ).all() as unknown as PreviewSourceRow[]).map((row) =>
+    row.generated_file_path && !row.show_original_in_list ? row.generated_file_path : row.file_path
+  );
 }
 
 function mapSessionRow(db: DatabaseSync, row: ImageSessionRow): PersistedImageSession {
@@ -416,6 +495,20 @@ function stringifyOptionalArray(value: string[] | undefined): string | null {
 
 function toIso(date: Date): string {
   return date.toISOString();
+}
+
+function formatDefaultProjectName(isoDate: string): string {
+  const date = new Date(isoDate);
+  if (Number.isNaN(date.getTime())) {
+    return "当前项目";
+  }
+
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const hour = String(date.getUTCHours()).padStart(2, "0");
+  const minute = String(date.getUTCMinutes()).padStart(2, "0");
+
+  return `项目 ${month}-${day} ${hour}:${minute}`;
 }
 
 function toSafeStem(fileName: string): string {
