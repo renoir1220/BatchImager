@@ -21,8 +21,9 @@ import { EmptyWorkspace } from "./components/EmptyWorkspace";
 import { ImagePreviewDialog } from "./components/ImagePreviewDialog";
 import { ImageWorkspace } from "./components/ImageWorkspace";
 import { LogPanel } from "./components/LogPanel";
+import { ProjectListDialog } from "./components/ProjectListDialog";
 import { SessionPanel } from "./components/SessionPanel";
-import type { AppLogEntry, ChatReferenceImage, ProjectMetadata, ProjectSnapshot } from "../electron/ipcTypes";
+import type { AppLogEntry, ChatReferenceImage, ProjectListEntry, ProjectMetadata, ProjectSnapshot } from "../electron/ipcTypes";
 
 const DEFAULT_COLUMNS = 4;
 
@@ -36,6 +37,9 @@ export function App() {
   const [isLogPanelOpen, setIsLogPanelOpen] = useState(false);
   const [logs, setLogs] = useState<AppLogEntry[]>([]);
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
+  const [isProjectListOpen, setIsProjectListOpen] = useState(false);
+  const [isProjectListLoading, setIsProjectListLoading] = useState(false);
+  const [projectListEntries, setProjectListEntries] = useState<ProjectListEntry[]>([]);
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
@@ -45,7 +49,7 @@ export function App() {
     () => sessions.find((session) => session.id === previewSessionId) ?? null,
     [previewSessionId, sessions]
   );
-  const projectLabel = currentProject ? formatProjectLabel(currentProject.createdAt) : undefined;
+  const projectLabel = currentProject?.name ?? (currentProject ? formatProjectLabel(currentProject.createdAt) : undefined);
   const selectedSessionActivityLogs = useMemo(
     () => getSessionActivityLogs(logs, selectedSessionId),
     [logs, selectedSessionId]
@@ -69,6 +73,18 @@ export function App() {
       unsubscribe?.();
     };
   }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.batchImager?.subscribeProjectThumbnailUpdates(() => {
+      if (isProjectListOpen) {
+        void loadProjectList();
+      }
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [isProjectListOpen]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent): void {
@@ -136,9 +152,45 @@ export function App() {
   }
 
   async function handleOpenProject(): Promise<void> {
-    const snapshot = await window.batchImager?.openProject();
+    setIsProjectListOpen(true);
+    await loadProjectList();
+  }
+
+  async function handleOpenProjectFromList(directory: string): Promise<void> {
+    const snapshot = await window.batchImager?.openProject({ directory });
     if (snapshot) {
       applyProjectSnapshot(snapshot);
+      setIsProjectListOpen(false);
+    }
+  }
+
+  async function loadProjectList(): Promise<void> {
+    setIsProjectListLoading(true);
+    try {
+      const entries = await window.batchImager?.listProjects();
+      if (entries) {
+        setProjectListEntries(entries);
+      }
+    } finally {
+      setIsProjectListLoading(false);
+    }
+  }
+
+  async function handleRememberProjectDirectory(): Promise<void> {
+    const entries = await window.batchImager?.rememberProjectDirectory();
+    if (entries) {
+      setProjectListEntries(entries);
+    }
+  }
+
+  async function handleRenameProject(directory: string, name: string): Promise<void> {
+    const entries = await window.batchImager?.renameProject({ directory, name });
+    if (entries) {
+      setProjectListEntries(entries);
+      const renamedProject = entries.find((entry) => entry.directory === currentProject?.directory)?.summary;
+      if (renamedProject) {
+        setCurrentProject(renamedProject);
+      }
     }
   }
 
@@ -399,6 +451,18 @@ export function App() {
       ) : null}
 
       {isLogPanelOpen ? <LogPanel logs={logs} onClose={() => setIsLogPanelOpen(false)} /> : null}
+
+      {isProjectListOpen ? (
+        <ProjectListDialog
+          isLoading={isProjectListLoading}
+          projects={projectListEntries}
+          onAddDirectory={handleRememberProjectDirectory}
+          onClose={() => setIsProjectListOpen(false)}
+          onOpenProject={handleOpenProjectFromList}
+          onRefresh={loadProjectList}
+          onRenameProject={handleRenameProject}
+        />
+      ) : null}
 
       {previewSession ? (
         <ImagePreviewDialog
