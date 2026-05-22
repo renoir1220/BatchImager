@@ -1,4 +1,4 @@
-import { copyFile, mkdir } from "node:fs/promises";
+import { access, copyFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
@@ -260,7 +260,7 @@ export async function renameProject(projectDirectory: string, name: string): Pro
 }
 
 export async function readProjectSummary(projectDirectory: string): Promise<ProjectSummary> {
-  await createProjectDirectories(projectDirectory);
+  await assertProjectDatabaseExists(projectDirectory);
 
   const db = openProjectDatabase(projectDirectory);
   try {
@@ -288,6 +288,10 @@ export function getProjectReferencesDirectory(projectDirectory: string): string 
 
 function openProjectDatabase(projectDirectory: string): DatabaseSync {
   return new DatabaseSync(path.join(projectDirectory, PROJECT_DATABASE_NAME));
+}
+
+async function assertProjectDatabaseExists(projectDirectory: string): Promise<void> {
+  await access(path.join(projectDirectory, PROJECT_DATABASE_NAME));
 }
 
 function initializeSchema(db: DatabaseSync): void {
