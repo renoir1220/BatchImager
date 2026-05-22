@@ -27,6 +27,7 @@ export interface ReferenceImageCandidate {
 
 export interface ImageToolChatInput {
   context?: ImageToolChatContext;
+  generationMode?: "edit" | "generate";
   imagePath: string;
   messages: VisibleChatMessage[];
   outputSize?: string;
@@ -83,17 +84,26 @@ export async function runImageToolChat(
   const context = `chat:${input.sessionId}`;
   const selectedOutputSize = normalizeGenerationSizeValue(input.outputSize);
   const expectsImageGeneration = shouldUseImageTool(input.messages, selectedOutputSize);
+  const referenceImages = getReferenceImageCandidates(input);
+
+  if (expectsImageGeneration && shouldRequireMissingReferenceImage(input.messages, referenceImages)) {
+    deps.logger?.warn("Chat generation request referenced a missing attachment", {
+      context,
+      publicMessage: "没有收到参考图附件，请先粘贴或添加参考图。"
+    });
+    throw new Error("我没有收到可用的参考图附件，请先粘贴或添加参考图后再发送。");
+  }
+
   deps.logger?.info("Chat request started", {
     context,
     data: { expectsImageGeneration, messageCount: input.messages.length },
     publicMessage: expectsImageGeneration ? "会话已发送，正在组织图片生成工具参数..." : "会话已发送，模型正在分析..."
   });
-  const referenceImages = getReferenceImageCandidates(input);
   const messages: ChatApiMessage[] = [
     {
       role: "system",
       content:
-        "你是 BatchImager 的右侧图片会话助手。需要生成或修改图片时，调用 generate_image 工具；不要假装已经生成图片。除非用户明确要求方图、横图、竖图、2K、4K 或具体尺寸，否则不要传 size。当用户说“上一张、第二张、刚才那个、pin 的那张、那个风格”等指代表达时，根据可引用参考图索引判断具体图片，并只在 referenceImageIds 中填写本次生成真正需要的参考图 id；不要编造 id，不确定时先追问。"
+        "你是 BatchImager 的右侧图片会话助手。需要生成或修改图片时，调用 generate_image 工具；不要假装已经生成图片。除非用户明确要求方图、横图、竖图、2K、4K 或具体尺寸，否则不要传 size。当用户说“上一张、第二张、刚才那个、pin 的那张、那个风格”等指代表达时，根据可引用参考图索引判断具体图片，并只在 referenceImageIds 中填写本次生成真正需要的参考图 id；不要编造 id，不确定时先追问。图片生成完成后，只用自然语言简短说明结果，不要在回复中展示本地路径、远端 URL 或下载链接。"
     },
     ...buildContextMessages(input.context, referenceImages, selectedOutputSize),
     ...input.messages.map((message): ChatApiMessage => ({ role: message.role, content: message.content }))
@@ -151,8 +161,8 @@ export async function runImageToolChat(
       role: "tool",
       tool_call_id: toolCall.id,
       content: JSON.stringify({
-        outputPath: generatedImage.outputPath,
-        remoteUrl: generatedImage.remoteUrl
+        message: "图片生成完成，已更新当前图片。",
+        status: "completed"
       })
     });
   }
@@ -358,8 +368,8 @@ function getReferenceImageCandidates(input: ImageToolChatInput): ReferenceImageC
 }
 
 function selectReferenceImagePaths(value: unknown, referenceImages: ReferenceImageCandidate[]): string[] {
-  if (!Array.isArray(value)) {
-    return [];
+  if (!Array.isArray(value) || value.length === 0) {
+    return referenceImages.map((referenceImage) => referenceImage.filePath);
   }
 
   const byId = new Map(referenceImages.map((referenceImage) => [referenceImage.id, referenceImage.filePath]));
@@ -447,6 +457,16 @@ function getLatestUserMessage(messages: VisibleChatMessage[]): string {
     .reverse()
     .find((message) => message.role === "user")
     ?.content.trim() ?? "";
+}
+
+function shouldRequireMissingReferenceImage(messages: VisibleChatMessage[], referenceImages: ReferenceImageCandidate[]): boolean {
+  if (referenceImages.length > 0) {
+    return false;
+  }
+
+  return /(?:附件|附图|参考图|刚才.*图|之前.*图|上次.*图|第一个\s*prompt.*图|第一条\s*prompt.*图)/i.test(
+    getLatestUserMessage(messages)
+  );
 }
 
 function getFileName(filePath: string): string {

@@ -8,7 +8,9 @@ interface ImageWorkspaceProps {
   selectedSessionId: string | null;
   onDraggingChange: (isDragging: boolean) => void;
   onDropFiles: (files: File[]) => void;
+  onDeleteSession: (sessionId: string) => void;
   onOpenPreview: (sessionId: string) => void;
+  onRetrySession: (sessionId: string) => void;
   onSelectSession: (sessionId: string) => void;
   onToggleImageSource: (sessionId: string) => void;
 }
@@ -19,8 +21,10 @@ export function ImageWorkspace({
   sessions,
   selectedSessionId,
   onDraggingChange,
+  onDeleteSession,
   onDropFiles,
   onOpenPreview,
+  onRetrySession,
   onSelectSession,
   onToggleImageSource
 }: ImageWorkspaceProps) {
@@ -45,7 +49,9 @@ export function ImageWorkspace({
           key={session.id}
           isSelected={session.id === selectedSessionId}
           session={session}
+          onDelete={() => onDeleteSession(session.id)}
           onOpenPreview={() => onOpenPreview(session.id)}
+          onRetry={() => onRetrySession(session.id)}
           onSelect={() => onSelectSession(session.id)}
           onToggleImageSource={() => onToggleImageSource(session.id)}
         />

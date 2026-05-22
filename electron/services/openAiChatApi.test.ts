@@ -65,10 +65,14 @@ describe("openAiChatApi", () => {
             );
           }
 
-          expect((body.messages as Array<{ role: string; tool_call_id?: string }>).at(-1)).toMatchObject({
+          const toolMessage = (body.messages as Array<{ role: string; tool_call_id?: string; content?: string }>).at(-1);
+          expect(toolMessage).toMatchObject({
             role: "tool",
             tool_call_id: "call-1"
           });
+          expect(toolMessage?.content).not.toContain("C:\\generated\\img-1.png");
+          expect(toolMessage?.content).not.toContain("https://cdn.example.com/img-1.png");
+          expect(toolMessage?.content).toContain("图片生成完成，已更新当前图片。");
 
           return new Response(
             JSON.stringify({
@@ -191,6 +195,110 @@ describe("openAiChatApi", () => {
         sessionId: "img-1"
       }
     ]);
+  });
+
+  test("keeps prompt reference images when the model sends an empty referenceImageIds array", async () => {
+    const generated: Array<{ prompt: string; imagePath: string; referenceImagePaths?: string[]; sessionId: string }> = [];
+
+    await runImageToolChat(
+      {
+        imagePath: "C:\\images\\placeholder.png",
+        messages: [{ role: "user", content: "根据这张参考图生成咖啡馆内部结构图" }],
+        referenceImages: [{ id: "prompt-ref-1", filePath: "C:\\references\\sakura-cafe.jpg", label: "Esse 提示图 1" }],
+        sessionId: "img-7"
+      },
+      {
+        apiKey: "local-test-key",
+        baseUrl: "https://api.ourzhishi.top",
+        model: "gpt-4o-mini"
+      },
+      {
+        fetch: async (_url, init) => {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+
+          if (Array.isArray(body.messages) && body.messages.some((message) => isToolMessage(message))) {
+            return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "已生成。" } }] }), {
+              status: 200
+            });
+          }
+
+          return new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: "call-1",
+                        type: "function",
+                        function: {
+                          name: "generate_image",
+                          arguments: JSON.stringify({
+                            prompt: "生成咖啡馆内部结构图",
+                            referenceImageIds: []
+                          })
+                        }
+                      }
+                    ]
+                  }
+                }
+              ]
+            }),
+            { status: 200 }
+          );
+        },
+        generateImage: async (request) => {
+          generated.push(request);
+          return { outputPath: "C:\\generated\\img-7.png" };
+        }
+      }
+    );
+
+    expect(generated).toEqual([
+      {
+        imagePath: "C:\\images\\placeholder.png",
+        prompt: "生成咖啡馆内部结构图",
+        referenceImagePaths: ["C:\\references\\sakura-cafe.jpg"],
+        sessionId: "img-7"
+      }
+    ]);
+  });
+
+  test("rejects attachment-based generation when no reference image is available", async () => {
+    const generated: Array<{ prompt: string; imagePath: string; sessionId: string }> = [];
+    const fetchCalls: Array<Record<string, unknown>> = [];
+
+    await expect(
+      runImageToolChat(
+        {
+          imagePath: "C:\\images\\placeholder.png",
+          messages: [{ role: "user", content: "按附件里的参考图继续生成三张内部设计图" }],
+          sessionId: "img-7"
+        },
+        {
+          apiKey: "local-test-key",
+          baseUrl: "https://api.ourzhishi.top",
+          model: "gpt-4o-mini"
+        },
+        {
+          fetch: async (_url, init) => {
+            fetchCalls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+            return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "已生成。" } }] }), {
+              status: 200
+            });
+          },
+          generateImage: async (request) => {
+            generated.push(request);
+            return { outputPath: "C:\\generated\\img-7.png" };
+          }
+        }
+      )
+    ).rejects.toThrow("我没有收到可用的参考图附件");
+
+    expect(fetchCalls).toEqual([]);
+    expect(generated).toEqual([]);
   });
 
   test("keeps automatic tool choice for non-generation chat", async () => {

@@ -39,11 +39,14 @@ describe("piImageToolChat", () => {
             prompt: async (prompt) => {
               runtimePrompts.push(prompt);
               const generateTool = customTools.find((tool) => tool.name === "generate_image");
-              await generateTool?.execute("call-1", {
+              const toolResult = await generateTool?.execute("call-1", {
                 prompt: "白底商品图，保留花朵形态",
                 referenceImageIds: ["ref-1"],
                 size: "3840x2160"
               });
+              expect(JSON.stringify(toolResult)).not.toContain("C:\\project\\images\\generated\\img-1.png");
+              expect(JSON.stringify(toolResult)).not.toContain("https://cdn.example.com/img-1.png");
+              expect(JSON.stringify(toolResult)).toContain("图片生成完成，已更新当前图片。");
             },
             subscribe: () => () => undefined
           };
@@ -77,6 +80,121 @@ describe("piImageToolChat", () => {
         remoteUrl: "https://cdn.example.com/img-1.png"
       }
     });
+  });
+
+  test("uses all provided prompt reference images when Pi omits referenceImageIds", async () => {
+    const generatedRequests: unknown[] = [];
+    const customTools: Array<{ name: string; execute: (id: string, params: Record<string, unknown>) => Promise<unknown> }> = [];
+
+    await runPiImageToolChat(
+      {
+        imagePath: "C:\\project\\images\\generated\\placeholder.png",
+        messages: [{ role: "user", content: "根据这张参考图生成咖啡馆内部结构图" }],
+        referenceImages: [{ id: "prompt-ref-1", filePath: "C:\\project\\references\\sakura-cafe.jpg", label: "Esse 提示图 1" }],
+        sessionId: "img-7"
+      },
+      {
+        apiKey: "coding-key",
+        baseUrl: "https://api.tu-zi.com/coding",
+        chatAgent: "pi",
+        model: "gpt-5.5"
+      },
+      "C:\\project",
+      {
+        createRuntime: async (options) => {
+          customTools.push(...(options.customToolDefinitions as typeof customTools));
+          return {
+            descriptor: {
+              builtInTools: [],
+              customTools: [],
+              model: options.model,
+              projectDirectory: options.projectDirectory,
+              sessionId: options.sessionId
+            },
+            dispose: () => undefined,
+            getLastAssistantText: () => "已生成。",
+            prompt: async () => {
+              const generateTool = customTools.find((tool) => tool.name === "generate_image");
+              await generateTool?.execute("call-1", {
+                prompt: "生成咖啡馆内部结构图"
+              });
+            },
+            subscribe: () => () => undefined
+          };
+        },
+        generateImage: async (request) => {
+          generatedRequests.push(request);
+          return { outputPath: "C:\\project\\images\\generated\\img-7.png" };
+        }
+      }
+    );
+
+    expect(generatedRequests).toEqual([
+      {
+        imagePath: "C:\\project\\images\\generated\\placeholder.png",
+        prompt: "生成咖啡馆内部结构图",
+        referenceImagePaths: ["C:\\project\\references\\sakura-cafe.jpg"],
+        sessionId: "img-7"
+      }
+    ]);
+  });
+
+  test("keeps prompt reference images when Pi sends an empty referenceImageIds array", async () => {
+    const generatedRequests: unknown[] = [];
+    const customTools: Array<{ name: string; execute: (id: string, params: Record<string, unknown>) => Promise<unknown> }> = [];
+
+    await runPiImageToolChat(
+      {
+        imagePath: "C:\\project\\images\\generated\\placeholder.png",
+        messages: [{ role: "user", content: "根据这张参考图生成咖啡馆内部结构图" }],
+        referenceImages: [{ id: "prompt-ref-1", filePath: "C:\\project\\references\\sakura-cafe.jpg", label: "Esse 提示图 1" }],
+        sessionId: "img-7"
+      },
+      {
+        apiKey: "coding-key",
+        baseUrl: "https://api.tu-zi.com/coding",
+        chatAgent: "pi",
+        model: "gpt-5.5"
+      },
+      "C:\\project",
+      {
+        createRuntime: async (options) => {
+          customTools.push(...(options.customToolDefinitions as typeof customTools));
+          return {
+            descriptor: {
+              builtInTools: [],
+              customTools: [],
+              model: options.model,
+              projectDirectory: options.projectDirectory,
+              sessionId: options.sessionId
+            },
+            dispose: () => undefined,
+            getLastAssistantText: () => "已生成。",
+            prompt: async () => {
+              const generateTool = customTools.find((tool) => tool.name === "generate_image");
+              await generateTool?.execute("call-1", {
+                prompt: "生成咖啡馆内部结构图",
+                referenceImageIds: []
+              });
+            },
+            subscribe: () => () => undefined
+          };
+        },
+        generateImage: async (request) => {
+          generatedRequests.push(request);
+          return { outputPath: "C:\\project\\images\\generated\\img-7.png" };
+        }
+      }
+    );
+
+    expect(generatedRequests).toEqual([
+      {
+        imagePath: "C:\\project\\images\\generated\\placeholder.png",
+        prompt: "生成咖啡馆内部结构图",
+        referenceImagePaths: ["C:\\project\\references\\sakura-cafe.jpg"],
+        sessionId: "img-7"
+      }
+    ]);
   });
 
   test("returns a clear error if Pi finishes without assistant text", async () => {

@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import {
   addSessionUserMessage,
   applySessionImageChoice,
@@ -8,38 +16,103 @@ import {
   applySessionGenerationError,
   getInitialSelectedSessionId,
   getSessionGenerationSourcePath,
+  markSessionEsseTask,
+  markSessionProjectCommand,
   markSessionGenerating,
   removeAllImageSessions,
   removeImageSession,
   toggleSessionListImageSource
 } from "./domain/imageSessions";
-import { getSessionActivityLogs } from "./domain/sessionActivity";
+import {
+  applyWorkerReport,
+  appendProjectManagerAssistantMessage,
+  createEmptyProjectManagerState,
+  createProjectManagerUserMessage,
+  markBatchPlanRunning,
+  setProjectManagerDraftPlan
+} from "./domain/projectManagerState";
+import { getProjectManagerActivityLogs, getSessionActivityLogs } from "./domain/sessionActivity";
+import { selectRecentProjects } from "./domain/recentProjects";
+import { resolveProjectManagerReferenceImages } from "./domain/projectManagerReferences";
+import { createEsseImageRequestPlan } from "./domain/esseImageRequestPlan";
+import {
+  clampSessionPanelWidth,
+  DEFAULT_SESSION_PANEL_WIDTH,
+  readStoredSessionPanelWidth,
+  saveStoredSessionPanelWidth
+} from "./domain/sessionPanelWidth";
 import type { ImageSession, ImageSessionChatMessage } from "./types/image";
 import { AppToolbar } from "./components/AppToolbar";
 import { BatchDialog } from "./components/BatchDialog";
 import { EmptyWorkspace } from "./components/EmptyWorkspace";
-import { ImagePreviewDialog } from "./components/ImagePreviewDialog";
+import { ImagePreviewDialog, type PreviewImage } from "./components/ImagePreviewDialog";
 import { ImageWorkspace } from "./components/ImageWorkspace";
 import { LogPanel } from "./components/LogPanel";
 import { ProjectListDialog } from "./components/ProjectListDialog";
+import { ProjectPlanPanel } from "./components/ProjectPlanPanel";
 import { SessionPanel } from "./components/SessionPanel";
-import type { AppLogEntry, ChatReferenceImage, ProjectListEntry, ProjectMetadata, ProjectSnapshot } from "../electron/ipcTypes";
+import type {
+  AppLogEntry,
+  ChatReferenceImage,
+  EsseAgentHistoryMessage,
+  EsseFileResult,
+  ProjectListEntry,
+  ProjectMetadata,
+  ProjectSnapshot
+} from "../electron/ipcTypes";
+import type {
+  BatchPlan,
+  EsseImageRequest,
+  EssePersona,
+  ProjectManagerMessage,
+  ProjectManagerState,
+  WorkerCommand,
+  WorkerReport
+} from "./types/projectManager";
+import esseTabMascot from "./assets/esse-tab-mascot.png";
 
 const DEFAULT_COLUMNS = 4;
+type SidebarTab = "project" | "image";
+interface EsseDispatchTask {
+  generationMode: "edit" | "generate";
+  instruction: string;
+  referenceImagePaths: string[];
+  sessionId: string;
+  sourceImagePath: string;
+  outputSize?: string;
+}
+
+interface ChatImagePreview {
+  images: PreviewImage[];
+  initialPath: string;
+  title: string;
+}
 
 export function App() {
   const [currentProject, setCurrentProject] = useState<ProjectMetadata | null>(null);
   const [sessions, setSessions] = useState<ImageSession[]>([]);
+  const [projectManagerState, setProjectManagerState] = useState<ProjectManagerState>(() => createEmptyProjectManagerState());
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>("image");
   const [columns, setColumns] = useState(DEFAULT_COLUMNS);
   const [isBatchDialogOpen, setIsBatchDialogOpen] = useState(false);
+  const [isCreatingProjectPlan, setIsCreatingProjectPlan] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isLogPanelOpen, setIsLogPanelOpen] = useState(false);
   const [logs, setLogs] = useState<AppLogEntry[]>([]);
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
+  const [chatImagePreview, setChatImagePreview] = useState<ChatImagePreview | null>(null);
   const [isProjectListOpen, setIsProjectListOpen] = useState(false);
   const [isProjectListLoading, setIsProjectListLoading] = useState(false);
   const [projectListEntries, setProjectListEntries] = useState<ProjectListEntry[]>([]);
+  const [sessionPanelWidth, setSessionPanelWidth] = useState(() =>
+    readStoredSessionPanelWidth(getBrowserStorage(), getViewportWidth())
+  );
+  const [isSessionPanelResizing, setIsSessionPanelResizing] = useState(false);
+  const sessionsRef = useRef(sessions);
+  const projectManagerStateRef = useRef(projectManagerState);
+  const selectedSessionIdRef = useRef(selectedSessionId);
+  const currentProjectRef = useRef(currentProject);
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
@@ -54,6 +127,39 @@ export function App() {
     () => getSessionActivityLogs(logs, selectedSessionId),
     [logs, selectedSessionId]
   );
+  const projectManagerActivityLogs = useMemo(() => getProjectManagerActivityLogs(logs), [logs]);
+  const recentProjects = useMemo(() => selectRecentProjects(projectListEntries), [projectListEntries]);
+  const runningWorkCount = useMemo(
+    () =>
+      sessions.filter((session) => session.status === "generating" || session.status === "queued" || session.chatStatus === "sending").length +
+      projectManagerState.plans.filter((plan) => plan.status === "running").length +
+      (isCreatingProjectPlan ? 1 : 0),
+    [isCreatingProjectPlan, projectManagerState.plans, sessions]
+  );
+
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    projectManagerStateRef.current = projectManagerState;
+  }, [projectManagerState]);
+
+  useEffect(() => {
+    selectedSessionIdRef.current = selectedSessionId;
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    currentProjectRef.current = currentProject;
+  }, [currentProject]);
+
+  useEffect(() => {
+    window.batchImager?.setRunningWorkCount(runningWorkCount);
+
+    return () => {
+      window.batchImager?.setRunningWorkCount(0);
+    };
+  }, [runningWorkCount]);
 
   useEffect(() => {
     let isMounted = true;
@@ -75,8 +181,12 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    void loadRecentProjects();
+  }, []);
+
+  useEffect(() => {
     const unsubscribe = window.batchImager?.subscribeProjectThumbnailUpdates(() => {
-      if (isProjectListOpen) {
+      if (isProjectListOpen || sessions.length === 0) {
         void loadProjectList();
       }
     });
@@ -84,7 +194,7 @@ export function App() {
     return () => {
       unsubscribe?.();
     };
-  }, [isProjectListOpen]);
+  }, [isProjectListOpen, sessions.length]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent): void {
@@ -109,18 +219,44 @@ export function App() {
 
     setCurrentProject(snapshot.project);
     setSessions(nextSessions);
+    setProjectManagerState(snapshot.projectManagerState ?? createEmptyProjectManagerState());
     setSelectedSessionId(nextSelectedSessionId);
+    currentProjectRef.current = snapshot.project;
+    sessionsRef.current = nextSessions;
+    projectManagerStateRef.current = snapshot.projectManagerState ?? createEmptyProjectManagerState();
+    selectedSessionIdRef.current = nextSelectedSessionId;
     setPreviewSessionId(null);
+    setChatImagePreview(null);
     setIsBatchDialogOpen(false);
+    setIsProjectListOpen(false);
   }
 
-  function persistProjectSnapshot(nextSessions: ImageSession[], nextSelectedSessionId: string | null): void {
-    if (!currentProject) {
+  async function ensureProjectForImport(): Promise<ProjectSnapshot | null> {
+    if (currentProject) {
+      return null;
+    }
+
+    const snapshot = await window.batchImager?.createProject();
+    if (snapshot) {
+      applyProjectSnapshot(snapshot);
+      void loadRecentProjects();
+    }
+
+    return snapshot ?? null;
+  }
+
+  function persistProjectSnapshot(
+    nextSessions: ImageSession[],
+    nextSelectedSessionId: string | null,
+    nextProjectManagerState = projectManagerStateRef.current
+  ): void {
+    if (!currentProjectRef.current) {
       return;
     }
 
     void window.batchImager
       ?.saveProjectSnapshot({
+        projectManagerState: nextProjectManagerState,
         selectedSessionId: nextSelectedSessionId,
         sessions: nextSessions
       })
@@ -133,14 +269,15 @@ export function App() {
   }
 
   async function importImagePaths(paths: string[]): Promise<void> {
-    if (!currentProject) {
-      window.alert("请先新建或打开项目。");
+    if (paths.length === 0) {
       return;
     }
 
+    await ensureProjectForImport();
     const snapshot = await window.batchImager?.importImages({ sourcePaths: paths });
     if (snapshot) {
       applyProjectSnapshot(snapshot);
+      void loadRecentProjects();
     }
   }
 
@@ -148,6 +285,7 @@ export function App() {
     const snapshot = await window.batchImager?.createProject();
     if (snapshot) {
       applyProjectSnapshot(snapshot);
+      void loadRecentProjects();
     }
   }
 
@@ -161,6 +299,19 @@ export function App() {
     if (snapshot) {
       applyProjectSnapshot(snapshot);
       setIsProjectListOpen(false);
+      void loadRecentProjects();
+    }
+  }
+
+  async function loadRecentProjects(): Promise<void> {
+    setIsProjectListLoading(true);
+    try {
+      const entries = await window.batchImager?.listProjects();
+      if (entries) {
+        setProjectListEntries(entries);
+      }
+    } finally {
+      setIsProjectListLoading(false);
     }
   }
 
@@ -195,14 +346,11 @@ export function App() {
   }
 
   async function handleSelectImages(): Promise<void> {
-    if (!currentProject) {
-      window.alert("请先新建或打开项目。");
-      return;
-    }
-
+    await ensureProjectForImport();
     const snapshot = await window.batchImager?.importImages({ sourcePaths: [] });
     if (snapshot) {
       applyProjectSnapshot(snapshot);
+      void loadRecentProjects();
     }
   }
 
@@ -216,21 +364,24 @@ export function App() {
 
   function handleBatchGenerate(prompt: string, referenceImagePaths: string[], outputSize?: string): void {
     setIsBatchDialogOpen(false);
+    setActiveSidebarTab("project");
     console.info("[BatchImager UI] Batch generation started", {
       count: sessions.length,
       referenceImageCount: referenceImagePaths.length
     });
-
-    for (const session of sessions) {
-      void generateForSession(session, prompt, referenceImagePaths, outputSize);
-    }
+    void createProjectPlan(prompt, referenceImagePaths, outputSize);
   }
 
-  function handleSendChatMessage(sessionId: string, content: string, outputSize?: string): void {
+  function handleSendChatMessage(
+    sessionId: string,
+    content: string,
+    outputSize?: string,
+    pastedReferenceImagePaths: string[] = []
+  ): void {
     const session = sessions.find((currentSession) => currentSession.id === sessionId);
 
     if (session) {
-      void sendChatMessage(session, content, outputSize);
+      void sendChatMessage(session, content, outputSize, pastedReferenceImagePaths);
     }
   }
 
@@ -243,6 +394,21 @@ export function App() {
     console.info("[BatchImager UI] Image source changed", { imagePath, sessionId });
   }
 
+  function handleOpenChatImagePreview(title: string, images: PreviewImage[], initialPath: string): void {
+    if (images.length === 0) {
+      return;
+    }
+
+    setPreviewSessionId(null);
+    setChatImagePreview({ images, initialPath, title });
+  }
+
+  function copyImageToClipboard(imagePath: string): void {
+    void window.batchImager?.copyImageToClipboard({ imagePath }).catch((error) => {
+      console.error("[BatchImager UI] Image copy failed", error);
+    });
+  }
+
   function deleteSession(sessionId: string): void {
     const result = removeImageSession(sessions, sessionId);
     setSessions(result.sessions);
@@ -252,6 +418,24 @@ export function App() {
     if (previewSessionId === sessionId) {
       setPreviewSessionId(null);
     }
+    setChatImagePreview(null);
+  }
+
+  function handleRetrySession(sessionId: string): void {
+    const session = sessionsRef.current.find((currentSession) => currentSession.id === sessionId);
+    const retryRequest = session ? getSessionRetryRequest(session) : null;
+
+    if (!session || !retryRequest) {
+      return;
+    }
+
+    void generateForSession(
+      session,
+      retryRequest.prompt,
+      retryRequest.referenceImagePaths,
+      undefined,
+      retryRequest.sourceImagePath
+    );
   }
 
   function handleClearSessions(): void {
@@ -264,16 +448,509 @@ export function App() {
     setSelectedSessionId(result.selectedSessionId);
     persistProjectSnapshot(result.sessions, result.selectedSessionId);
     setPreviewSessionId(null);
+    setChatImagePreview(null);
     setIsBatchDialogOpen(false);
+  }
+
+  async function createProjectPlan(prompt: string, referenceImagePaths: string[], outputSize?: string): Promise<void> {
+    const userMessageId = createMessageId("pm-user");
+    const currentSessions = sessionsRef.current;
+    const nextState = createProjectManagerUserMessage(projectManagerStateRef.current, prompt, userMessageId);
+
+    setProjectManagerState(nextState);
+    persistProjectSnapshot(currentSessions, selectedSessionIdRef.current, nextState);
+    setIsCreatingProjectPlan(true);
+
+    try {
+      const result = await window.batchImager?.createProjectManagerPlan({
+        ...(outputSize ? { outputSize } : {}),
+        prompt,
+        ...(referenceImagePaths.length ? { referenceImagePaths } : {}),
+        sessions: currentSessions.map((session) => ({
+          fileName: session.fileName,
+          id: session.id
+        }))
+      });
+
+      if (!result) {
+        throw new Error("当前运行环境不支持 Esse 智能体");
+      }
+
+      const withPlan = setProjectManagerDraftPlan(nextState, result.plan, createMessageId("pm-plan"));
+      setProjectManagerState(withPlan);
+      persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, withPlan);
+    } catch (error) {
+      const errorState = appendProjectManagerError(
+        nextState,
+        error instanceof Error ? error.message : "方案生成失败",
+        createMessageId("pm-error")
+      );
+      setProjectManagerState(errorState);
+      persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, errorState);
+    } finally {
+      setIsCreatingProjectPlan(false);
+    }
+  }
+
+  async function handleSendEsseMessage(
+    content: string,
+    outputSize?: string,
+    referenceImagePaths: string[] = [],
+    persona?: EssePersona
+  ): Promise<void> {
+    await ensureProjectForImport();
+
+    const currentSessions = sessionsRef.current;
+    const userMessageId = createMessageId("esse-user");
+    const resolvedReferences = resolveProjectManagerReferenceImages(
+      projectManagerStateRef.current,
+      content,
+      referenceImagePaths
+    );
+    const nextState = createProjectManagerUserMessage(
+      projectManagerStateRef.current,
+      content,
+      userMessageId,
+      resolvedReferences.referenceImagePaths
+    );
+
+    setActiveSidebarTab("project");
+    setProjectManagerState(nextState);
+    projectManagerStateRef.current = nextState;
+    persistProjectSnapshot(currentSessions, selectedSessionIdRef.current, nextState);
+
+    if (resolvedReferences.errorMessage) {
+      const errorState = appendProjectManagerError(nextState, resolvedReferences.errorMessage, createMessageId("esse-error"));
+      setProjectManagerState(errorState);
+      projectManagerStateRef.current = errorState;
+      persistProjectSnapshot(currentSessions, selectedSessionIdRef.current, errorState);
+      return;
+    }
+
+    setIsCreatingProjectPlan(true);
+
+    try {
+      const history = [
+        ...nextState.conversation.messages
+          .filter(isEsseHistoryMessage)
+          .map((message) => ({ role: message.role, content: message.content })),
+      ];
+      const result = await window.batchImager?.sendEsseMessage({
+        messages: history,
+        ...(outputSize ? { outputSize } : {}),
+        ...(persona ? { persona } : {}),
+        ...(resolvedReferences.referenceImagePaths.length ? { referenceImagePaths: resolvedReferences.referenceImagePaths } : {}),
+        selectedSessionId: selectedSessionIdRef.current,
+        sessions: currentSessions.map((session) => ({
+          currentImagePath: getSessionGenerationSourcePath(session),
+          fileName: session.fileName,
+          ...(session.generatedFilePaths?.length ? { generatedFilePaths: session.generatedFilePaths } : {}),
+          id: session.id
+        }))
+      });
+
+      if (!result) {
+        throw new Error("当前运行环境不支持 Esse 智能体");
+      }
+
+      let updatedState = appendProjectManagerAssistantMessage(
+        nextState,
+        appendEsseFileResultText(result.reply, result.fileResults ?? []),
+        createMessageId("esse-assistant")
+      );
+      if (result.plan) {
+        updatedState = setProjectManagerDraftPlan(updatedState, result.plan, createMessageId("esse-plan"));
+      }
+
+      if (result.imageRequests?.length) {
+        const imageRequestPlan = createEsseImageRequestPlan(result.imageRequests, resolvedReferences.referenceImagePaths);
+        updatedState = setProjectManagerDraftPlan(updatedState, imageRequestPlan, createMessageId("esse-image-plan"));
+      }
+
+      const nextSessions = sessionsRef.current;
+      const nextSelectedSessionId = selectedSessionIdRef.current ?? nextSessions[0]?.id ?? null;
+
+      setProjectManagerState(updatedState);
+      setSessions(nextSessions);
+      setSelectedSessionId(nextSelectedSessionId);
+      projectManagerStateRef.current = updatedState;
+      sessionsRef.current = nextSessions;
+      selectedSessionIdRef.current = nextSelectedSessionId;
+      persistProjectSnapshot(nextSessions, nextSelectedSessionId, updatedState);
+    } catch (error) {
+      const errorState = appendProjectManagerError(
+        nextState,
+        error instanceof Error ? error.message : "Esse 处理失败",
+        createMessageId("esse-error")
+      );
+      setProjectManagerState(errorState);
+      projectManagerStateRef.current = errorState;
+      persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, errorState);
+    } finally {
+      setIsCreatingProjectPlan(false);
+    }
+  }
+
+  function handleExecuteProjectPlan(planId: string): void {
+    const plan = projectManagerStateRef.current.plans.find((currentPlan) => currentPlan.id === planId);
+
+    if (!plan || plan.status === "running") {
+      return;
+    }
+
+    const runningState = markBatchPlanRunning(projectManagerStateRef.current, planId);
+    const newImageCommands = plan.commands.filter((command) => command.target === "new");
+    setProjectManagerState(runningState);
+    persistProjectSnapshot(sessions, selectedSessionId, runningState);
+
+    for (const command of plan.commands) {
+      if (command.target === "new") {
+        continue;
+      }
+
+      void executeProjectCommand(plan, command, runningState);
+    }
+
+    if (newImageCommands.length > 0) {
+      void executeNewImagePlanCommands(plan, newImageCommands, runningState);
+    }
+  }
+
+  async function executeProjectCommand(
+    plan: BatchPlan,
+    command: WorkerCommand,
+    baseProjectManagerState: ProjectManagerState
+  ): Promise<void> {
+    if (command.target === "new") {
+      await executeNewImagePlanCommand(plan, command, baseProjectManagerState);
+      return;
+    }
+
+    const session = sessionsRef.current.find((currentSession) => currentSession.id === command.targetSessionId);
+
+    if (!session) {
+      applyProjectCommandReport(plan.id, makeWorkerReport(command, "failed", undefined, "图片不存在"), baseProjectManagerState);
+      return;
+    }
+
+    const sourcePath = getSessionGenerationSourcePath(session);
+    const referenceImages = getCommandReferenceImages(plan, command);
+    const referenceImagePaths = referenceImages.map((referenceImage) => referenceImage.filePath);
+
+    setSessions((currentSessions) =>
+      updateAndPersistSessions(
+        markSessionProjectCommand(
+          currentSessions,
+          command.targetSessionId,
+          {
+            instruction: command.instruction,
+            referenceFilePaths: referenceImagePaths,
+            sourceFilePath: sourcePath
+          },
+          createMessageId("project-command")
+        ),
+          selectedSessionIdRef.current,
+          baseProjectManagerState
+      )
+    );
+
+    try {
+      const result = await window.batchImager?.sendChatMessage({
+        context: {
+          currentImageLabel: session.generatedFilePath ? "最近生成图" : "初始导入图",
+          fileName: session.fileName,
+          originalImageLabel: "初始导入图",
+          ...(referenceImagePaths.length ? { referenceImageCount: referenceImagePaths.length } : {})
+        },
+        ...(session.generationMode ? { generationMode: session.generationMode } : {}),
+        imagePath: sourcePath,
+        messages: [{ role: "user", content: command.instruction }],
+        ...(command.outputSize ? { outputSize: command.outputSize } : {}),
+        ...(referenceImages.length ? { referenceImages } : {}),
+        sessionId: command.targetSessionId
+      });
+
+      if (!result) {
+        throw new Error("当前运行环境不支持会话");
+      }
+
+      setSessions((currentSessions) =>
+        updateAndPersistSessions(
+          applySessionChatSuccess(
+            currentSessions,
+            result.sessionId,
+            {
+              content: result.assistantMessage,
+              generatedFilePath: result.generatedImagePath
+            },
+            createMessageId("assistant")
+          ),
+          selectedSessionIdRef.current
+        )
+      );
+      applyProjectCommandReport(
+        plan.id,
+        makeWorkerReport(command, "completed", result.generatedImagePath, "已完成生成。"),
+        baseProjectManagerState
+      );
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "未知错误";
+      setSessions((currentSessions) =>
+        updateAndPersistSessions(
+          applySessionChatError(currentSessions, command.targetSessionId, errorMessage, createMessageId("error")),
+          selectedSessionIdRef.current
+        )
+      );
+      applyProjectCommandReport(plan.id, makeWorkerReport(command, "failed", undefined, errorMessage), baseProjectManagerState);
+    }
+  }
+
+  async function executeNewImagePlanCommand(
+    plan: BatchPlan,
+    command: WorkerCommand,
+    baseProjectManagerState: ProjectManagerState
+  ): Promise<void> {
+    await executeNewImagePlanCommands(plan, [command], baseProjectManagerState);
+  }
+
+  async function executeNewImagePlanCommands(
+    plan: BatchPlan,
+    commands: WorkerCommand[],
+    baseProjectManagerState: ProjectManagerState
+  ): Promise<void> {
+    const preparedTasks: Array<{ command: WorkerCommand; task: EsseDispatchTask }> = [];
+    let nextSessions = sessionsRef.current;
+
+    for (const command of commands) {
+      const referenceImages = getCommandReferenceImages(plan, command);
+      const referenceImagePaths = referenceImages.map((referenceImage) => referenceImage.filePath);
+      const imageRequest: EsseImageRequest = {
+        id: command.id,
+        mode: command.generationMode ?? (command.sourceSessionId ? "edit" : "generate"),
+        prompt: command.instruction,
+        ...(command.outputSize ? { size: command.outputSize } : {}),
+        ...(command.sourceSessionId ? { sourceSessionId: command.sourceSessionId } : {}),
+        target: "new"
+      };
+
+      try {
+        const prepared = await prepareEsseImageTasks(nextSessions, [imageRequest], referenceImagePaths);
+        const task = prepared.dispatchTasks[0];
+
+        if (!task) {
+          throw new Error("没有可执行的新图任务");
+        }
+
+        nextSessions = prepared.nextSessions;
+        preparedTasks.push({ command, task });
+      } catch (error) {
+        applyProjectCommandReport(
+          plan.id,
+          makeWorkerReport(command, "failed", undefined, error instanceof Error ? error.message : "未知错误"),
+          baseProjectManagerState
+        );
+      }
+    }
+
+    if (preparedTasks.length === 0) {
+      return;
+    }
+
+    const nextSelectedSessionId = selectedSessionIdRef.current ?? nextSessions[0]?.id ?? null;
+    setSessions(nextSessions);
+    setSelectedSessionId(nextSelectedSessionId);
+    sessionsRef.current = nextSessions;
+    selectedSessionIdRef.current = nextSelectedSessionId;
+    persistProjectSnapshot(nextSessions, nextSelectedSessionId, baseProjectManagerState);
+
+    await Promise.all(
+      preparedTasks.map(async ({ command, task }) => {
+        try {
+          const generatedImagePath = await runEsseImageTask(task);
+          applyProjectCommandReport(
+            plan.id,
+            makeWorkerReport(command, "completed", generatedImagePath, "已完成生成。"),
+            baseProjectManagerState
+          );
+        } catch (error) {
+          applyProjectCommandReport(
+            plan.id,
+            makeWorkerReport(command, "failed", undefined, error instanceof Error ? error.message : "未知错误"),
+            baseProjectManagerState
+          );
+        }
+      })
+    );
+  }
+
+  function applyProjectCommandReport(
+    planId: string,
+    report: WorkerReport,
+    fallbackState: ProjectManagerState = projectManagerStateRef.current
+  ): void {
+    setProjectManagerState((currentState) => {
+      const sourceState = currentState.plans.some((plan) => plan.id === planId) ? currentState : fallbackState;
+      const nextState = applyWorkerReport(sourceState, planId, report);
+      persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
+      return nextState;
+    });
+  }
+
+  async function prepareEsseImageTasks(
+    currentSessions: ImageSession[],
+    imageRequests: EsseImageRequest[],
+    promptReferenceImagePaths: string[] = []
+  ): Promise<{ dispatchTasks: EsseDispatchTask[]; nextSessions: ImageSession[] }> {
+    if (imageRequests.length === 0) {
+      return { dispatchTasks: [], nextSessions: currentSessions };
+    }
+
+    const nextSessions = [...currentSessions];
+    const dispatchTasks: EsseDispatchTask[] = [];
+
+    for (const imageRequest of imageRequests) {
+      const sourceSession = imageRequest.sourceSessionId
+        ? nextSessions.find((session) => session.id === imageRequest.sourceSessionId)
+        : undefined;
+      const sourceImagePath = sourceSession ? getSessionGenerationSourcePath(sourceSession) : "";
+
+      if (imageRequest.target === "existing" && sourceSession) {
+        dispatchTasks.push({
+          generationMode: "edit",
+          instruction: imageRequest.prompt,
+          ...(imageRequest.size ? { outputSize: imageRequest.size } : {}),
+          referenceImagePaths: promptReferenceImagePaths,
+          sessionId: sourceSession.id,
+          sourceImagePath
+        });
+        continue;
+      }
+
+      const placeholderSessionId = createNextImageSessionId(nextSessions);
+      const placeholder = await window.batchImager?.createPlaceholderImage({
+        sessionId: placeholderSessionId,
+        ...(imageRequest.size ? { size: imageRequest.size } : {})
+      });
+
+      if (!placeholder) {
+        throw new Error("当前运行环境不支持创建图片占位");
+      }
+
+      nextSessions.push({
+        chatMessages: [],
+        chatStatus: "idle",
+        fileName: getFileName(placeholder.filePath),
+        filePath: placeholder.filePath,
+        generationMode: imageRequest.mode,
+        id: placeholderSessionId,
+        status: "queued"
+      });
+      dispatchTasks.push({
+        generationMode: imageRequest.mode,
+        instruction: imageRequest.prompt,
+        ...(imageRequest.size ? { outputSize: imageRequest.size } : {}),
+        referenceImagePaths: promptReferenceImagePaths,
+        sessionId: placeholderSessionId,
+        sourceImagePath: imageRequest.mode === "edit" ? sourceImagePath : placeholder.filePath
+      });
+    }
+
+    return { dispatchTasks, nextSessions };
+  }
+
+  async function dispatchEsseImageTask(task: EsseDispatchTask): Promise<void> {
+    await runEsseImageTask(task);
+  }
+
+  async function runEsseImageTask(task: EsseDispatchTask): Promise<string | undefined> {
+    const session = sessionsRef.current.find((currentSession) => currentSession.id === task.sessionId);
+
+    if (!session) {
+      throw new Error("图片不存在");
+    }
+
+    setSessions((currentSessions) =>
+      updateAndPersistSessions(
+        markSessionEsseTask(
+          currentSessions,
+          task.sessionId,
+          {
+            instruction: task.instruction,
+            referenceFilePaths: task.referenceImagePaths,
+            ...(task.generationMode === "edit" ? { sourceFilePath: task.sourceImagePath } : {})
+          },
+          createMessageId("esse-task")
+        ),
+        selectedSessionIdRef.current
+      )
+    );
+
+    try {
+      const result = await window.batchImager?.sendChatMessage({
+        context: {
+          currentImageLabel: task.generationMode === "generate" ? "空白占位图" : "源图片",
+          fileName: session.fileName,
+          originalImageLabel: "初始图"
+        },
+        generationMode: task.generationMode,
+        imagePath: task.sourceImagePath,
+        messages: [{ role: "user", content: task.instruction }],
+        ...(task.outputSize ? { outputSize: task.outputSize } : {}),
+        ...(task.referenceImagePaths.length
+          ? {
+              referenceImages: task.referenceImagePaths.map((filePath, index) => ({
+                filePath,
+                id: `prompt-ref-${index + 1}`,
+                label: `Esse 提示图 ${index + 1}：${getFileName(filePath)}`
+              }))
+            }
+          : {}),
+        sessionId: task.sessionId
+      });
+
+      if (!result) {
+        throw new Error("当前运行环境不支持会话");
+      }
+
+      setSessions((currentSessions) =>
+        updateAndPersistSessions(
+          applySessionChatSuccess(
+            currentSessions,
+            result.sessionId,
+            {
+              content: result.assistantMessage,
+              generatedFilePath: result.generatedImagePath
+            },
+            createMessageId("assistant")
+          ),
+          selectedSessionIdRef.current
+        )
+      );
+      return result.generatedImagePath;
+    } catch (error) {
+      setSessions((currentSessions) =>
+        updateAndPersistSessions(
+          applySessionChatError(
+            currentSessions,
+            task.sessionId,
+            error instanceof Error ? error.message : "未知错误",
+            createMessageId("error")
+          ),
+          selectedSessionIdRef.current
+        )
+      );
+      throw error;
+    }
   }
 
   async function generateForSession(
     session: ImageSession,
     prompt: string,
     referenceImagePaths: string[] = [],
-    outputSize?: string
+    outputSize?: string,
+    sourceImagePath?: string
   ): Promise<void> {
-    const sourcePath = getSessionGenerationSourcePath(session);
+    const sourcePath = sourceImagePath ?? getSessionGenerationSourcePath(session);
     console.info("[BatchImager UI] Image generation requested", { fileName: session.fileName, sessionId: session.id });
 
     setSessions((currentSessions) =>
@@ -314,7 +991,12 @@ export function App() {
     }
   }
 
-  async function sendChatMessage(session: ImageSession, content: string, outputSize?: string): Promise<void> {
+  async function sendChatMessage(
+    session: ImageSession,
+    content: string,
+    outputSize?: string,
+    pastedReferenceImagePaths: string[] = []
+  ): Promise<void> {
     const sourcePath = getSessionGenerationSourcePath(session);
     const userMessageId = createMessageId("user");
     const assistantMessageId = createMessageId("assistant");
@@ -324,11 +1006,14 @@ export function App() {
         .map((message) => ({ role: message.role, content: message.content })),
       { role: "user" as const, content }
     ];
-    const referenceImages = getSessionReferenceImages(session);
+    const referenceImages = getSessionReferenceImages(session, pastedReferenceImagePaths);
     const referenceImagePaths = referenceImages.map((referenceImage) => referenceImage.filePath);
 
     setSessions((currentSessions) =>
-      updateAndPersistSessions(addSessionUserMessage(currentSessions, session.id, content, userMessageId), selectedSessionId)
+      updateAndPersistSessions(
+        addSessionUserMessage(currentSessions, session.id, content, userMessageId, pastedReferenceImagePaths),
+        selectedSessionId
+      )
     );
     console.info("[BatchImager UI] Chat message sent", { sessionId: session.id });
 
@@ -341,6 +1026,7 @@ export function App() {
           ...(session.lastPrompt ? { previousGenerationPrompt: session.lastPrompt } : {}),
           ...(referenceImagePaths.length ? { referenceImageCount: referenceImagePaths.length } : {})
         },
+        ...(session.generationMode ? { generationMode: session.generationMode } : {}),
         imagePath: sourcePath,
         messages: history,
         ...(outputSize ? { outputSize } : {}),
@@ -386,13 +1072,71 @@ export function App() {
     }
   }
 
-  function updateAndPersistSessions(nextSessions: ImageSession[], nextSelectedSessionId: string | null): ImageSession[] {
-    persistProjectSnapshot(nextSessions, nextSelectedSessionId);
+  function updateAndPersistSessions(
+    nextSessions: ImageSession[],
+    nextSelectedSessionId: string | null,
+    nextProjectManagerState = projectManagerStateRef.current
+  ): ImageSession[] {
+    persistProjectSnapshot(nextSessions, nextSelectedSessionId, nextProjectManagerState);
     return nextSessions;
   }
 
+  function persistSessionPanelWidth(width: number): number {
+    const nextWidth = saveStoredSessionPanelWidth(getBrowserStorage(), width, getViewportWidth());
+    setSessionPanelWidth(nextWidth);
+    return nextWidth;
+  }
+
+  function handleSessionPanelResizePointerDown(event: ReactPointerEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsSessionPanelResizing(true);
+
+    const startX = event.clientX;
+    const startWidth = sessionPanelWidth;
+    let latestWidth = startWidth;
+
+    function handlePointerMove(moveEvent: globalThis.PointerEvent): void {
+      latestWidth = clampSessionPanelWidth(startWidth + startX - moveEvent.clientX, getViewportWidth());
+      setSessionPanelWidth(latestWidth);
+    }
+
+    function handlePointerUp(): void {
+      persistSessionPanelWidth(latestWidth);
+      setIsSessionPanelResizing(false);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+  }
+
+  function handleSessionPanelResizeKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
+    const step = event.shiftKey ? 48 : 16;
+
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      persistSessionPanelWidth(sessionPanelWidth + step);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      persistSessionPanelWidth(sessionPanelWidth - step);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      persistSessionPanelWidth(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      persistSessionPanelWidth(Number.POSITIVE_INFINITY);
+    }
+  }
+
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell ${isSessionPanelResizing ? "resizing-session" : ""}`}
+      style={{ "--session-panel-width": `${sessionPanelWidth}px` } as CSSProperties}
+    >
       <AppToolbar
         columns={columns}
         hasProject={Boolean(currentProject)}
@@ -414,8 +1158,14 @@ export function App() {
             <EmptyWorkspace
               hasProject={Boolean(currentProject)}
               isDragging={isDragging}
+              isRecentProjectsLoading={isProjectListLoading}
+              recentProjects={recentProjects}
+              onImport={handleSelectImages}
               onDropFiles={handleDrop}
               onDraggingChange={setIsDragging}
+              onOpenProject={(directory) => {
+                void handleOpenProjectFromList(directory);
+              }}
             />
           ) : (
             <ImageWorkspace
@@ -423,11 +1173,14 @@ export function App() {
               isDragging={isDragging}
               sessions={sessions}
               selectedSessionId={selectedSessionId}
+              onDeleteSession={deleteSession}
               onDropFiles={handleDrop}
               onDraggingChange={setIsDragging}
               onOpenPreview={setPreviewSessionId}
+              onRetrySession={handleRetrySession}
               onSelectSession={(sessionId) => {
                 setSelectedSessionId(sessionId);
+                setActiveSidebarTab("image");
                 persistProjectSnapshot(sessions, sessionId);
               }}
               onToggleImageSource={(sessionId) =>
@@ -439,11 +1192,65 @@ export function App() {
           )}
         </section>
 
-        <SessionPanel
-          activityLogs={selectedSessionActivityLogs}
-          selectedSession={selectedSession}
-          onSendMessage={handleSendChatMessage}
+        <div
+          className="session-resize-handle"
+          role="separator"
+          aria-label="调整会话栏宽度"
+          aria-orientation="vertical"
+          aria-valuenow={sessionPanelWidth}
+          tabIndex={0}
+          onDoubleClick={() => persistSessionPanelWidth(DEFAULT_SESSION_PANEL_WIDTH)}
+          onKeyDown={handleSessionPanelResizeKeyDown}
+          onPointerDown={handleSessionPanelResizePointerDown}
         />
+
+        <aside className="session-panel" aria-label="右侧工作栏">
+          <div className="sidebar-tabs" role="tablist" aria-label="工作对象">
+            <button
+              className={`sidebar-tab-button sidebar-tab-button-esse ${activeSidebarTab === "project" ? "active" : ""}`}
+              role="tab"
+              type="button"
+              aria-selected={activeSidebarTab === "project"}
+              onClick={() => setActiveSidebarTab("project")}
+            >
+              <img className="sidebar-tab-mascot" src={esseTabMascot} alt="" aria-hidden="true" draggable={false} />
+              <span className="sidebar-tab-label">Esse智能体</span>
+              {projectManagerState.plans.some((plan) => plan.status === "running") ? <span className="tab-dot running" /> : null}
+            </button>
+            <button
+              className={`sidebar-tab-button sidebar-tab-button-current ${activeSidebarTab === "image" ? "active" : ""}`}
+              role="tab"
+              type="button"
+              aria-selected={activeSidebarTab === "image"}
+              onClick={() => setActiveSidebarTab("image")}
+            >
+              <span className="sidebar-tab-label">当前图片</span>
+              {selectedSession?.status === "generating" ? <span className="tab-dot running" /> : null}
+              {selectedSession?.status === "failed" ? <span className="tab-dot failed" /> : null}
+            </button>
+          </div>
+          {activeSidebarTab === "project" ? (
+            <ProjectPlanPanel
+              activityLogs={projectManagerActivityLogs}
+              isCreatingPlan={isCreatingProjectPlan}
+              projectManagerState={projectManagerState}
+              onExecutePlan={handleExecuteProjectPlan}
+              onCopyImage={copyImageToClipboard}
+              onOpenImagePreview={handleOpenChatImagePreview}
+              onSendMessage={(content, outputSize, referenceImagePaths, persona) => {
+                void handleSendEsseMessage(content, outputSize, referenceImagePaths, persona);
+              }}
+            />
+          ) : (
+            <SessionPanel
+              activityLogs={selectedSessionActivityLogs}
+              selectedSession={selectedSession}
+              onCopyImage={copyImageToClipboard}
+              onOpenImagePreview={handleOpenChatImagePreview}
+              onSendMessage={handleSendChatMessage}
+            />
+          )}
+        </aside>
       </main>
 
       {isBatchDialogOpen ? (
@@ -466,9 +1273,22 @@ export function App() {
 
       {previewSession ? (
         <ImagePreviewDialog
-          session={previewSession}
+          currentImagePath={getSessionGenerationSourcePath(previewSession)}
+          images={buildSessionPreviewImages(previewSession)}
+          initialPath={getSessionGenerationSourcePath(previewSession)}
+          title={previewSession.fileName}
           onClose={() => setPreviewSessionId(null)}
+          onCopyImage={copyImageToClipboard}
           onUseImage={(imagePath) => handleUsePreviewImage(previewSession.id, imagePath)}
+        />
+      ) : null}
+      {chatImagePreview ? (
+        <ImagePreviewDialog
+          images={chatImagePreview.images}
+          initialPath={chatImagePreview.initialPath}
+          title={chatImagePreview.title}
+          onClose={() => setChatImagePreview(null)}
+          onCopyImage={copyImageToClipboard}
         />
       ) : null}
     </div>
@@ -485,7 +1305,30 @@ function isChatHistoryMessage(
   return message.role === "user" || message.role === "assistant";
 }
 
-function getSessionReferenceImages(session: ImageSession): ChatReferenceImage[] {
+function isEsseHistoryMessage(message: ProjectManagerMessage): message is ProjectManagerMessage & EsseAgentHistoryMessage {
+  return message.role === "user" || message.role === "assistant";
+}
+
+function getSessionRetryRequest(
+  session: ImageSession
+): { prompt: string; referenceImagePaths: string[]; sourceImagePath: string } | null {
+  const prompt = session.lastPrompt?.trim();
+  if (!prompt) {
+    return null;
+  }
+
+  const generationContext = [...session.chatMessages]
+    .reverse()
+    .find((message) => message.contextType === "batch-prompt" || message.contextType === "project-command" || message.contextType === "esse-task");
+
+  return {
+    prompt,
+    referenceImagePaths: generationContext?.referenceFilePaths ?? [],
+    sourceImagePath: generationContext?.sourceFilePath ?? getSessionGenerationSourcePath(session)
+  };
+}
+
+function getSessionReferenceImages(session: ImageSession, pastedReferenceImagePaths: string[] = []): ChatReferenceImage[] {
   const paths = new Set<string>();
 
   for (const message of session.chatMessages) {
@@ -494,11 +1337,101 @@ function getSessionReferenceImages(session: ImageSession): ChatReferenceImage[] 
     }
   }
 
+  for (const pastedReferenceImagePath of pastedReferenceImagePaths) {
+    paths.add(pastedReferenceImagePath);
+  }
+
   return [...paths].map((filePath, index) => ({
     filePath,
     id: `ref-${index + 1}`,
     label: `参考图 ${index + 1}：${getFileName(filePath)}`
   }));
+}
+
+function buildSessionPreviewImages(session: ImageSession): PreviewImage[] {
+  const generatedPaths = session.generatedFilePaths ?? (session.generatedFilePath ? [session.generatedFilePath] : []);
+
+  return [
+    {
+      key: `original-${session.filePath}`,
+      label: "原图",
+      path: session.filePath
+    },
+    ...generatedPaths.map((path, index) => ({
+      key: `generated-${path}`,
+      label: `记录 ${index + 1}`,
+      path
+    }))
+  ];
+}
+
+function getCommandReferenceImages(plan: BatchPlan, command: WorkerCommand): ChatReferenceImage[] {
+  if (!command.referenceImageIds?.length || !plan.referenceImages?.length) {
+    return [];
+  }
+
+  const byId = new Map(plan.referenceImages.map((referenceImage) => [referenceImage.id, referenceImage]));
+
+  return command.referenceImageIds
+    .map((id) => byId.get(id))
+    .filter((referenceImage): referenceImage is NonNullable<typeof referenceImage> => Boolean(referenceImage))
+    .map((referenceImage) => ({
+      filePath: referenceImage.filePath,
+      id: referenceImage.id,
+      label: referenceImage.label
+    }));
+}
+
+function makeWorkerReport(
+  command: WorkerCommand,
+  status: WorkerReport["status"],
+  generatedImagePath: string | undefined,
+  summary: string
+): WorkerReport {
+  return {
+    commandId: command.id,
+    ...(generatedImagePath ? { generatedImagePath } : {}),
+    ...(status === "failed" ? { errorMessage: summary } : {}),
+    status,
+    summary,
+    targetSessionId: command.targetSessionId
+  };
+}
+
+function appendProjectManagerError(state: ProjectManagerState, content: string, messageId: string): ProjectManagerState {
+  return {
+    ...state,
+    conversation: {
+      ...state.conversation,
+      messages: [
+        ...state.conversation.messages,
+        {
+          content,
+          id: messageId,
+          role: "error"
+        }
+      ]
+    }
+  };
+}
+
+function appendEsseFileResultText(reply: string, fileResults: EsseFileResult[]): string {
+  if (fileResults.length === 0) {
+    return reply;
+  }
+
+  return [reply, `已完成 ${fileResults.length} 个文件结果。`].join("\n");
+}
+
+function createNextImageSessionId(sessions: ImageSession[]): string {
+  const used = new Set(sessions.map((session) => session.id));
+  let index = sessions.length + 1;
+
+  while (used.has(`img-${index}`)) {
+    index += 1;
+  }
+
+  return `img-${index}`;
 }
 
 function isEditableEventTarget(target: EventTarget | null): boolean {
@@ -527,4 +1460,16 @@ function formatProjectLabel(createdAt: string): string {
 function getFileName(filePath: string): string {
   const lastSlash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
   return filePath.slice(lastSlash + 1);
+}
+
+function getBrowserStorage(): Pick<Storage, "getItem" | "setItem"> | undefined {
+  try {
+    return window.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+function getViewportWidth(): number {
+  return typeof window === "undefined" ? 1440 : window.innerWidth;
 }

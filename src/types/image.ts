@@ -1,7 +1,7 @@
 export type ImageSessionStatus = "idle" | "queued" | "generating" | "completed" | "needs-review" | "failed";
 export type ImageSessionChatStatus = "idle" | "sending";
 export type ImageSessionChatRole = "user" | "assistant" | "error" | "context";
-export type ImageSessionContextType = "batch-prompt" | "generated-image";
+export type ImageSessionContextType = "batch-prompt" | "generated-image" | "project-command" | "esse-task";
 
 export interface ImageSessionChatMessage {
   contextType?: ImageSessionContextType;
@@ -17,6 +17,7 @@ export interface ImageSession {
   id: string;
   filePath: string;
   fileName: string;
+  generationMode?: "edit" | "generate";
   chatMessages: ImageSessionChatMessage[];
   chatStatus: ImageSessionChatStatus;
   generatedFilePath?: string;

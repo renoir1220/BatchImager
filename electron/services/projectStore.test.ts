@@ -99,6 +99,7 @@ describe("projectStore", () => {
         chatStatus: "idle",
         fileName: "flower.png",
         filePath: path.join(project.project.directory, "images", "original", "img-1-flower.png"),
+        generationMode: "generate",
         generatedFilePath: path.join(project.project.directory, "images", "generated", "out.png"),
         generatedFilePaths: [path.join(project.project.directory, "images", "generated", "out.png")],
         id: "img-1",
@@ -120,6 +121,51 @@ describe("projectStore", () => {
     expect(reopened.sessions).toEqual(sessions);
     expect(reopened.selectedSessionId).toBe("img-1");
     expect(reopened.project.imageCount).toBe(1);
+  });
+
+  test("persists project manager state in project_state json", async () => {
+    const root = await makeTempRoot();
+    const project = await createProject({
+      makeId: () => "project-1",
+      makeNow: () => new Date("2026-05-21T15:00:00.000Z"),
+      projectsDirectory: root
+    });
+    const projectManagerState = {
+      conversation: {
+        currentPlanId: "plan-1",
+        id: "project-manager",
+        messages: [{ content: "做一批白底主图", id: "pm-1", role: "user" as const }]
+      },
+      plans: [
+        {
+          commands: [
+            {
+              constraints: ["保留主体"],
+              id: "cmd-1",
+              instruction: "生成白底图",
+              planId: "plan-1",
+              source: "project-manager" as const,
+              targetSessionId: "img-1"
+            }
+          ],
+          globalInstruction: "统一白底",
+          id: "plan-1",
+          status: "draft" as const,
+          targetSessionIds: ["img-1"],
+          title: "白底主图"
+        }
+      ]
+    };
+
+    await saveProjectSnapshot(project.project.directory, {
+      projectManagerState,
+      selectedSessionId: null,
+      sessions: []
+    });
+
+    await expect(openProject(project.project.directory)).resolves.toMatchObject({
+      projectManagerState
+    });
   });
 
   test("renames a project and keeps the name inside the project database", async () => {

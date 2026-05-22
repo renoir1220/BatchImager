@@ -23,6 +23,15 @@ describe("image display styles", () => {
     expect(cellDeclarations).toContain("align-self: start");
   });
 
+  it("uses a white image workspace surface while keeping thin cell dividers", () => {
+    const workspaceDeclarations = declarationsFor(".image-workspace");
+    const cellDeclarations = declarationsFor(".image-cell");
+
+    expect(workspaceDeclarations).toContain("background: #fff");
+    expect(cellDeclarations).toContain("background: #fff");
+    expect(cellDeclarations).toContain("box-shadow: 1px 0 0 var(--divider), 0 1px 0 var(--divider)");
+  });
+
   it("keeps workspace images at their original ratio inside each cell", () => {
     const declarations = declarationsFor(".image-cell img");
 
@@ -33,11 +42,24 @@ describe("image display styles", () => {
   });
 
   it("keeps the session preview at the image's original ratio", () => {
+    const frameDeclarations = declarationsFor(".session-preview-frame");
     const declarations = declarationsFor(".session-preview");
 
+    expect(frameDeclarations).toContain("height: clamp(");
+    expect(frameDeclarations).toContain("overflow: hidden");
     expect(declarations).toContain("object-fit: contain");
+    expect(declarations).toContain("max-height: 100%");
+    expect(declarations).toContain("width: 100%");
+    expect(declarations).toContain("height: 100%");
     expect(declarations).not.toContain("aspect-ratio:");
     expect(declarations).not.toContain("object-fit: cover");
+  });
+
+  it("keeps chat image attachments transparent instead of painting a preview background", () => {
+    const declarations = declarationsFor(".thread-image");
+
+    expect(declarations).toContain("background: transparent");
+    expect(declarations).not.toContain("background: #e8e8e3");
   });
 
   it("uses a compact fixed project preview grid", () => {

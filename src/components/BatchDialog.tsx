@@ -173,7 +173,7 @@ export function BatchDialog({ imageCount, onClose, onGenerate }: BatchDialogProp
           customValue={customSize}
           disabled={isSavingReference}
           idPrefix="batch"
-          label="分辨率"
+          label="生成比例："
           selectedValue={selectedSize}
           onCustomValueChange={setCustomSize}
           onSelectedValueChange={setSelectedSize}
@@ -184,7 +184,7 @@ export function BatchDialog({ imageCount, onClose, onGenerate }: BatchDialogProp
             取消
           </button>
           <button className="toolbar-button primary" type="button" disabled={!canGenerate} onClick={handleGenerate}>
-            开始生成
+            生成方案
           </button>
         </div>
       </section>

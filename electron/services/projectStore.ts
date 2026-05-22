@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   PersistedImageSession,
   PersistedImageSessionChatMessage,
+  ProjectManagerState,
   ProjectMetadata,
   ProjectSummary,
   ProjectSnapshot
@@ -21,6 +22,7 @@ interface ImportProjectImagesDeps {
 }
 
 interface SaveProjectSnapshotInput {
+  projectManagerState?: ProjectManagerState;
   selectedSessionId?: string | null;
   sessions: PersistedImageSession[];
 }
@@ -37,6 +39,7 @@ interface ImageSessionRow {
   error_message: string | null;
   file_name: string;
   file_path: string;
+  generation_mode: string | null;
   generated_file_path: string | null;
   generated_file_paths_json: string | null;
   id: string;
@@ -182,11 +185,12 @@ export async function saveProjectSnapshot(
             chat_status,
             generated_file_path,
             generated_file_paths_json,
+            generation_mode,
             last_prompt,
             error_message,
             show_original_in_list,
             sort_order
-          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
           session.id,
           session.filePath,
@@ -196,6 +200,7 @@ export async function saveProjectSnapshot(
           session.chatStatus,
           session.generatedFilePath ?? null,
           stringifyOptionalArray(session.generatedFilePaths),
+          session.generationMode ?? null,
           session.lastPrompt ?? null,
           session.errorMessage ?? null,
           session.showOriginalInList ? 1 : 0,
@@ -229,6 +234,7 @@ export async function saveProjectSnapshot(
         });
       });
 
+      setProjectState(db, "projectManagerState", input.projectManagerState ? JSON.stringify(input.projectManagerState) : null);
       setProjectState(db, "selectedSessionId", input.selectedSessionId ?? null);
       touchProject(db, makeNow());
       db.exec("commit");
@@ -312,6 +318,7 @@ function initializeSchema(db: DatabaseSync): void {
       chat_status text not null,
       generated_file_path text,
       generated_file_paths_json text,
+      generation_mode text,
       last_prompt text,
       error_message text,
       show_original_in_list integer not null default 0,
@@ -339,6 +346,7 @@ function initializeSchema(db: DatabaseSync): void {
   `);
 
   ensureProjectsNameColumn(db);
+  ensureImageSessionsGenerationModeColumn(db);
 
   const projectCount = db.prepare("select count(*) as count from projects").get() as { count: number };
   if (projectCount.count === 0) {
@@ -374,6 +382,7 @@ function readProjectSnapshot(db: DatabaseSync, projectDirectory: string): Projec
   );
 
   return {
+    projectManagerState: parseProjectManagerState(getProjectState(db, "projectManagerState")),
     project: readProjectMetadata(db, projectDirectory, sessions.length),
     selectedSessionId: getProjectState(db, "selectedSessionId"),
     sessions
@@ -419,6 +428,7 @@ function mapSessionRow(db: DatabaseSync, row: ImageSessionRow): PersistedImageSe
     errorMessage: row.error_message ?? undefined,
     fileName: row.file_name,
     filePath: row.file_path,
+    generationMode: (row.generation_mode ?? undefined) as PersistedImageSession["generationMode"],
     generatedFilePath: row.generated_file_path ?? undefined,
     generatedFilePaths: parseOptionalArray(row.generated_file_paths_json),
     id: row.id,
@@ -491,6 +501,23 @@ function parseOptionalArray(value: string | null): string[] | undefined {
 
   const parsed = JSON.parse(value);
   return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : undefined;
+}
+
+function ensureImageSessionsGenerationModeColumn(db: DatabaseSync): void {
+  const columns = db.prepare("pragma table_info(image_sessions)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "generation_mode")) {
+    db.exec("alter table image_sessions add column generation_mode text");
+  }
+}
+
+function parseProjectManagerState(value: string | null): ProjectManagerState | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = JSON.parse(value) as ProjectManagerState;
+
+  return parsed && typeof parsed === "object" ? parsed : undefined;
 }
 
 function stringifyOptionalArray(value: string[] | undefined): string | null {

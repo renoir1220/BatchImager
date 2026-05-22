@@ -11,7 +11,9 @@ import {
   getSessionDisplayPath,
   getSessionGenerationSourcePath,
   getInitialSelectedSessionId,
+  markSessionEsseTask,
   markSessionGenerating,
+  markSessionProjectCommand,
   removeImageSession,
   removeAllImageSessions,
   toggleSessionListImageSource
@@ -139,6 +141,43 @@ describe("image sessions", () => {
     ]);
   });
 
+  it("adds a project manager command context before worker generation starts", () => {
+    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG"]);
+
+    expect(
+      markSessionProjectCommand(
+        sessions,
+        "img-1",
+        {
+          instruction: "生成客厅茶几场景鲜花商品图",
+          referenceFilePaths: ["C:/refs/living-room.png"],
+          sourceFilePath: "C:/shots/IMG_0001.JPG"
+        },
+        "project-command-1"
+      )
+    ).toEqual([
+      {
+        chatMessages: [
+          {
+            id: "project-command-1",
+            role: "context",
+            content: "来自 Esse方案：生成客厅茶几场景鲜花商品图\n参考图：1 张",
+            contextType: "project-command",
+            sourceFilePath: "C:/shots/IMG_0001.JPG",
+            referenceFilePaths: ["C:/refs/living-room.png"]
+          }
+        ],
+        chatStatus: "idle",
+        errorMessage: undefined,
+        filePath: "C:/shots/IMG_0001.JPG",
+        fileName: "IMG_0001.JPG",
+        id: "img-1",
+        lastPrompt: "生成客厅茶几场景鲜花商品图",
+        status: "generating"
+      }
+    ]);
+  });
+
   it("freezes the batch input image snapshot even after a new result is generated", () => {
     const sessions = applyGeneratedImageResult(createImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/first.png");
     const generating = markSessionGenerating(
@@ -165,6 +204,27 @@ describe("image sessions", () => {
       generatedFilePath: "C:/generated/second.png"
     });
     expect(getSessionGenerationSourcePath(completed[0])).toBe("C:/generated/second.png");
+  });
+
+  it("keeps Esse prompt reference images when dispatching a task", () => {
+    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG"]);
+    const result = markSessionEsseTask(
+      sessions,
+      "img-1",
+      {
+        instruction: "根据参考图生成内部构造图",
+        referenceFilePaths: ["C:/refs/pasted.png"],
+        sourceFilePath: "C:/shots/IMG_0001.JPG"
+      },
+      "esse-task-1"
+    );
+
+    expect(result[0].chatMessages[0]).toMatchObject({
+      content: "来自 Esse智能体：根据参考图生成内部构造图\n参考图：1 张",
+      contextType: "esse-task",
+      referenceFilePaths: ["C:/refs/pasted.png"],
+      sourceFilePath: "C:/shots/IMG_0001.JPG"
+    });
   });
 
   it("applies generated output path to the matching session", () => {

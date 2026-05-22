@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { AppLogEntry } from "../../electron/ipcTypes";
-import { getSessionActivityLogs } from "./sessionActivity";
+import { getProjectManagerActivityLogs, getSessionActivityLogs } from "./sessionActivity";
 
 describe("session activity", () => {
   test("keeps only current session chat and image progress logs", () => {
@@ -23,6 +23,22 @@ describe("session activity", () => {
     const logs = Array.from({ length: 10 }, (_, index) => entry("chat:img-1", `进度 ${index + 1}`));
 
     expect(getSessionActivityLogs(logs, "img-1", 3).map((log) => log.message)).toEqual(["进度 8", "进度 9", "进度 10"]);
+  });
+
+  test("keeps Esse and project manager progress separate from image sessions", () => {
+    const logs: AppLogEntry[] = [
+      entry("chat:img-1", "图片会话进度"),
+      entry("esse-agent", "收到 Esse 消息。"),
+      entry("project-manager", "正在生成批量方案..."),
+      entry("image:img-1", "图片生成进度"),
+      entry("esse-agent", "Esse 正在思考...")
+    ];
+
+    expect(getProjectManagerActivityLogs(logs)).toEqual([
+      entry("esse-agent", "收到 Esse 消息。"),
+      entry("project-manager", "正在生成批量方案..."),
+      entry("esse-agent", "Esse 正在思考...")
+    ]);
   });
 });
 

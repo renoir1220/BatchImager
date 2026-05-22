@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 interface AppToolbarProps {
   columns: number;
   imageCount: number;
@@ -31,59 +33,157 @@ export function AppToolbar({
     <header className="app-toolbar">
       <div className="window-drag-region" />
 
-      <div className="toolbar-group toolbar-project-actions">
-        <button className="toolbar-button" type="button" onClick={onNewProject}>
-          新建项目
-        </button>
+      <MenuBar>
+        <MenuBarGroup className="toolbar-project-actions">
+          <MenuBarItem onClick={onNewProject}>
+            新项目
+          </MenuBarItem>
+          <ProjectMenuButton projectLabel={projectLabel} onOpenProject={onOpenProject} />
+        </MenuBarGroup>
 
-        <button className="toolbar-button" type="button" onClick={onOpenProject}>
-          打开项目
-        </button>
-      </div>
+        <MenuBarDivider />
 
-      <div className="toolbar-divider" aria-hidden="true" />
+        <MenuBarGroup className="toolbar-main-actions">
+          <MenuBarItem onClick={onImport}>
+            导入图片
+          </MenuBarItem>
 
-      <div className="toolbar-group toolbar-main-actions">
-        <button className="toolbar-button" type="button" disabled={!hasProject} onClick={onImport}>
-          导入
-        </button>
+          <MenuBarItem variant="primary" disabled={!hasProject || imageCount === 0} onClick={onBatchProcess}>
+            批量处理
+          </MenuBarItem>
 
-        <button className="toolbar-button primary" type="button" disabled={!hasProject || imageCount === 0} onClick={onBatchProcess}>
-          批量处理
-        </button>
+          <MoreMenuButton disabled={!hasProject || imageCount === 0} onClear={onClear} />
+        </MenuBarGroup>
 
-        <button className="toolbar-button" type="button" disabled={!hasProject || imageCount === 0} onClick={onClear}>
-          清空
-        </button>
-      </div>
+        <MenuBarDivider />
 
-      <div className="toolbar-divider" aria-hidden="true" />
-
-      <div className="toolbar-group toolbar-view-actions">
-        <label className="column-control">
-          <span>列数</span>
-          <select value={columns} onChange={(event) => onColumnsChange(Number(event.target.value))}>
-            {[2, 3, 4, 5, 6].map((value) => (
-              <option key={value} value={value}>
-                {value}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+        <MenuBarGroup className="toolbar-view-actions">
+          <ToolbarSegmentedControl label="列数" value={columns} values={[2, 3, 4, 5, 6]} onChange={onColumnsChange} />
+        </MenuBarGroup>
+      </MenuBar>
 
       <div className="toolbar-spacer" />
 
-      <div className="toolbar-group toolbar-status-actions">
+      <MenuBar ariaLabel="状态操作">
+        <MenuBarGroup className="toolbar-status-actions">
         {onOpenLogs ? (
-          <button className="toolbar-button" type="button" onClick={onOpenLogs}>
+          <MenuBarItem onClick={onOpenLogs}>
             日志{logCount > 0 ? ` ${logCount}` : ""}
-          </button>
+          </MenuBarItem>
         ) : null}
 
         <span className="toolbar-count">{imageCount > 0 ? `${imageCount} 张图片` : "等待导入"}</span>
-        <span className="toolbar-project-label">{projectLabel ?? "未打开项目"}</span>
-      </div>
+        </MenuBarGroup>
+      </MenuBar>
     </header>
+  );
+}
+
+interface MenuBarProps {
+  ariaLabel?: string;
+  children: ReactNode;
+}
+
+function MenuBar({ ariaLabel = "应用菜单栏", children }: MenuBarProps) {
+  return (
+    <nav className="toolbar-menu-bar" aria-label={ariaLabel}>
+      {children}
+    </nav>
+  );
+}
+
+interface MenuBarGroupProps {
+  children: ReactNode;
+  className?: string;
+}
+
+function MenuBarGroup({ children, className = "" }: MenuBarGroupProps) {
+  return <div className={`toolbar-group ${className}`.trim()}>{children}</div>;
+}
+
+function MenuBarDivider() {
+  return <div className="toolbar-divider" aria-hidden="true" />;
+}
+
+interface ProjectMenuButtonProps {
+  onOpenProject: () => void;
+  projectLabel?: string;
+}
+
+function ProjectMenuButton({ onOpenProject, projectLabel }: ProjectMenuButtonProps) {
+  return (
+    <details className="toolbar-menu-button project-menu-button">
+      <summary className="toolbar-button toolbar-project-label">
+        <span>{projectLabel ?? "未打开项目"}</span>
+      </summary>
+      <div className="toolbar-popover" role="menu">
+        <button type="button" role="menuitem" onClick={onOpenProject}>
+          打开项目
+        </button>
+      </div>
+    </details>
+  );
+}
+
+interface MenuBarItemProps {
+  children: ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+  variant?: "default" | "primary";
+}
+
+function MenuBarItem({ children, disabled = false, onClick, variant = "default" }: MenuBarItemProps) {
+  return (
+    <button className={`toolbar-button ${variant === "primary" ? "primary" : ""}`.trim()} type="button" disabled={disabled} onClick={onClick}>
+      {children}
+    </button>
+  );
+}
+
+interface MoreMenuButtonProps {
+  disabled: boolean;
+  onClear: () => void;
+}
+
+function MoreMenuButton({ disabled, onClear }: MoreMenuButtonProps) {
+  return (
+    <details className="toolbar-menu-button more-menu-button">
+      <summary className="toolbar-button icon-like" aria-label="更多操作">
+        更多
+      </summary>
+      <div className="toolbar-popover align-end" role="menu">
+        <button type="button" role="menuitem" disabled={disabled} onClick={onClear}>
+          清空当前图片
+        </button>
+      </div>
+    </details>
+  );
+}
+
+interface ToolbarSegmentedControlProps {
+  label: string;
+  onChange: (value: number) => void;
+  value: number;
+  values: number[];
+}
+
+function ToolbarSegmentedControl({ label, onChange, value, values }: ToolbarSegmentedControlProps) {
+  return (
+    <div className="toolbar-segmented-control" role="group" aria-label={label}>
+      <span>{label}</span>
+      <div className="toolbar-segmented-options">
+        {values.map((item) => (
+          <button
+            type="button"
+            className={item === value ? "selected" : ""}
+            key={item}
+            aria-pressed={item === value}
+            onClick={() => onChange(item)}
+          >
+            {item}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }

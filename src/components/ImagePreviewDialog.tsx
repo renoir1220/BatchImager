@@ -1,39 +1,48 @@
-import { PointerEvent, useEffect, useMemo, useState, WheelEvent } from "react";
-import { getSessionGenerationSourcePath } from "../domain/imageSessions";
+import { PointerEvent, useEffect, useState, WheelEvent } from "react";
 import {
   INITIAL_PREVIEW_TRANSFORM,
   panPreviewTransform,
   zoomPreviewTransform
 } from "../domain/imagePreviewTransform";
-import type { ImageSession } from "../types/image";
 
-interface ImagePreviewDialogProps {
-  session: ImageSession;
-  onClose: () => void;
-  onUseImage: (imagePath: string) => void;
-}
-
-interface PreviewImage {
-  kind: "original" | "generated";
+export interface PreviewImage {
+  key?: string;
   label: string;
   path: string;
 }
 
-export function ImagePreviewDialog({ session, onClose, onUseImage }: ImagePreviewDialogProps) {
-  const previewImages = useMemo(() => buildPreviewImages(session), [session]);
-  const currentImagePath = getSessionGenerationSourcePath(session);
-  const [selectedPath, setSelectedPath] = useState(currentImagePath);
+interface ImagePreviewDialogProps {
+  currentImagePath?: string;
+  images: PreviewImage[];
+  initialPath?: string;
+  title: string;
+  onClose: () => void;
+  onCopyImage?: (imagePath: string) => void;
+  onUseImage?: (imagePath: string) => void;
+}
+
+export function ImagePreviewDialog({
+  currentImagePath,
+  images,
+  initialPath,
+  title,
+  onClose,
+  onCopyImage,
+  onUseImage
+}: ImagePreviewDialogProps) {
+  const [selectedPath, setSelectedPath] = useState(initialPath ?? images[0]?.path ?? "");
   const [transform, setTransform] = useState(INITIAL_PREVIEW_TRANSFORM);
   const [dragPointerId, setDragPointerId] = useState<number | null>(null);
-  const selectedImage = previewImages.find((image) => image.path === selectedPath) ?? previewImages[0];
-  const selectedUrl = window.batchImager?.getImageUrl(selectedImage.path) ?? selectedImage.path;
-  const isUsingSelected = selectedImage.path === currentImagePath;
+  const selectedImage = images.find((image) => image.path === selectedPath) ?? images[0];
+  const selectedUrl = selectedImage ? window.batchImager?.getImageUrl(selectedImage.path) ?? selectedImage.path : "";
+  const canUseImage = Boolean(onUseImage);
+  const isUsingSelected = selectedImage ? selectedImage.path === currentImagePath : false;
 
   useEffect(() => {
-    if (!previewImages.some((image) => image.path === selectedPath)) {
-      setSelectedPath(currentImagePath);
+    if (!images.some((image) => image.path === selectedPath)) {
+      setSelectedPath(initialPath ?? images[0]?.path ?? "");
     }
-  }, [currentImagePath, previewImages, selectedPath]);
+  }, [images, initialPath, selectedPath]);
 
   useEffect(() => {
     setTransform(INITIAL_PREVIEW_TRANSFORM);
@@ -68,6 +77,16 @@ export function ImagePreviewDialog({ session, onClose, onUseImage }: ImagePrevie
     }
   }
 
+  function handleCopySelectedImage(): void {
+    if (selectedImage) {
+      onCopyImage?.(selectedImage.path);
+    }
+  }
+
+  if (!selectedImage) {
+    return null;
+  }
+
   return (
     <div className="modal-backdrop preview-backdrop" role="presentation" onMouseDown={onClose}>
       <section
@@ -79,7 +98,7 @@ export function ImagePreviewDialog({ session, onClose, onUseImage }: ImagePrevie
       >
         <header className="preview-header">
           <div>
-            <h2>{session.fileName}</h2>
+            <h2>{title}</h2>
             <span>{selectedImage.label}</span>
           </div>
           <button className="icon-button" type="button" aria-label="关闭" onClick={onClose}>
@@ -89,6 +108,10 @@ export function ImagePreviewDialog({ session, onClose, onUseImage }: ImagePrevie
 
         <div
           className={`preview-stage ${dragPointerId === null ? "" : "dragging"}`}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            handleCopySelectedImage();
+          }}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={stopDragging}
@@ -97,7 +120,7 @@ export function ImagePreviewDialog({ session, onClose, onUseImage }: ImagePrevie
         >
           <img
             src={selectedUrl}
-            alt={`${session.fileName} ${selectedImage.label}`}
+            alt={`${title} ${selectedImage.label}`}
             draggable={false}
             style={{
               transform: `translate(${transform.offsetX}px, ${transform.offsetY}px) scale(${transform.scale})`
@@ -106,18 +129,22 @@ export function ImagePreviewDialog({ session, onClose, onUseImage }: ImagePrevie
         </div>
 
         <div className="preview-footer">
-          <div className="preview-strip" aria-label="历史图片">
-            {previewImages.map((image) => {
+          <div className="preview-strip" aria-label="图片列表">
+            {images.map((image) => {
               const imageUrl = window.batchImager?.getImageUrl(image.path) ?? image.path;
               const isSelected = image.path === selectedImage.path;
 
               return (
                 <button
                   className={`preview-thumb ${isSelected ? "selected" : ""}`}
-                  key={`${image.kind}-${image.path}`}
+                  key={image.key ?? image.path}
                   type="button"
                   onClick={() => {
                     setSelectedPath(image.path);
+                  }}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    onCopyImage?.(image.path);
                   }}
                   title={image.label}
                 >
@@ -128,36 +155,25 @@ export function ImagePreviewDialog({ session, onClose, onUseImage }: ImagePrevie
             })}
           </div>
 
-          <button
-            className="toolbar-button primary preview-use-button"
-            type="button"
-            disabled={isUsingSelected}
-            onClick={() => {
-              onUseImage(selectedImage.path);
-              onClose();
-            }}
-          >
-            {isUsingSelected ? "正在使用" : "使用此图"}
-          </button>
+          {canUseImage ? (
+            <button
+              className="toolbar-button primary preview-use-button"
+              type="button"
+              disabled={isUsingSelected}
+              onClick={() => {
+                onUseImage?.(selectedImage.path);
+                onClose();
+              }}
+            >
+              {isUsingSelected ? "正在使用" : "使用此图"}
+            </button>
+          ) : (
+            <button className="toolbar-button preview-use-button" type="button" onClick={handleCopySelectedImage}>
+              复制图片
+            </button>
+          )}
         </div>
       </section>
     </div>
   );
-}
-
-function buildPreviewImages(session: ImageSession): PreviewImage[] {
-  const generatedPaths = session.generatedFilePaths ?? (session.generatedFilePath ? [session.generatedFilePath] : []);
-
-  return [
-    {
-      kind: "original",
-      label: "原图",
-      path: session.filePath
-    },
-    ...generatedPaths.map((path, index) => ({
-      kind: "generated" as const,
-      label: `记录 ${index + 1}`,
-      path
-    }))
-  ];
 }

@@ -139,4 +139,52 @@ describe("piAgentRuntime", () => {
     expect(runtime.subscribe(() => undefined)).toBe(unsubscribe);
     expect(runtime.getLastAssistantText()).toBe("done");
   });
+
+  test("reads the last assistant text from SDK session messages when no helper exists", async () => {
+    const runtime = await import("./piAgentRuntime").then(({ createPiAgentRuntime }) =>
+      createPiAgentRuntime({
+        llmConfig: {
+          apiKey: "test-key",
+          baseUrl: "https://api.tu-zi.com/coding",
+          chatAgent: "pi",
+          model: "gpt-5.5"
+        },
+        model: "gpt-5.5",
+        projectDirectory: "C:\\BatchImagerProjects\\project-1",
+        sdk: {
+          AuthStorage: {
+            create: () => ({})
+          },
+          ModelRegistry: {
+            create: () => {
+              const models = new Map<string, unknown>();
+              return {
+                find: (_provider, modelId) => models.get(modelId),
+                registerProvider: (_providerName, config) => {
+                  const providerModels = config.models as Array<{ id: string }>;
+                  for (const model of providerModels) {
+                    models.set(model.id, model);
+                  }
+                }
+              };
+            }
+          },
+          createAgentSession: async () => ({
+            session: {
+              dispose: () => undefined,
+              messages: [
+                { content: [{ text: "用户要求", type: "text" }], role: "user" },
+                { content: [{ text: "{\"reply\":\"我会重新生成。\"}", type: "text" }], role: "assistant" }
+              ],
+              prompt: async () => undefined,
+              subscribe: () => () => undefined
+            }
+          })
+        },
+        sessionId: "esse-agent"
+      })
+    );
+
+    expect(runtime.getLastAssistantText()).toBe("{\"reply\":\"我会重新生成。\"}");
+  });
 });

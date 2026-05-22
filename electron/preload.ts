@@ -1,6 +1,12 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppLogEntry,
+  CopyImageToClipboardRequest,
+  CopyImageToClipboardResponse,
+  CreatePlaceholderImageRequest,
+  CreatePlaceholderImageResponse,
+  CreateProjectManagerPlanRequest,
+  CreateProjectManagerPlanResponse,
   GenerateImageRequest,
   GenerateImageResponse,
   ImportProjectImagesRequest,
@@ -12,7 +18,9 @@ import type {
   SaveReferenceImageResponse,
   SaveProjectSnapshotRequest,
   SendChatMessageRequest,
-  SendChatMessageResponse
+  SendChatMessageResponse,
+  SendEsseMessageRequest,
+  SendEsseMessageResponse
 } from "./ipcTypes";
 
 const IMAGE_PROTOCOL = "batchimager-file";
@@ -29,11 +37,22 @@ const api = {
     ipcRenderer.invoke("project:save-snapshot", request),
   generateImage: async (request: GenerateImageRequest): Promise<GenerateImageResponse> =>
     ipcRenderer.invoke("generation:generate-image", request),
+  createPlaceholderImage: async (request: CreatePlaceholderImageRequest): Promise<CreatePlaceholderImageResponse> =>
+    ipcRenderer.invoke("images:create-placeholder", request),
+  createProjectManagerPlan: async (request: CreateProjectManagerPlanRequest): Promise<CreateProjectManagerPlanResponse> =>
+    ipcRenderer.invoke("project-manager:create-plan", request),
   saveReferenceImage: async (request: SaveReferenceImageRequest): Promise<SaveReferenceImageResponse> =>
     ipcRenderer.invoke("images:save-reference", request),
+  copyImageToClipboard: async (request: CopyImageToClipboardRequest): Promise<CopyImageToClipboardResponse> =>
+    ipcRenderer.invoke("images:copy-to-clipboard", request),
   sendChatMessage: async (request: SendChatMessageRequest): Promise<SendChatMessageResponse> =>
     ipcRenderer.invoke("chat:send-message", request),
+  sendEsseMessage: async (request: SendEsseMessageRequest): Promise<SendEsseMessageResponse> =>
+    ipcRenderer.invoke("esse:send-message", request),
   getLogs: async (): Promise<AppLogEntry[]> => ipcRenderer.invoke("logs:list"),
+  setRunningWorkCount: (count: number): void => {
+    ipcRenderer.send("app:set-running-work-count", count);
+  },
   subscribeLogs: (listener: (entry: AppLogEntry) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, entry: AppLogEntry) => listener(entry);
     ipcRenderer.on("logs:entry", handler);

@@ -147,13 +147,9 @@ function createGenerateImageTool(options: {
         content: [
           {
             type: "text",
-            text: `图片生成完成：${generated.outputPath}${generated.remoteUrl ? `\nremoteUrl: ${generated.remoteUrl}` : ""}`
+            text: "图片生成完成，已更新当前图片。"
           }
-        ],
-        details: {
-          outputPath: generated.outputPath,
-          remoteUrl: generated.remoteUrl
-        }
+        ]
       };
     }
   };
@@ -187,6 +183,7 @@ function buildPiPrompt(
     "需要生成或修改图片时，必须调用 generate_image；不要假装已经生成图片。",
     "当前图片会自动作为 generate_image 的 imagePath 输入，用户不需要重新上传。",
     "回复要自然：先简短说明你准备做什么；工具完成后，总结结果。",
+    "图片生成完成后，不要在回复中展示本地路径、远端 URL 或下载链接。",
     "不要展示隐藏推理链，只展示用户能理解的计划、进度和结果。",
     `当前图片路径：${input.imagePath}`,
     ...(input.context?.fileName ? [`初始图片文件名：${input.context.fileName}`] : []),
@@ -237,8 +234,8 @@ function getReferenceImageCandidates(input: ImageToolChatInput): ReferenceImageC
 }
 
 function selectReferenceImagePaths(value: unknown, referenceImages: ReferenceImageCandidate[]): string[] {
-  if (!Array.isArray(value)) {
-    return [];
+  if (!Array.isArray(value) || value.length === 0) {
+    return referenceImages.map((referenceImage) => referenceImage.filePath);
   }
 
   const byId = new Map(referenceImages.map((referenceImage) => [referenceImage.id, referenceImage.filePath]));

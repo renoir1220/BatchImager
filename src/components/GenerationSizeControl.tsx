@@ -1,4 +1,4 @@
-import { GENERATION_SIZE_OPTIONS, normalizeGenerationSizeValue } from "../../electron/generationSizes";
+import { normalizeGenerationSizeValue } from "../../electron/generationSizes";
 
 interface GenerationSizeControlProps {
   customValue: string;
@@ -10,58 +10,48 @@ interface GenerationSizeControlProps {
   onSelectedValueChange: (value: string) => void;
 }
 
-export const CUSTOM_GENERATION_SIZE_VALUE = "__custom__";
+const VISUAL_4K_SIZE_OPTIONS = [
+  { ariaLabel: "选择 4K 横向比例 16 比 9", shapeClass: "ratio-icon-landscape", value: "3840x2160" },
+  { ariaLabel: "选择 4K 竖向比例 9 比 16", shapeClass: "ratio-icon-portrait", value: "2160x3840" }
+] as const;
 
 export function GenerationSizeControl({
-  customValue,
   disabled,
   idPrefix,
   label,
   selectedValue,
-  onCustomValueChange,
+  onCustomValueChange: _onCustomValueChange,
   onSelectedValueChange
 }: GenerationSizeControlProps) {
-  const customId = `${idPrefix}-custom-size`;
-  const isCustom = selectedValue === CUSTOM_GENERATION_SIZE_VALUE;
-  const customSize = normalizeGenerationSizeValue(customValue);
-
   return (
-    <div className={`generation-size-control ${isCustom ? "custom" : ""}`}>
-      <label className="generation-size-select">
-        <span>{label}</span>
-        <select value={selectedValue} disabled={disabled} onChange={(event) => onSelectedValueChange(event.target.value)}>
-          <option value="">原图尺寸</option>
-          {GENERATION_SIZE_OPTIONS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-          <option value={CUSTOM_GENERATION_SIZE_VALUE}>自定义</option>
-        </select>
-      </label>
-      {isCustom ? (
-        <input
-          id={customId}
-          className="generation-size-custom"
-          value={customValue}
-          disabled={disabled}
-          placeholder="宽x高，如 3000x2000"
-          aria-label="自定义分辨率"
-          onChange={(event) => onCustomValueChange(event.target.value)}
-        />
-      ) : null}
-      {isCustom && customValue.trim() && !customSize ? <span className="generation-size-error">格式应为 宽x高</span> : null}
+    <div className="generation-size-control" aria-label={label}>
+      <span className="generation-size-label">{label}</span>
+      <div className="generation-size-tiles">
+        {VISUAL_4K_SIZE_OPTIONS.map((option) => {
+          const isSelected = selectedValue === option.value;
+
+          return (
+            <button
+              aria-label={option.ariaLabel}
+              aria-pressed={isSelected}
+              className={`generation-size-tile ${isSelected ? "selected" : ""}`}
+              disabled={disabled}
+              key={option.value}
+              type="button"
+              onClick={() => onSelectedValueChange(isSelected ? "" : option.value)}
+            >
+              <span className={`ratio-icon ${option.shapeClass}`} aria-hidden="true" />
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-export function resolveGenerationSizeSelection(selectedValue: string, customValue: string): string | undefined {
+export function resolveGenerationSizeSelection(selectedValue: string, _customValue: string): string | undefined {
   if (!selectedValue) {
     return undefined;
-  }
-
-  if (selectedValue === CUSTOM_GENERATION_SIZE_VALUE) {
-    return normalizeGenerationSizeValue(customValue);
   }
 
   return normalizeGenerationSizeValue(selectedValue);

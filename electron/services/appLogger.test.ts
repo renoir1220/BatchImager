@@ -1,7 +1,11 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { createAppLogger, type AppLogEntry } from "./appLogger";
 
 describe("appLogger", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   test("stores public log entries and broadcasts them to subscribers", () => {
     const emitted: AppLogEntry[] = [];
     const writtenLines: string[] = [];
@@ -43,5 +47,49 @@ describe("appLogger", () => {
     logger.info("three", { publicMessage: "第三条" });
 
     expect(logger.getEntries().map((entry) => entry.message)).toEqual(["第二条", "第三条"]);
+  });
+
+  test("does not throw when console or backend log streams are closed", () => {
+    vi.spyOn(console, "info").mockImplementation(() => {
+      const error = new Error("EPIPE: broken pipe, write") as Error & { code: string };
+      error.code = "EPIPE";
+      throw error;
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {
+      const error = new Error("EPIPE: broken pipe, write") as Error & { code: string };
+      error.code = "EPIPE";
+      throw error;
+    });
+    const logger = createAppLogger({
+      now: () => new Date("2026-05-21T14:00:00.000Z"),
+      writeLine: async () => {
+        const error = new Error("EPIPE: broken pipe, write") as Error & { code: string };
+        error.code = "EPIPE";
+        throw error;
+      }
+    });
+
+    expect(() => logger.info("stream closed", { publicMessage: "仍然记录到前端日志" })).not.toThrow();
+    expect(logger.getEntries().map((entry) => entry.message)).toEqual(["仍然记录到前端日志"]);
+  });
+
+  test("serializes nested error causes for backend diagnostics", async () => {
+    const writtenLines: string[] = [];
+    const cause = new Error("Client network socket disconnected before secure TLS connection was established");
+    const error = new Error("fetch failed", { cause });
+    const logger = createAppLogger({
+      now: () => new Date("2026-05-21T14:00:00.000Z"),
+      writeLine: async (line) => {
+        writtenLines.push(line);
+      }
+    });
+
+    logger.error("request failed", { error });
+    await Promise.resolve();
+
+    expect(JSON.parse(writtenLines[0] ?? "{}").error).toMatchObject({
+      cause: { message: "Client network socket disconnected before secure TLS connection was established" },
+      message: "fetch failed"
+    });
   });
 });

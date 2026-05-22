@@ -83,6 +83,70 @@ export function markSessionGenerating(
   );
 }
 
+export function markSessionProjectCommand(
+  sessions: ImageSession[],
+  sessionId: string,
+  command: { instruction: string; referenceFilePaths?: string[]; sourceFilePath?: string },
+  contextMessageId: string
+): ImageSession[] {
+  const referenceFilePaths = command.referenceFilePaths ?? [];
+  const referenceCount = referenceFilePaths.length;
+
+  return sessions.map((session) =>
+    session.id === sessionId
+      ? {
+          ...session,
+          chatMessages: [
+            ...session.chatMessages,
+            {
+              id: contextMessageId,
+              role: "context" as const,
+              content: `来自 Esse方案：${command.instruction}${referenceCount > 0 ? `\n参考图：${referenceCount} 张` : ""}`,
+              contextType: "project-command" as const,
+              ...(command.sourceFilePath ? { sourceFilePath: command.sourceFilePath } : {}),
+              ...(referenceCount > 0 ? { referenceFilePaths } : {})
+            }
+          ],
+          errorMessage: undefined,
+          lastPrompt: command.instruction,
+          status: "generating" as const
+        }
+      : session
+  );
+}
+
+export function markSessionEsseTask(
+  sessions: ImageSession[],
+  sessionId: string,
+  task: { instruction: string; referenceFilePaths?: string[]; sourceFilePath?: string },
+  contextMessageId: string
+): ImageSession[] {
+  const referenceFilePaths = task.referenceFilePaths ?? [];
+  const referenceCount = referenceFilePaths.length;
+
+  return sessions.map((session) =>
+    session.id === sessionId
+      ? {
+          ...session,
+          chatMessages: [
+            ...session.chatMessages,
+            {
+              id: contextMessageId,
+              role: "context" as const,
+              content: `来自 Esse智能体：${task.instruction}${referenceCount > 0 ? `\n参考图：${referenceCount} 张` : ""}`,
+              contextType: "esse-task" as const,
+              ...(referenceCount > 0 ? { referenceFilePaths } : {}),
+              ...(task.sourceFilePath ? { sourceFilePath: task.sourceFilePath } : {})
+            }
+          ],
+          errorMessage: undefined,
+          lastPrompt: task.instruction,
+          status: "generating" as const
+        }
+      : session
+  );
+}
+
 export function applyGeneratedImageResult(
   sessions: ImageSession[],
   sessionId: string,
@@ -202,13 +266,22 @@ export function addSessionUserMessage(
   sessions: ImageSession[],
   sessionId: string,
   content: string,
-  messageId: string
+  messageId: string,
+  referenceFilePaths: string[] = []
 ): ImageSession[] {
   return sessions.map((session) =>
     session.id === sessionId
       ? {
           ...session,
-          chatMessages: [...session.chatMessages, { id: messageId, role: "user", content }],
+          chatMessages: [
+            ...session.chatMessages,
+            {
+              id: messageId,
+              role: "user",
+              content,
+              ...(referenceFilePaths.length ? { referenceFilePaths } : {})
+            }
+          ],
           chatStatus: "sending",
           errorMessage: undefined
         }

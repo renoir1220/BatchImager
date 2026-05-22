@@ -92,7 +92,7 @@ export function createAppLogger(options: AppLoggerOptions): AppLogger {
 
 function writeBackendLine(writeLine: (line: string) => Promise<void>, line: string): void {
   void writeLine(line).catch((error) => {
-    console.error("[BatchImager] Failed to write log file", error);
+    safeConsoleWrite("error", "[BatchImager] Failed to write log file", error);
   });
 }
 
@@ -100,12 +100,31 @@ function writeConsole(level: AppLogLevel, entry: Record<string, unknown>): void 
   const args = ["[BatchImager]", entry];
 
   if (level === "error") {
-    console.error(...args);
+    safeConsoleWrite("error", ...args);
   } else if (level === "warn") {
-    console.warn(...args);
+    safeConsoleWrite("warn", ...args);
   } else {
-    console.info(...args);
+    safeConsoleWrite("info", ...args);
   }
+}
+
+function safeConsoleWrite(level: "error" | "info" | "warn", ...args: unknown[]): void {
+  try {
+    console[level](...args);
+  } catch (error) {
+    if (!isBrokenPipeError(error)) {
+      throw error;
+    }
+  }
+}
+
+function isBrokenPipeError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code: unknown }).code === "EPIPE"
+  );
 }
 
 function serializeError(error: unknown): Record<string, unknown> | undefined {
@@ -114,7 +133,10 @@ function serializeError(error: unknown): Record<string, unknown> | undefined {
   }
 
   if (error instanceof Error) {
+    const cause = "cause" in error ? serializeError(error.cause) : undefined;
+
     return {
+      ...(cause ? { cause } : {}),
       message: error.message,
       name: error.name,
       stack: error.stack

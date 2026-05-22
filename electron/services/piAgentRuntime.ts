@@ -18,7 +18,13 @@ export interface PiCodingAgentSdk {
   createAgentSession: (options?: Record<string, unknown>) => Promise<{
     session: {
       dispose?: () => void;
+      agent?: {
+        state?: {
+          messages?: unknown[];
+        };
+      };
       getLastAssistantText?: () => string | undefined;
+      messages?: unknown[];
       prompt: (text: string, options?: Record<string, unknown>) => Promise<void>;
       subscribe: (listener: (event: unknown) => void) => () => void;
     };
@@ -126,10 +132,68 @@ export async function createPiAgentRuntime(options: CreatePiAgentRuntimeOptions)
   return {
     descriptor,
     dispose: () => session.dispose?.(),
-    getLastAssistantText: () => session.getLastAssistantText?.(),
+    getLastAssistantText: () => getLastAssistantText(session),
     prompt: (text) => session.prompt(text),
     subscribe: (listener) => session.subscribe(listener)
   };
+}
+
+function getLastAssistantText(session: {
+  agent?: { state?: { messages?: unknown[] } };
+  getLastAssistantText?: () => string | undefined;
+  messages?: unknown[];
+}): string | undefined {
+  const directText = session.getLastAssistantText?.();
+
+  if (isNonEmptyString(directText)) {
+    return directText;
+  }
+
+  return extractLastAssistantText(session.messages) ?? extractLastAssistantText(session.agent?.state?.messages);
+}
+
+function extractLastAssistantText(messages: unknown[] | undefined): string | undefined {
+  if (!Array.isArray(messages)) {
+    return undefined;
+  }
+
+  for (const message of [...messages].reverse()) {
+    if (!isAssistantMessage(message)) {
+      continue;
+    }
+
+    const text = extractContentText(message.content).trim();
+
+    if (text) {
+      return text;
+    }
+  }
+
+  return undefined;
+}
+
+function isAssistantMessage(value: unknown): value is { content: unknown; role: "assistant" } {
+  return Boolean(value && typeof value === "object" && "role" in value && value.role === "assistant" && "content" in value);
+}
+
+function extractContentText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(extractContentText).join("");
+  }
+
+  if (value && typeof value === "object" && "text" in value && typeof value.text === "string") {
+    return value.text;
+  }
+
+  return "";
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function createTuziPiModelOptions(config: TuziLlmApiConfig, sdk: PiCodingAgentSdk): Record<string, unknown> {

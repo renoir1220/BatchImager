@@ -5,10 +5,24 @@ import type { AppLogger } from "./appLogger";
 
 export interface ProductImageInput {
   imagePath: string;
+  onRemoteImage?: (event: RemoteImageEvent) => Promise<void> | void;
   prompt: string;
   referenceImagePaths?: string[];
   sessionId: string;
   size?: string;
+}
+
+export interface PromptImageInput {
+  onRemoteImage?: (event: RemoteImageEvent) => Promise<void> | void;
+  prompt: string;
+  sessionId: string;
+  size?: string;
+}
+
+export interface RemoteImageEvent {
+  remoteUrl?: string;
+  requestSize: string;
+  sessionId: string;
 }
 
 export interface TuziImageApiConfig {
@@ -20,7 +34,7 @@ export interface TuziImageApiConfig {
 }
 
 export interface ProductImageResult {
-  inputImage: PreparedEditImage;
+  inputImage?: PreparedEditImage;
   outputPath: string;
   referenceImages?: PreparedEditImage[];
   requestSize: string;
@@ -54,6 +68,10 @@ export function buildImageEditEndpoint(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/v1/images/edits`;
 }
 
+export function buildImageGenerationEndpoint(baseUrl: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}/v1/images/generations`;
+}
+
 export function parseTuziImageEditResponse(payload: unknown): GeneratedImagePayload {
   if (!isRecord(payload) || !Array.isArray(payload.data)) {
     throw new Error("Invalid image generation response");
@@ -68,6 +86,107 @@ export function parseTuziImageEditResponse(payload: unknown): GeneratedImagePayl
   }
 
   return { base64Json, url };
+}
+
+export async function generateImageFromPrompt(
+  input: PromptImageInput,
+  config: TuziImageApiConfig,
+  deps: TuziImageApiDeps = defaultDeps,
+  logger?: AppLogger
+): Promise<ProductImageResult> {
+  const prompt = input.prompt.trim();
+  const context = `image:${input.sessionId}`;
+
+  if (!prompt) {
+    throw new Error("Prompt is required");
+  }
+
+  const requestSize = input.size ?? config.size;
+  const endpoint = buildImageGenerationEndpoint(config.baseUrl);
+  logger?.info("Image generation request started", {
+    context,
+    data: {
+      endpoint,
+      model: config.model,
+      requestSize
+    },
+    publicMessage: "正在请求生成新图片..."
+  });
+
+  let response: Response;
+  try {
+    response = await deps.fetch(endpoint, {
+      body: JSON.stringify({
+        model: config.model,
+        prompt,
+        quality: "auto",
+        response_format: "url",
+        size: requestSize
+      }),
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json"
+      },
+      method: "POST"
+    });
+  } catch (error) {
+    logger?.error("Image generation request network failed", {
+      context,
+      data: {
+        endpoint,
+        model: config.model,
+        requestSize
+      },
+      error,
+      publicMessage: `生成请求发送失败：${toNetworkErrorMessage(error)}`
+    });
+    throw new Error(`Image generation request failed: ${toNetworkErrorMessage(error)}`, { cause: error });
+  }
+
+  if (!response.ok) {
+    const responseText = await response.text();
+    logger?.error("Image generation request failed", {
+      context,
+      data: { responseText, status: response.status },
+      publicMessage: `生成失败：接口返回 ${response.status}`
+    });
+    throw new Error(`Image generation failed: ${response.status} ${responseText}`);
+  }
+
+  logger?.info("Image generation response received", {
+    context,
+    data: { status: response.status },
+    publicMessage: "模型已返回，正在下载结果图片..."
+  });
+  const generated = parseTuziImageEditResponse(await response.json());
+  await input.onRemoteImage?.({
+    remoteUrl: generated.url,
+    requestSize,
+    sessionId: input.sessionId
+  });
+  const imageBytes = generated.base64Json
+    ? Buffer.from(generated.base64Json, "base64")
+    : await downloadGeneratedImage(generated.url, deps.fetch, logger, context);
+
+  await deps.mkdir(config.outputDirectory, { recursive: true });
+
+  const outputPath = path.join(config.outputDirectory, `${toSafeName(input.sessionId)}-${toTimestamp(deps.makeNow())}.png`);
+  await deps.writeFile(outputPath, imageBytes);
+  logger?.info("Generated image stored", {
+    context,
+    data: {
+      byteLength: imageBytes.byteLength,
+      outputPath,
+      remoteUrl: generated.url
+    },
+    publicMessage: "生成完成，已添加图片。"
+  });
+
+  return {
+    outputPath,
+    requestSize,
+    remoteUrl: generated.url
+  };
 }
 
 export async function generateProductImage(
@@ -142,23 +261,41 @@ export async function generateProductImage(
   requestBody.set("n", "1");
   requestBody.set("response_format", "url");
 
+  const endpoint = buildImageEditEndpoint(config.baseUrl);
+
   logger?.info("Sending image edit request", {
     context,
     data: {
-      endpoint: buildImageEditEndpoint(config.baseUrl),
+      endpoint,
       model: config.model,
       referenceImageCount: preparedReferenceImages.length,
       requestSize
     },
     publicMessage: "已发送生成请求，等待模型返回..."
   });
-  const response = await deps.fetch(buildImageEditEndpoint(config.baseUrl), {
-    body: requestBody,
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`
-    },
-    method: "POST"
-  });
+  let response: Response;
+
+  try {
+    response = await deps.fetch(endpoint, {
+      body: requestBody,
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`
+      },
+      method: "POST"
+    });
+  } catch (error) {
+    logger?.error("Image edit request network failed", {
+      context,
+      data: {
+        endpoint,
+        model: config.model,
+        requestSize
+      },
+      error,
+      publicMessage: `生成请求发送失败：${toNetworkErrorMessage(error)}`
+    });
+    throw new Error(`Image generation request failed: ${toNetworkErrorMessage(error)}`, { cause: error });
+  }
 
   if (!response.ok) {
     const responseText = await response.text();
@@ -176,6 +313,11 @@ export async function generateProductImage(
     publicMessage: "模型已返回，正在下载结果图片..."
   });
   const generated = parseTuziImageEditResponse(await response.json());
+  await input.onRemoteImage?.({
+    remoteUrl: generated.url,
+    requestSize,
+    sessionId: input.sessionId
+  });
   const imageBytes = generated.base64Json
     ? Buffer.from(generated.base64Json, "base64")
     : await downloadGeneratedImage(generated.url, deps.fetch, logger, context);
@@ -233,4 +375,17 @@ function toSafeName(value: string): string {
 
 function toTimestamp(date: Date): string {
   return date.toISOString().replace(/[:.]/g, "-");
+}
+
+function toNetworkErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const cause = "cause" in error ? error.cause : undefined;
+  if (cause instanceof Error && cause.message) {
+    return `${error.message}（${cause.message}）`;
+  }
+
+  return error.message;
 }
