@@ -1,6 +1,7 @@
 node_modules/
 dist/
 dist-electron/
+.worktrees/
 .env
 .env.*
 .DS_Store
