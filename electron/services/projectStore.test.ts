@@ -6,6 +6,8 @@ import {
   createProject,
   importImagesToProject,
   openProject,
+  readProjectSummary,
+  renameProject,
   saveProjectSnapshot
 } from "./projectStore";
 import type { PersistedImageSession } from "../ipcTypes";
@@ -32,6 +34,7 @@ describe("projectStore", () => {
       directory: path.join(root, "project-1"),
       id: "project-1",
       imageCount: 0,
+      name: "项目 05-21 15:00",
       updatedAt: "2026-05-21T15:00:00.000Z"
     });
     expect(snapshot.sessions).toEqual([]);
@@ -117,6 +120,60 @@ describe("projectStore", () => {
     expect(reopened.sessions).toEqual(sessions);
     expect(reopened.selectedSessionId).toBe("img-1");
     expect(reopened.project.imageCount).toBe(1);
+  });
+
+  test("renames a project and keeps the name inside the project database", async () => {
+    const root = await makeTempRoot();
+    const project = await createProject({
+      makeId: () => "project-1",
+      makeNow: () => new Date("2026-05-21T15:00:00.000Z"),
+      projectsDirectory: root
+    });
+
+    const renamed = await renameProject(project.project.directory, "花材白底图");
+
+    expect(renamed.project.name).toBe("花材白底图");
+    await expect(openProject(project.project.directory)).resolves.toMatchObject({
+      project: {
+        name: "花材白底图"
+      }
+    });
+  });
+
+  test("reads a lightweight project summary without loading chat messages", async () => {
+    const root = await makeTempRoot();
+    const project = await createProject({
+      makeId: () => "project-1",
+      makeNow: () => new Date("2026-05-21T15:00:00.000Z"),
+      projectsDirectory: root
+    });
+    await saveProjectSnapshot(project.project.directory, {
+      selectedSessionId: "img-1",
+      sessions: [
+        {
+          chatMessages: [{ content: "生成白底图", id: "m-1", role: "user" }],
+          chatStatus: "idle",
+          fileName: "flower.png",
+          filePath: path.join(project.project.directory, "images", "original", "img-1-flower.png"),
+          generatedFilePath: path.join(project.project.directory, "images", "generated", "out.png"),
+          generatedFilePaths: [path.join(project.project.directory, "images", "generated", "out.png")],
+          id: "img-1",
+          status: "completed"
+        }
+      ]
+    });
+
+    const summary = await readProjectSummary(project.project.directory);
+
+    expect(summary).toEqual({
+      createdAt: "2026-05-21T15:00:00.000Z",
+      directory: project.project.directory,
+      id: "project-1",
+      imageCount: 1,
+      name: "项目 05-21 15:00",
+      previewSourcePaths: [path.join(project.project.directory, "images", "generated", "out.png")],
+      updatedAt: expect.any(String)
+    });
   });
 });
 

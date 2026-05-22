@@ -39,4 +39,13 @@ describe("image display styles", () => {
     expect(declarations).not.toContain("aspect-ratio:");
     expect(declarations).not.toContain("object-fit: cover");
   });
+
+  it("uses a compact fixed project preview grid", () => {
+    const declarations = declarationsFor(".project-preview-grid");
+    const thumbDeclarations = declarationsFor(".project-preview-thumb");
+
+    expect(declarations).toContain("grid-template-columns: repeat(3, minmax(0, 1fr))");
+    expect(declarations).toContain("grid-template-rows: repeat(2, minmax(0, 1fr))");
+    expect(thumbDeclarations).toContain("aspect-ratio: 1 / 1");
+  });
 });
