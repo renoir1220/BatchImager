@@ -111,6 +111,23 @@ export interface ProjectSummary extends ProjectMetadata {
   previewSourcePaths: string[];
 }
 
+export interface ProjectListEntry {
+  directory: string;
+  isExternal: boolean;
+  isUnavailable: boolean;
+  summary?: ProjectSummary;
+  thumbnailPaths: string[];
+}
+
+export interface RenameProjectRequest {
+  directory: string;
+  name: string;
+}
+
+export interface OpenProjectRequest {
+  directory?: string;
+}
+
 export interface ProjectSnapshot {
   project: ProjectMetadata;
   selectedSessionId?: string | null;

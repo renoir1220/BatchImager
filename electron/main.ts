@@ -5,6 +5,8 @@ import { pathToFileURL } from "node:url";
 import type {
   GenerateImageRequest,
   ImportProjectImagesRequest,
+  OpenProjectRequest,
+  RenameProjectRequest,
   SaveReferenceImageRequest,
   SaveProjectSnapshotRequest,
   SendChatMessageRequest
@@ -13,14 +15,18 @@ import { createAppLogger, type AppLogger } from "./services/appLogger";
 import { loadTuziConfig, loadTuziLlmConfig } from "./services/localConfig";
 import { saveReferenceImageToDirectory } from "./services/localImageStorage";
 import { runImageToolChat } from "./services/openAiChatApi";
+import { listProjectCards } from "./services/projectList";
+import { rememberProjectDirectory } from "./services/projectIndex";
 import {
   createProject,
   getProjectGeneratedDirectory,
   getProjectReferencesDirectory,
   importImagesToProject,
   openProject,
+  renameProject,
   saveProjectSnapshot
 } from "./services/projectStore";
+import { ensureProjectThumbnails } from "./services/projectThumbnails";
 import { generateProductImage } from "./services/tuziImageApi";
 
 const IMAGE_PROTOCOL = "batchimager-file";
@@ -71,7 +77,7 @@ function registerIpc(appLogger: AppLogger): void {
   });
 
   ipcMain.handle("project:create", async () => {
-    const projectsDirectory = path.join(app.getPath("userData"), "projects");
+    const projectsDirectory = getProjectsDirectory();
     const snapshot = await createProject({ projectsDirectory });
     activeProjectDirectory = snapshot.project.directory;
     appLogger.info("Project created", {
@@ -82,21 +88,27 @@ function registerIpc(appLogger: AppLogger): void {
     return snapshot;
   });
 
-  ipcMain.handle("project:open", async () => {
-    const projectsDirectory = path.join(app.getPath("userData"), "projects");
-    await mkdir(projectsDirectory, { recursive: true });
-    const result = await dialog.showOpenDialog({
-      title: "打开项目",
-      defaultPath: projectsDirectory,
-      properties: ["openDirectory"]
-    });
+  ipcMain.handle("project:list", async () => {
+    const entries = await listProjectCards(getProjectListOptions());
+    void warmProjectThumbnailCaches(entries, appLogger);
 
-    if (result.canceled || !result.filePaths[0]) {
+    return entries;
+  });
+
+  ipcMain.handle("project:open", async (_event, request?: OpenProjectRequest) => {
+    assertOpenProjectRequest(request);
+    const projectDirectory = request?.directory ?? (await pickProjectDirectory("打开项目"));
+
+    if (!projectDirectory) {
       appLogger.info("Open project canceled", { publicMessage: "已取消打开项目。" });
       return null;
     }
 
-    const snapshot = await openProject(result.filePaths[0]);
+    await rememberProjectDirectory({
+      indexFilePath: getProjectIndexFilePath(),
+      projectDirectory
+    });
+    const snapshot = await openProject(projectDirectory);
     activeProjectDirectory = snapshot.project.directory;
     appLogger.info("Project opened", {
       data: {
@@ -108,6 +120,40 @@ function registerIpc(appLogger: AppLogger): void {
     });
 
     return snapshot;
+  });
+
+  ipcMain.handle("project:remember-directory", async () => {
+    const projectDirectory = await pickProjectDirectory("添加项目文件夹");
+
+    if (!projectDirectory) {
+      appLogger.info("Add project directory canceled", { publicMessage: "已取消添加项目。" });
+      return null;
+    }
+
+    await rememberProjectDirectory({
+      indexFilePath: getProjectIndexFilePath(),
+      projectDirectory
+    });
+    const entries = await listProjectCards(getProjectListOptions());
+    void warmProjectThumbnailCaches(entries, appLogger);
+    appLogger.info("Project directory remembered", {
+      data: { projectDirectory },
+      publicMessage: "已添加项目文件夹。"
+    });
+
+    return entries;
+  });
+
+  ipcMain.handle("project:rename", async (_event, request: RenameProjectRequest) => {
+    assertRenameProjectRequest(request);
+    await renameProject(request.directory, request.name);
+    const entries = await listProjectCards(getProjectListOptions());
+    appLogger.info("Project renamed", {
+      data: { projectDirectory: request.directory },
+      publicMessage: "项目已重命名。"
+    });
+
+    return entries;
   });
 
   ipcMain.handle("project:import-images", async (_event, request: ImportProjectImagesRequest) => {
@@ -229,6 +275,57 @@ function registerIpc(appLogger: AppLogger): void {
   ipcMain.handle("logs:list", () => appLogger.getEntries());
 }
 
+function getProjectsDirectory(): string {
+  return path.join(app.getPath("userData"), "projects");
+}
+
+function getProjectIndexFilePath(): string {
+  return path.join(app.getPath("userData"), "project-index.json");
+}
+
+function getProjectListOptions(): { indexFilePath: string; projectsDirectory: string } {
+  return {
+    indexFilePath: getProjectIndexFilePath(),
+    projectsDirectory: getProjectsDirectory()
+  };
+}
+
+async function pickProjectDirectory(title: string): Promise<string | null> {
+  const projectsDirectory = getProjectsDirectory();
+  await mkdir(projectsDirectory, { recursive: true });
+  const result = await dialog.showOpenDialog({
+    title,
+    defaultPath: projectsDirectory,
+    properties: ["openDirectory"]
+  });
+
+  return result.canceled ? null : result.filePaths[0] ?? null;
+}
+
+async function warmProjectThumbnailCaches(
+  entries: Awaited<ReturnType<typeof listProjectCards>>,
+  appLogger: AppLogger
+): Promise<void> {
+  for (const entry of entries) {
+    if (!entry.summary || entry.thumbnailPaths.length >= entry.summary.previewSourcePaths.length) {
+      continue;
+    }
+
+    try {
+      await ensureProjectThumbnails(entry.directory, entry.summary.previewSourcePaths);
+      for (const window of BrowserWindow.getAllWindows()) {
+        window.webContents.send("project:thumbnails-updated", entry.directory);
+      }
+    } catch (error) {
+      appLogger.warn("Project thumbnail cache warm failed", {
+        data: { projectDirectory: entry.directory },
+        error,
+        publicMessage: "项目预览图生成失败。"
+      });
+    }
+  }
+}
+
 function createLogger(): AppLogger {
   const logDirectory = path.join(app.getPath("userData"), "logs");
   const logFilePath = path.join(logDirectory, "batchimager.log");
@@ -279,6 +376,26 @@ function assertSaveProjectSnapshotRequest(request: SaveProjectSnapshotRequest): 
       typeof request.selectedSessionId !== "string")
   ) {
     throw new Error("Invalid project snapshot save request");
+  }
+}
+
+function assertOpenProjectRequest(request: OpenProjectRequest | undefined): void {
+  if (
+    request !== undefined &&
+    (typeof request !== "object" || request === null || (request.directory !== undefined && typeof request.directory !== "string"))
+  ) {
+    throw new Error("Invalid project open request");
+  }
+}
+
+function assertRenameProjectRequest(request: RenameProjectRequest): void {
+  if (
+    typeof request !== "object" ||
+    request === null ||
+    typeof request.directory !== "string" ||
+    typeof request.name !== "string"
+  ) {
+    throw new Error("Invalid project rename request");
   }
 }
 
