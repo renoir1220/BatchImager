@@ -4,12 +4,14 @@ import type { TuziImageApiConfig } from "./tuziImageApi";
 
 const DEFAULT_BASE_URL = "https://api.ourzhishi.top";
 const DEFAULT_MODEL = "gpt-image-2";
-const DEFAULT_LLM_MODEL = "gpt-4o-mini";
+const DEFAULT_LLM_BASE_URL = "https://api.tu-zi.com/coding";
+const DEFAULT_LLM_MODEL = "gpt-5.5";
 const DEFAULT_SIZE = "auto";
 
 export interface TuziLlmApiConfig {
   apiKey: string;
   baseUrl: string;
+  chatAgent: "openai-tools" | "pi";
   model: string;
 }
 
@@ -68,15 +70,16 @@ export function resolveTuziConfig(values: Record<string, string | undefined>, ou
 }
 
 export function resolveTuziLlmConfig(values: Record<string, string | undefined>): TuziLlmApiConfig {
-  const apiKey = values.TUZI_API_KEY?.trim();
+  const apiKey = values.TUZI_LLM_API_KEY?.trim() || values.TUZI_API_KEY?.trim();
 
   if (!apiKey) {
-    throw new Error("TUZI_API_KEY is required in local configuration");
+    throw new Error("TUZI_LLM_API_KEY or TUZI_API_KEY is required in local configuration");
   }
 
   return {
     apiKey,
-    baseUrl: values.TUZI_BASE_URL?.trim() || DEFAULT_BASE_URL,
+    baseUrl: values.TUZI_LLM_BASE_URL?.trim() || values.TUZI_BASE_URL?.trim() || DEFAULT_LLM_BASE_URL,
+    chatAgent: values.BATCHIMAGER_CHAT_AGENT?.trim().toLowerCase() === "pi" ? "pi" : "openai-tools",
     model: values.TUZI_LLM_MODEL?.trim() || DEFAULT_LLM_MODEL
   };
 }

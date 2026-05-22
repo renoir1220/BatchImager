@@ -13,6 +13,7 @@ import { createAppLogger, type AppLogger } from "./services/appLogger";
 import { loadTuziConfig, loadTuziLlmConfig } from "./services/localConfig";
 import { saveReferenceImageToDirectory } from "./services/localImageStorage";
 import { runImageToolChat } from "./services/openAiChatApi";
+import { runPiImageToolChat } from "./services/piImageToolChat";
 import {
   createProject,
   getProjectGeneratedDirectory,
@@ -204,11 +205,18 @@ function registerIpc(appLogger: AppLogger): void {
     });
 
     try {
-      const result = await runImageToolChat(request, loadTuziLlmConfig(), {
-        fetch,
-        generateImage: (toolRequest) => generateProductImage(toolRequest, loadTuziConfig(outputDirectory), undefined, appLogger),
-        logger: appLogger
-      });
+      const llmConfig = loadTuziLlmConfig();
+      const result =
+        llmConfig.chatAgent === "pi"
+          ? await runPiImageToolChat(request, llmConfig, requireActiveProjectDirectory(), {
+              generateImage: (toolRequest) => generateProductImage(toolRequest, loadTuziConfig(outputDirectory), undefined, appLogger),
+              logger: appLogger
+            })
+          : await runImageToolChat(request, llmConfig, {
+              fetch,
+              generateImage: (toolRequest) => generateProductImage(toolRequest, loadTuziConfig(outputDirectory), undefined, appLogger),
+              logger: appLogger
+            });
 
       return {
         assistantMessage: result.content,

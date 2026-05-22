@@ -6,3 +6,5 @@ dist-electron/
 .env.*
 .DS_Store
 *.log
+.playwright-mcp/
+project-list-dialog.png

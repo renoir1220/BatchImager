@@ -38,17 +38,29 @@ TUZI_IMAGE_MODEL=gpt-image-2
     expect(() => resolveTuziConfig({}, "C:\\BatchImager\\generated")).toThrow("TUZI_API_KEY");
   });
 
-  test("resolves Tuzi LLM config with the shared base url and api key", () => {
+  test("resolves Tuzi LLM config with dedicated coding endpoint credentials", () => {
     expect(
       resolveTuziLlmConfig({
         TUZI_API_KEY: "abc123",
+        TUZI_LLM_API_KEY: "coding-key",
         TUZI_BASE_URL: "https://api.ourzhishi.top/",
-        TUZI_LLM_MODEL: "gpt-4o-mini"
+        TUZI_LLM_BASE_URL: "https://api.tu-zi.com/coding",
+        TUZI_LLM_MODEL: "gpt-5.5"
       })
     ).toEqual({
-      apiKey: "abc123",
-      baseUrl: "https://api.ourzhishi.top/",
-      model: "gpt-4o-mini"
+      apiKey: "coding-key",
+      baseUrl: "https://api.tu-zi.com/coding",
+      chatAgent: "openai-tools",
+      model: "gpt-5.5"
     });
+  });
+
+  test("enables Pi chat agent mode through local configuration", () => {
+    expect(
+      resolveTuziLlmConfig({
+        BATCHIMAGER_CHAT_AGENT: "pi",
+        TUZI_LLM_API_KEY: "coding-key"
+      }).chatAgent
+    ).toBe("pi");
   });
 });

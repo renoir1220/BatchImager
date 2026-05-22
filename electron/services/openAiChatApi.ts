@@ -115,23 +115,13 @@ export async function runImageToolChat(
 
   if (!firstMessage.tool_calls?.length) {
     if (expectsImageGeneration) {
-      deps.logger?.warn("Model answered without image tool for a generation request; falling back to local tool execution", {
+      deps.logger?.error("Model answered without image tool for a generation request", {
         context,
-        publicMessage: "模型未返回工具调用，已改为本地执行图片生成..."
-      });
-      const fallbackReferenceImagePaths = referenceImages.map((referenceImage) => referenceImage.filePath);
-      const generatedImage = await deps.generateImage({
-        imagePath: input.imagePath,
-        prompt: getLatestUserMessage(input.messages),
-        ...(fallbackReferenceImagePaths.length ? { referenceImagePaths: fallbackReferenceImagePaths } : {}),
-        ...(selectedOutputSize ? { size: selectedOutputSize } : {}),
-        sessionId: input.sessionId
+        data: { content: firstMessage.content },
+        publicMessage: "模型未返回图片生成工具调用。请检查 LLM 模型是否支持 tool call。"
       });
 
-      return {
-        content: "已根据你的要求生成新图片。",
-        generatedImage
-      };
+      throw new Error("模型未返回图片生成工具调用，请检查 LLM 模型是否支持 tool call");
     }
 
     return { content: getAssistantContent(firstMessage) };

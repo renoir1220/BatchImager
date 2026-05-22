@@ -20,9 +20,11 @@
   "license": "UNLICENSED",
   "type": "commonjs",
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.75.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "sharp": "^0.34.5"
+    "sharp": "^0.34.5",
+    "typebox": "1.1.38"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",

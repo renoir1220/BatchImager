@@ -316,7 +316,7 @@ describe("openAiChatApi", () => {
           referenceImageCount: 1
         },
         imagePath: "C:\\images\\DSC00270.JPG",
-        messages: [{ role: "user", content: "重新生成" }],
+        messages: [{ role: "user", content: "这张图当前是什么状态？" }],
         sessionId: "img-1"
       },
       {
@@ -355,17 +355,62 @@ describe("openAiChatApi", () => {
         content:
           "当前图片上下文：\n- 初始图片文件名：DSC00270.JPG\n- 初始图片：初始导入图\n- 当前编辑输入：当前生成图\n- 当前图片已经由 BatchImager 选中，并会自动作为 generate_image 工具的输入；用户不需要重新上传或描述这张图片。\n- 最近一次批量处理任务：生成电商白底主图，保留商品结构\n- 最近一次批量处理包含 1 张参考图。"
       },
-      { role: "user", content: "重新生成" }
+      { role: "user", content: "这张图当前是什么状态？" }
     ]);
   });
 
-  test("falls back to local image generation when the model answers text for a generation request", async () => {
+  test("throws when a generation request does not return a tool call", async () => {
+    const generated: Array<{ prompt: string; imagePath: string; sessionId: string; size?: string }> = [];
+
+    await expect(
+      runImageToolChat(
+        {
+          imagePath: "C:\\images\\flower.png",
+          messages: [{ role: "user", content: "生成这个花朵在家居环境下的商品图" }],
+          sessionId: "img-1"
+        },
+        {
+          apiKey: "local-test-key",
+          baseUrl: "https://api.ourzhishi.top",
+          model: "gpt-4o-mini"
+        },
+        {
+          fetch: async () =>
+            new Response(
+              JSON.stringify({
+                choices: [
+                  {
+                    message: {
+                      role: "assistant",
+                      content: "正在处理图片，稍后给你下载链接。"
+                    }
+                  }
+                ]
+              }),
+              { status: 200 }
+            ),
+          generateImage: async (request) => {
+            generated.push(request);
+
+            return {
+              outputPath: "C:\\generated\\img-1.png",
+              remoteUrl: "https://cdn.example.com/img-1.png"
+            };
+          }
+        }
+      )
+    ).rejects.toThrow("模型未返回图片生成工具调用");
+
+    expect(generated).toEqual([]);
+  });
+
+  test("does not call the image tool when a non-generation chat returns text", async () => {
     const generated: Array<{ prompt: string; imagePath: string; sessionId: string; size?: string }> = [];
 
     const result = await runImageToolChat(
       {
         imagePath: "C:\\images\\flower.png",
-        messages: [{ role: "user", content: "生成这个花朵在家居环境下的商品图" }],
+        messages: [{ role: "user", content: "这张图适合怎么优化？" }],
         sessionId: "img-1"
       },
       {
@@ -381,7 +426,7 @@ describe("openAiChatApi", () => {
                 {
                   message: {
                     role: "assistant",
-                    content: "正在处理图片，稍后给你下载链接。"
+                    content: "可以先统一背景、增强主体清晰度，再考虑商品场景。"
                   }
                 }
               ]
@@ -390,29 +435,13 @@ describe("openAiChatApi", () => {
           ),
         generateImage: async (request) => {
           generated.push(request);
-
-          return {
-            outputPath: "C:\\generated\\img-1.png",
-            remoteUrl: "https://cdn.example.com/img-1.png"
-          };
+          return { outputPath: "unused.png" };
         }
       }
     );
 
-    expect(generated).toEqual([
-      {
-        imagePath: "C:\\images\\flower.png",
-        prompt: "生成这个花朵在家居环境下的商品图",
-        sessionId: "img-1"
-      }
-    ]);
-    expect(result).toEqual({
-      content: "已根据你的要求生成新图片。",
-      generatedImage: {
-        outputPath: "C:\\generated\\img-1.png",
-        remoteUrl: "https://cdn.example.com/img-1.png"
-      }
-    });
+    expect(generated).toEqual([]);
+    expect(result).toEqual({ content: "可以先统一背景、增强主体清晰度，再考虑商品场景。" });
   });
 
   test("rejects malformed chat responses", async () => {
