@@ -5,7 +5,7 @@ import { createBatchImagerCommandPolicy } from "./agentCommandPolicy";
 import { createRunProjectCommandTool } from "./batchImagerAgentTools";
 import type { ImageToolChatInput, ImageToolChatResult, ImageToolRequest, ReferenceImageCandidate } from "./openAiChatApi";
 import type { PiAgentRuntime, CreatePiAgentRuntimeOptions } from "./piAgentRuntime";
-import { createPiAgentRuntime } from "./piAgentRuntime";
+import { createPiAgentRuntime, warmupPiAgentRuntime } from "./piAgentRuntime";
 import type { ProductImageResult } from "./tuziImageApi";
 
 interface PiImageToolChatDeps {
@@ -89,6 +89,10 @@ export async function runPiImageToolChat(
   } finally {
     runtime.dispose();
   }
+}
+
+export async function warmupPiImageToolChatDependencies(): Promise<void> {
+  await Promise.all([warmupPiAgentRuntime(), loadTypebox()]);
 }
 
 function createGenerateImageTool(options: {

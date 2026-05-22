@@ -423,7 +423,9 @@ textarea {
 
 .session-activity {
   display: grid;
-  gap: 5px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
   border: 1px solid #deded8;
   border-radius: 7px;
   padding: 7px;
@@ -441,10 +443,18 @@ textarea {
   display: grid;
   grid-template-columns: 58px minmax(0, 1fr);
   gap: 7px;
+  min-width: 0;
 }
 
 .session-activity-line time {
   color: #777770;
+}
+
+.session-activity-line span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-activity-line.error span {

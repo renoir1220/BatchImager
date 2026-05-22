@@ -2,10 +2,31 @@ import { describe, expect, test } from "vitest";
 import {
   buildPiAgentSessionDescriptor,
   loadPiCodingAgentSdk,
-  type PiCodingAgentSdk
+  resetPiAgentRuntimeWarmupForTests,
+  type PiCodingAgentSdk,
+  warmupPiAgentRuntime
 } from "./piAgentRuntime";
 
 describe("piAgentRuntime", () => {
+  test("warms and reuses the default Pi SDK import", async () => {
+    resetPiAgentRuntimeWarmupForTests();
+    let loadCount = 0;
+    const sdk: PiCodingAgentSdk = {
+      createAgentSession: async () => ({ session: { prompt: async () => undefined, subscribe: () => () => undefined } })
+    };
+    const loader = async () => {
+      loadCount += 1;
+      return sdk;
+    };
+
+    await warmupPiAgentRuntime(loader);
+    await expect(loadPiCodingAgentSdk()).resolves.toBe(sdk);
+    await expect(loadPiCodingAgentSdk()).resolves.toBe(sdk);
+
+    expect(loadCount).toBe(1);
+    resetPiAgentRuntimeWarmupForTests();
+  });
+
   test("builds a lightweight OpenClaw-style session descriptor for BatchImager", () => {
     const descriptor = buildPiAgentSessionDescriptor({
       model: "gpt-5.5",

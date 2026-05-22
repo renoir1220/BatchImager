@@ -15,7 +15,7 @@ import { createAppLogger, type AppLogger } from "./services/appLogger";
 import { loadTuziConfig, loadTuziLlmConfig } from "./services/localConfig";
 import { saveReferenceImageToDirectory } from "./services/localImageStorage";
 import { runImageToolChat } from "./services/openAiChatApi";
-import { runPiImageToolChat } from "./services/piImageToolChat";
+import { runPiImageToolChat, warmupPiImageToolChatDependencies } from "./services/piImageToolChat";
 import { listProjectCards } from "./services/projectList";
 import { rememberProjectDirectory } from "./services/projectIndex";
 import {
@@ -482,6 +482,7 @@ app.whenReady().then(() => {
   registerImageProtocol();
   registerIpc(logger);
   createWindow();
+  warmupPiChat(logger);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -489,6 +490,21 @@ app.whenReady().then(() => {
     }
   });
 });
+
+function warmupPiChat(appLogger: AppLogger): void {
+  void warmupPiImageToolChatDependencies()
+    .then(() => {
+      appLogger.info("Pi chat dependencies warmed", {
+        publicMessage: "Pi 会话引擎已预热。"
+      });
+    })
+    .catch((error) => {
+      appLogger.warn("Pi chat dependency warmup failed", {
+        error,
+        publicMessage: "Pi 会话引擎预热失败，将在首次使用时重试。"
+      });
+    });
+}
 
 function toUserErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {

@@ -16,7 +16,9 @@ describe("session activity UI", () => {
     const source = readProjectFile("src/components/SessionPanel.tsx");
 
     expect(source).toContain("activityLogs");
+    expect(source).toContain("currentActivityLog");
     expect(source).toContain("session-activity");
+    expect(source).not.toContain("activityLogs.map");
     expect(source).not.toContain("模型思考中...");
   });
 });

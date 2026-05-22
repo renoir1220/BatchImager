@@ -25,6 +25,7 @@ export function SessionPanel({ activityLogs, selectedSession, onSendMessage }: S
   const shouldShowActivity = Boolean(
     selectedSession && (activityLogs.length > 0 || selectedSession.chatStatus === "sending" || selectedSession.status === "generating")
   );
+  const currentActivityLog = activityLogs.at(-1);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
@@ -98,13 +99,11 @@ export function SessionPanel({ activityLogs, selectedSession, onSendMessage }: S
             {shouldShowActivity ? (
               <div className="session-activity" aria-label="处理进度">
                 <div className="session-activity-title">处理进度</div>
-                {activityLogs.length > 0 ? (
-                  activityLogs.map((activityLog) => (
-                    <div className={`session-activity-line ${activityLog.level}`} key={`${activityLog.timestamp}-${activityLog.message}`}>
-                      <time>{formatActivityTime(activityLog.timestamp)}</time>
-                      <span>{activityLog.message}</span>
-                    </div>
-                  ))
+                {currentActivityLog ? (
+                  <div className={`session-activity-line ${currentActivityLog.level}`}>
+                    <time>{formatActivityTime(currentActivityLog.timestamp)}</time>
+                    <span>{currentActivityLog.message}</span>
+                  </div>
                 ) : (
                   <div className="session-activity-line">
                     <time>现在</time>

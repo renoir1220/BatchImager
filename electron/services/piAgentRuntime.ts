@@ -57,6 +57,7 @@ type PiSdkLoader = () => Promise<unknown>;
 
 const DEFAULT_BUILT_IN_TOOLS = ["read", "write", "edit", "grep", "find", "ls"];
 const DEFAULT_CUSTOM_TOOLS = ["run_project_command", "generate_image", "inspect_image", "batch_generate"];
+let piSdkLoadPromise: Promise<PiCodingAgentSdk> | undefined;
 
 export function buildPiAgentSessionDescriptor(
   options: BuildPiAgentSessionDescriptorOptions
@@ -71,6 +72,32 @@ export function buildPiAgentSessionDescriptor(
 }
 
 export async function loadPiCodingAgentSdk(loader: PiSdkLoader = defaultPiSdkLoader): Promise<PiCodingAgentSdk> {
+  if (loader === defaultPiSdkLoader && piSdkLoadPromise) {
+    return piSdkLoadPromise;
+  }
+
+  const promise = loadPiCodingAgentSdkOnce(loader);
+
+  if (loader === defaultPiSdkLoader) {
+    piSdkLoadPromise = clearWarmupOnFailure(promise);
+  }
+
+  return promise;
+}
+
+export async function warmupPiAgentRuntime(loader: PiSdkLoader = defaultPiSdkLoader): Promise<void> {
+  if (!piSdkLoadPromise) {
+    piSdkLoadPromise = clearWarmupOnFailure(loadPiCodingAgentSdkOnce(loader));
+  }
+
+  await piSdkLoadPromise;
+}
+
+export function resetPiAgentRuntimeWarmupForTests(): void {
+  piSdkLoadPromise = undefined;
+}
+
+async function loadPiCodingAgentSdkOnce(loader: PiSdkLoader): Promise<PiCodingAgentSdk> {
   try {
     const sdk = await loader();
 
@@ -178,4 +205,11 @@ function isPiCodingAgentSdk(value: unknown): value is PiCodingAgentSdk {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : String(error);
+}
+
+function clearWarmupOnFailure(promise: Promise<PiCodingAgentSdk>): Promise<PiCodingAgentSdk> {
+  return promise.catch((error) => {
+    piSdkLoadPromise = undefined;
+    throw error;
+  });
 }
