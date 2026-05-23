@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { AppLogger, BackendLogOptions } from "./appLogger";
-import { runEsseAgentTurn } from "./esseAgent";
+import { runEsseAgentTurn, runEssePlanTurn } from "./esseAgent";
 
 describe("esseAgent", () => {
   test("defaults Esse to the excellent employee persona in the runtime prompt", async () => {
@@ -14,7 +14,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",
@@ -55,7 +54,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",
@@ -92,7 +90,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",
@@ -129,7 +126,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",
@@ -158,7 +154,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",
@@ -202,7 +197,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",
@@ -248,6 +242,203 @@ describe("esseAgent", () => {
     });
   });
 
+  test("can create a direct batch plan from the batch dialog prompt", async () => {
+    const runtimePrompts: string[] = [];
+
+    const plan = await runEssePlanTurn(
+      {
+        outputSize: "3840x2160",
+        prompt: "把这批花做成统一暖色家居商品图",
+        referenceImagePaths: ["C:/project/references/room.png"],
+        sessions: [
+          { fileName: "flower-a.jpg", id: "img-1" },
+          { fileName: "flower-b.jpg", id: "img-2" }
+        ]
+      },
+      {
+        apiKey: "coding-key",
+        baseUrl: "https://api.tu-zi.com/coding",
+        model: "gpt-5.5"
+      },
+      "C:/project",
+      {
+        createRuntime: async (options) => ({
+          descriptor: {
+            builtInTools: [],
+            customTools: [],
+            model: options.model,
+            projectDirectory: options.projectDirectory,
+            sessionId: options.sessionId
+          },
+          dispose: () => undefined,
+          getLastAssistantText: () =>
+            JSON.stringify({
+              plan: {
+                commands: [
+                  {
+                    constraints: ["保留花材颜色"],
+                    instruction: "生成客厅茶几场景鲜花商品图",
+                    targetSessionId: "img-1"
+                  },
+                  {
+                    constraints: ["保留花材颜色"],
+                    instruction: "生成卧室床头柜场景鲜花商品图",
+                    targetSessionId: "img-2"
+                  }
+                ],
+                globalInstruction: "统一暖色家居环境，保留花材颜色和形态",
+                title: "暖色家居鲜花商品图"
+              },
+              reply: "我先生成一套批量方案，确认后执行。"
+            }),
+          prompt: async (prompt) => {
+            runtimePrompts.push(prompt);
+          },
+          subscribe: () => () => undefined
+        })
+      }
+    );
+
+    expect(runtimePrompts[0]).toContain("Esse智能体");
+    expect(runtimePrompts[0]).toContain("把这批花做成统一暖色家居商品图");
+    expect(runtimePrompts[0]).toContain("img-1：flower-a.jpg");
+    expect(plan).toMatchObject({
+      globalInstruction: "统一暖色家居环境，保留花材颜色和形态",
+      outputSize: "3840x2160",
+      status: "draft",
+      targetSessionIds: ["img-1", "img-2"],
+      title: "暖色家居鲜花商品图"
+    });
+    expect(plan.commands).toEqual([
+      {
+        constraints: ["保留花材颜色"],
+        id: expect.stringMatching(/^cmd-/),
+        instruction: "生成客厅茶几场景鲜花商品图",
+        outputSize: "3840x2160",
+        planId: plan.id,
+        referenceImageIds: ["ref-1"],
+        source: "project-manager",
+        targetSessionId: "img-1"
+      },
+      {
+        constraints: ["保留花材颜色"],
+        id: expect.stringMatching(/^cmd-/),
+        instruction: "生成卧室床头柜场景鲜花商品图",
+        outputSize: "3840x2160",
+        planId: plan.id,
+        referenceImageIds: ["ref-1"],
+        source: "project-manager",
+        targetSessionId: "img-2"
+      }
+    ]);
+  });
+
+  test("rejects direct plan creation when the prompt references a missing attachment", async () => {
+    let runtimeCreated = false;
+
+    await expect(
+      runEssePlanTurn(
+        {
+          prompt: "按附件里的参考图给这批图做方案",
+          sessions: [{ fileName: "flower-a.jpg", id: "img-1" }]
+        },
+        {
+          apiKey: "coding-key",
+          baseUrl: "https://api.tu-zi.com/coding",
+          model: "gpt-5.5"
+        },
+        "C:/project",
+        {
+          createRuntime: async () => {
+            runtimeCreated = true;
+            throw new Error("runtime should not be created");
+          }
+        }
+      )
+    ).rejects.toThrow("我没有收到可用的参考图附件");
+
+    expect(runtimeCreated).toBe(false);
+  });
+
+  test("throws a clear error when direct plan creation returns no usable plan", async () => {
+    await expect(
+      runEssePlanTurn(
+        {
+          prompt: "做白底图",
+          referenceImagePaths: [],
+          sessions: [{ fileName: "flower-a.jpg", id: "img-1" }]
+        },
+        {
+          apiKey: "coding-key",
+          baseUrl: "https://api.tu-zi.com/coding",
+          model: "gpt-5.5"
+        },
+        "C:/project",
+        {
+          createRuntime: async (options) => ({
+            descriptor: {
+              builtInTools: [],
+              customTools: [],
+              model: options.model,
+              projectDirectory: options.projectDirectory,
+              sessionId: options.sessionId
+            },
+            dispose: () => undefined,
+            getLastAssistantText: () => JSON.stringify({ reply: "我觉得可以做白底图。" }),
+            prompt: async () => undefined,
+            subscribe: () => () => undefined
+          })
+        }
+      )
+    ).rejects.toThrow("Esse 未返回有效的批量方案 JSON");
+  });
+
+  test("accepts legacy plan-only json for direct batch plan creation", async () => {
+    const plan = await runEssePlanTurn(
+      {
+        prompt: "做白底图",
+        referenceImagePaths: [],
+        sessions: [{ fileName: "flower-a.jpg", id: "img-1" }]
+      },
+      {
+        apiKey: "coding-key",
+        baseUrl: "https://api.tu-zi.com/coding",
+        model: "gpt-5.5"
+      },
+      "C:/project",
+      {
+        createRuntime: async (options) => ({
+          descriptor: {
+            builtInTools: [],
+            customTools: [],
+            model: options.model,
+            projectDirectory: options.projectDirectory,
+            sessionId: options.sessionId
+          },
+          dispose: () => undefined,
+          getLastAssistantText: () =>
+            JSON.stringify({
+              commands: [{ constraints: [], instruction: "生成白底图", targetSessionId: "img-1" }],
+              globalInstruction: "统一白底",
+              outputSize: "2048x2048",
+              title: "白底图"
+            }),
+          prompt: async () => undefined,
+          subscribe: () => () => undefined
+        })
+      }
+    );
+
+    expect(plan.outputSize).toBeUndefined();
+    expect(plan.commands[0].outputSize).toBeUndefined();
+    expect(plan.commands[0]).toMatchObject({
+      constraints: [],
+      instruction: "生成白底图",
+      source: "project-manager",
+      targetSessionId: "img-1"
+    });
+  });
+
   test("can request new image generation without existing sessions", async () => {
     const result = await runEsseAgentTurn(
       {
@@ -257,7 +448,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",
@@ -300,7 +490,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",
@@ -347,7 +536,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",
@@ -393,7 +581,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",
@@ -438,7 +625,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",
@@ -483,7 +669,6 @@ describe("esseAgent", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:/project",

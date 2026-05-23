@@ -6,13 +6,13 @@ function readProjectFile(filePath: string): string {
   return readFileSync(resolve(process.cwd(), filePath), "utf8");
 }
 
-describe("Esse agent UI wiring", () => {
+describe("project plan UI wiring", () => {
   test("right sidebar exposes Esse agent and current image tabs", () => {
     const app = readProjectFile("src/App.tsx");
     const panel = readProjectFile("src/components/ProjectPlanPanel.tsx");
     const styles = readProjectFile("src/styles.css");
 
-    expect(app).toContain("Esse智能体");
+    expect(app).toContain("项目方案");
     expect(app).toContain("当前图片");
     expect(app).toContain("ProjectPlanPanel");
     expect(app).toContain("SessionPanel");
@@ -54,7 +54,7 @@ describe("Esse agent UI wiring", () => {
 
     expect(panel).toContain("formatPlanApprovalTitle(plan)");
     expect(panel).toContain('className="plan-title"');
-    expect(panel).toContain("Esse有${plan.commands.length}个任务待审批");
+    expect(panel).toContain("方案有${plan.commands.length}个任务待审批");
     expect(panel).not.toContain("plan-eyebrow");
     expect(panel).not.toContain("plan-summary-line");
     expect(panel).not.toContain("<p>{plan.globalInstruction}</p>");
@@ -72,6 +72,7 @@ describe("Esse agent UI wiring", () => {
     expect(panel).toContain("Prompt 预览");
     expect(panel).toContain("command-reference-strip");
     expect(panel).toContain("确认执行");
+    expect(panel).toContain("重试失败项");
     expect(styles).toContain(".command-reference-strip");
   });
 
@@ -87,9 +88,22 @@ describe("Esse agent UI wiring", () => {
     const app = readProjectFile("src/App.tsx");
 
     expect(app).toContain("executeNewImagePlanCommands");
-    expect(app).toContain('plan.commands.filter((command) => command.target === "new")');
+    expect(app).toContain("selectPlanCommandsForExecution");
+    expect(app).toContain('commandsToRun.filter((command) => command.target === "new")');
     expect(app).toContain("preparedTasks.push");
     expect(app).toContain("await Promise.all");
+  });
+
+  test("session snapshot persistence updates the ref before saving project-manager reports", () => {
+    const app = readProjectFile("src/App.tsx");
+    const updateAndPersistBody = app.match(
+      /function updateAndPersistSessions\([\s\S]*?\): ImageSession\[\] \{(?<body>[\s\S]*?)\n  \}/
+    )?.groups?.body ?? "";
+
+    expect(updateAndPersistBody).toContain("sessionsRef.current = nextSessions");
+    expect(updateAndPersistBody.indexOf("sessionsRef.current = nextSessions")).toBeLessThan(
+      updateAndPersistBody.indexOf("persistProjectSnapshot")
+    );
   });
 
   test("Esse composer exposes a compact persona switch after generation ratio", () => {

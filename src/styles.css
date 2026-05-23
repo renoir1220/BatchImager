@@ -755,7 +755,7 @@ textarea {
   left: 50%;
   bottom: 27px;
   z-index: 3;
-  width: 82px;
+  width: 74px;
   max-width: calc(100% - 20px);
   height: auto;
   pointer-events: none;

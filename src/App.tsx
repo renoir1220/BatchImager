@@ -36,6 +36,10 @@ import { selectRecentProjects } from "./domain/recentProjects";
 import { resolveProjectManagerReferenceImages } from "./domain/projectManagerReferences";
 import { createEsseImageRequestPlan } from "./domain/esseImageRequestPlan";
 import {
+  selectPlanCommandsForExecution,
+  type ProjectPlanExecutionMode
+} from "./domain/projectPlanExecution";
+import {
   clampSessionPanelWidth,
   DEFAULT_SESSION_PANEL_WIDTH,
   readStoredSessionPanelWidth,
@@ -591,19 +595,30 @@ export function App() {
     }
   }
 
-  function handleExecuteProjectPlan(planId: string): void {
+  function handleExecuteProjectPlan(planId: string, mode: ProjectPlanExecutionMode): void {
     const plan = projectManagerStateRef.current.plans.find((currentPlan) => currentPlan.id === planId);
 
     if (!plan || plan.status === "running") {
       return;
     }
 
-    const runningState = markBatchPlanRunning(projectManagerStateRef.current, planId);
-    const newImageCommands = plan.commands.filter((command) => command.target === "new");
+    const commandsToRun = selectPlanCommandsForExecution(plan, mode);
+
+    if (commandsToRun.length === 0) {
+      return;
+    }
+
+    const runningState = markBatchPlanRunning(
+      projectManagerStateRef.current,
+      planId,
+      mode === "failed" ? commandsToRun.map((command) => command.id) : undefined
+    );
+    const newImageCommands = commandsToRun.filter((command) => command.target === "new");
     setProjectManagerState(runningState);
+    projectManagerStateRef.current = runningState;
     persistProjectSnapshot(sessions, selectedSessionId, runningState);
 
-    for (const command of plan.commands) {
+    for (const command of commandsToRun) {
       if (command.target === "new") {
         continue;
       }
@@ -792,6 +807,7 @@ export function App() {
       const sourceState = currentState.plans.some((plan) => plan.id === planId) ? currentState : fallbackState;
       const nextState = applyWorkerReport(sourceState, planId, report);
       persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
+      projectManagerStateRef.current = nextState;
       return nextState;
     });
   }
@@ -1077,6 +1093,9 @@ export function App() {
     nextSelectedSessionId: string | null,
     nextProjectManagerState = projectManagerStateRef.current
   ): ImageSession[] {
+    sessionsRef.current = nextSessions;
+    selectedSessionIdRef.current = nextSelectedSessionId;
+    projectManagerStateRef.current = nextProjectManagerState;
     persistProjectSnapshot(nextSessions, nextSelectedSessionId, nextProjectManagerState);
     return nextSessions;
   }
@@ -1214,7 +1233,7 @@ export function App() {
               onClick={() => setActiveSidebarTab("project")}
             >
               <img className="sidebar-tab-mascot" src={esseTabMascot} alt="" aria-hidden="true" draggable={false} />
-              <span className="sidebar-tab-label">Esse智能体</span>
+              <span className="sidebar-tab-label">项目方案</span>
               {projectManagerState.plans.some((plan) => plan.status === "running") ? <span className="tab-dot running" /> : null}
             </button>
             <button

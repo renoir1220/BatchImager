@@ -1,14 +1,14 @@
 import { describe, expect, test } from "vitest";
 import type { ProductImageResult } from "./tuziImageApi";
-import { runPiImageToolChat } from "./piImageToolChat";
+import { runImageSessionAgent } from "./imageSessionAgent";
 
-describe("piImageToolChat", () => {
+describe("imageSessionAgent", () => {
   test("drives a chat turn through Pi and executes the registered image tool", async () => {
     const generated: ProductImageResult[] = [];
     const runtimePrompts: string[] = [];
     const customTools: Array<{ name: string; execute: (id: string, params: Record<string, unknown>) => Promise<unknown> }> = [];
 
-    const result = await runPiImageToolChat(
+    const result = await runImageSessionAgent(
       {
         imagePath: "C:\\project\\images\\original\\img-1-flower.jpg",
         messages: [{ role: "user", content: "生成白底商品图" }],
@@ -19,7 +19,6 @@ describe("piImageToolChat", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:\\project",
@@ -69,7 +68,7 @@ describe("piImageToolChat", () => {
       }
     );
 
-    expect(runtimePrompts[0]).toContain("BatchImager 的右侧图片会话助手");
+    expect(runtimePrompts[0]).toContain("BatchImager 的右侧图片会话智能体");
     expect(runtimePrompts[0]).toContain("ref-1：样例 1");
     expect(customTools.map((tool) => tool.name)).toContain("generate_image");
     expect(generated).toHaveLength(1);
@@ -86,7 +85,7 @@ describe("piImageToolChat", () => {
     const generatedRequests: unknown[] = [];
     const customTools: Array<{ name: string; execute: (id: string, params: Record<string, unknown>) => Promise<unknown> }> = [];
 
-    await runPiImageToolChat(
+    await runImageSessionAgent(
       {
         imagePath: "C:\\project\\images\\generated\\placeholder.png",
         messages: [{ role: "user", content: "根据这张参考图生成咖啡馆内部结构图" }],
@@ -96,7 +95,6 @@ describe("piImageToolChat", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:\\project",
@@ -143,7 +141,7 @@ describe("piImageToolChat", () => {
     const generatedRequests: unknown[] = [];
     const customTools: Array<{ name: string; execute: (id: string, params: Record<string, unknown>) => Promise<unknown> }> = [];
 
-    await runPiImageToolChat(
+    await runImageSessionAgent(
       {
         imagePath: "C:\\project\\images\\generated\\placeholder.png",
         messages: [{ role: "user", content: "根据这张参考图生成咖啡馆内部结构图" }],
@@ -153,7 +151,6 @@ describe("piImageToolChat", () => {
       {
         apiKey: "coding-key",
         baseUrl: "https://api.tu-zi.com/coding",
-        chatAgent: "pi",
         model: "gpt-5.5"
       },
       "C:\\project",
@@ -199,7 +196,7 @@ describe("piImageToolChat", () => {
 
   test("returns a clear error if Pi finishes without assistant text", async () => {
     await expect(
-      runPiImageToolChat(
+      runImageSessionAgent(
         {
           imagePath: "C:\\project\\images\\original\\img-1-flower.jpg",
           messages: [{ role: "user", content: "分析这张图" }],
@@ -208,7 +205,6 @@ describe("piImageToolChat", () => {
         {
           apiKey: "coding-key",
           baseUrl: "https://api.tu-zi.com/coding",
-          chatAgent: "pi",
           model: "gpt-5.5"
         },
         "C:\\project",
@@ -230,5 +226,80 @@ describe("piImageToolChat", () => {
         }
       )
     ).rejects.toThrow("Pi 会话未返回文本回复");
+  });
+
+  test("rejects attachment-based generation when no reference image is available before starting Pi", async () => {
+    let runtimeCreated = false;
+    const generatedRequests: unknown[] = [];
+
+    await expect(
+      runImageSessionAgent(
+        {
+          imagePath: "C:\\project\\images\\generated\\placeholder.png",
+          messages: [{ role: "user", content: "按附件里的参考图继续生成三张内部设计图" }],
+          sessionId: "img-7"
+        },
+        {
+          apiKey: "coding-key",
+          baseUrl: "https://api.tu-zi.com/coding",
+          model: "gpt-5.5"
+        },
+        "C:\\project",
+        {
+          createRuntime: async () => {
+            runtimeCreated = true;
+            throw new Error("runtime should not be created");
+          },
+          generateImage: async (request) => {
+            generatedRequests.push(request);
+            return { outputPath: "unused.png" };
+          }
+        }
+      )
+    ).rejects.toThrow("我没有收到可用的参考图附件");
+
+    expect(runtimeCreated).toBe(false);
+    expect(generatedRequests).toEqual([]);
+  });
+
+  test("throws when a generation request finishes without calling the image tool", async () => {
+    const generatedRequests: unknown[] = [];
+
+    await expect(
+      runImageSessionAgent(
+        {
+          imagePath: "C:\\project\\images\\original\\img-1-flower.jpg",
+          messages: [{ role: "user", content: "生成这个花朵在家居环境下的商品图" }],
+          sessionId: "img-1"
+        },
+        {
+          apiKey: "coding-key",
+          baseUrl: "https://api.tu-zi.com/coding",
+          model: "gpt-5.5"
+        },
+        "C:\\project",
+        {
+          createRuntime: async (options) => ({
+            descriptor: {
+              builtInTools: [],
+              customTools: [],
+              model: options.model,
+              projectDirectory: options.projectDirectory,
+              sessionId: options.sessionId
+            },
+            dispose: () => undefined,
+            getLastAssistantText: () => "我会为你生成一张图。",
+            prompt: async () => undefined,
+            subscribe: () => () => undefined
+          }),
+          generateImage: async (request) => {
+            generatedRequests.push(request);
+            return { outputPath: "unused.png" };
+          }
+        }
+      )
+    ).rejects.toThrow("Pi 未返回图片生成工具调用");
+
+    expect(generatedRequests).toEqual([]);
   });
 });

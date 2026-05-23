@@ -11,7 +11,6 @@ const DEFAULT_SIZE = "auto";
 export interface TuziLlmApiConfig {
   apiKey: string;
   baseUrl: string;
-  chatAgent: "openai-tools" | "pi";
   model: string;
 }
 
@@ -79,7 +78,6 @@ export function resolveTuziLlmConfig(values: Record<string, string | undefined>)
   return {
     apiKey,
     baseUrl: values.TUZI_LLM_BASE_URL?.trim() || values.TUZI_BASE_URL?.trim() || DEFAULT_LLM_BASE_URL,
-    chatAgent: values.BATCHIMAGER_CHAT_AGENT?.trim().toLowerCase() === "pi" ? "pi" : "openai-tools",
     model: values.TUZI_LLM_MODEL?.trim() || DEFAULT_LLM_MODEL
   };
 }

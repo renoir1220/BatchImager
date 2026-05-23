@@ -29,9 +29,6 @@ describe("imageGenerationService", () => {
             outputPath: "C:\\generated\\edit.png",
             requestSize: "1024x768"
           };
-        },
-        generateImage: async () => {
-          throw new Error("edit mode must not call generations");
         }
       }
     );
@@ -53,8 +50,9 @@ describe("imageGenerationService", () => {
     expect(result.outputPath).toBe("C:\\generated\\edit.png");
   });
 
-  test("routes prompt-only requests through generations without a source image", async () => {
-    const calls: unknown[] = [];
+  test("routes generate requests without references through the prompt generation implementation", async () => {
+    const editCalls: unknown[] = [];
+    const generationCalls: unknown[] = [];
     const executor = createImageGenerationExecutor(
       {
         apiKey: "local-test-key",
@@ -64,11 +62,15 @@ describe("imageGenerationService", () => {
         size: "auto"
       },
       {
-        editImage: async () => {
-          throw new Error("generate mode must not call edits");
+        editImage: async (request) => {
+          editCalls.push(request);
+          return {
+            outputPath: "C:\\generated\\edit.png",
+            requestSize: "2048x2048"
+          };
         },
         generateImage: async (request) => {
-          calls.push(request);
+          generationCalls.push(request);
           return {
             outputPath: "C:\\generated\\new.png",
             requestSize: "2048x2048"
@@ -78,13 +80,15 @@ describe("imageGenerationService", () => {
     );
 
     const result = await executor({
+      imagePath: "C:\\generated\\seeds\\esse-image-1.png",
       mode: "generate",
       prompt: "生成一张新的花束商品图",
       sessionId: "esse-image-1",
       size: "2048x2048"
     });
 
-    expect(calls).toEqual([
+    expect(editCalls).toEqual([]);
+    expect(generationCalls).toEqual([
       {
         prompt: "生成一张新的花束商品图",
         sessionId: "esse-image-1",
@@ -117,13 +121,14 @@ describe("imageGenerationService", () => {
           generationCalls.push(request);
           return {
             outputPath: "C:\\generated\\new.png",
-            requestSize: "2048x2048"
+            requestSize: "1536x1024"
           };
         }
       }
     );
 
     const result = await executor({
+      imagePath: "C:\\generated\\seeds\\esse-image-1.png",
       mode: "generate",
       prompt: "根据参考图生成咖啡馆内部结构图",
       referenceImagePaths: ["C:\\refs\\sakura-cafe.jpg", "C:\\refs\\style.jpg"],

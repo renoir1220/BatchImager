@@ -9,15 +9,27 @@ import type {
 } from "../ipcTypes";
 import type { TuziLlmApiConfig } from "./localConfig";
 import type { AppLogger } from "./appLogger";
-import type { CreatePiAgentRuntimeOptions, PiAgentRuntime } from "./piAgentRuntime";
-import { createPiAgentRuntime } from "./piAgentRuntime";
+import type { CreateAgentRuntimeOptions, AgentRuntime } from "./agentRuntime";
+import { createAgentRuntime } from "./agentRuntime";
+import {
+  getMissingReferenceImageReply,
+  shouldReportMissingReferenceImage as shouldReportMissingReferenceImageFromMessages
+} from "./referenceAttachmentGuard";
 
 interface EsseAgentTurnInput {
+  acceptPlanOnlyResponse?: boolean;
   messages: EsseAgentHistoryMessage[];
   outputSize?: string;
   persona?: EssePersona;
   referenceImagePaths?: string[];
   selectedSessionId?: string | null;
+  sessions: ProjectManagerPlanSession[];
+}
+
+interface EssePlanTurnInput {
+  outputSize?: string;
+  prompt: string;
+  referenceImagePaths?: string[];
   sessions: ProjectManagerPlanSession[];
 }
 
@@ -29,7 +41,7 @@ interface EsseAgentTurnResult {
 }
 
 interface EsseAgentDeps {
-  createRuntime?: (options: CreatePiAgentRuntimeOptions) => Promise<PiAgentRuntime>;
+  createRuntime?: (options: CreateAgentRuntimeOptions) => Promise<AgentRuntime>;
   logger?: AppLogger;
 }
 
@@ -110,7 +122,7 @@ export async function runEsseAgentTurn(
   });
 
   if (shouldReportMissingReferenceImage(input)) {
-    const reply = "我没有收到可用的参考图附件，请先粘贴或添加参考图后再发送。";
+    const reply = getMissingReferenceImageReply();
     deps.logger?.warn("Esse request referenced a missing attachment", {
       context,
       publicMessage: "没有收到参考图附件，请先粘贴或添加参考图。"
@@ -118,7 +130,7 @@ export async function runEsseAgentTurn(
     return { reply };
   }
 
-  const runtime = await (deps.createRuntime ?? createPiAgentRuntime)({
+  const runtime = await (deps.createRuntime ?? createAgentRuntime)({
     customToolDefinitions: [],
     llmConfig: config,
     model: config.model,
@@ -127,8 +139,8 @@ export async function runEsseAgentTurn(
   });
 
   try {
-    const piLogState: PiLogState = { hasPublishedMessageUpdate: false };
-    runtime.subscribe((event) => logPiEvent(event, deps.logger, piLogState));
+    const agentLogState: AgentLogState = { hasPublishedMessageUpdate: false };
+    runtime.subscribe((event) => logAgentEvent(event, deps.logger, agentLogState));
     await runtime.prompt(buildEssePrompt(input, selectedOutputSize));
 
     const content = runtime.getLastAssistantText()?.trim();
@@ -137,7 +149,9 @@ export async function runEsseAgentTurn(
     }
 
     const parsed = parseEsseResponse(content);
-    const result = normalizeEsseResponse(parsed, input, selectedOutputSize);
+    const result = normalizeEsseResponse(parsed, input, selectedOutputSize, {
+      acceptPlanOnlyResponse: input.acceptPlanOnlyResponse === true
+    });
 
     deps.logger?.info("Esse agent request completed", {
       context,
@@ -153,6 +167,36 @@ export async function runEsseAgentTurn(
   } finally {
     runtime.dispose();
   }
+}
+
+export async function runEssePlanTurn(
+  input: EssePlanTurnInput,
+  config: TuziLlmApiConfig,
+  projectDirectory: string,
+  deps: EsseAgentDeps = {}
+): Promise<BatchPlan> {
+  const result = await runEsseAgentTurn(
+    {
+      messages: [{ content: input.prompt, role: "user" }],
+      acceptPlanOnlyResponse: true,
+      ...(input.outputSize ? { outputSize: input.outputSize } : {}),
+      ...(input.referenceImagePaths ? { referenceImagePaths: input.referenceImagePaths } : {}),
+      sessions: input.sessions
+    },
+    config,
+    projectDirectory,
+    deps
+  );
+
+  if (!result.plan) {
+    if (result.reply === getMissingReferenceImageReply()) {
+      throw new Error(result.reply);
+    }
+
+    throw new Error("Esse 未返回有效的批量方案 JSON");
+  }
+
+  return result.plan;
 }
 
 function buildEssePrompt(input: EsseAgentTurnInput, selectedOutputSize: string | undefined): string {
@@ -219,13 +263,21 @@ function parseEsseResponse(content: string): RawEsseResponse {
 function normalizeEsseResponse(
   response: RawEsseResponse,
   input: EsseAgentTurnInput,
-  selectedOutputSize: string | undefined
+  selectedOutputSize: string | undefined,
+  options: { acceptPlanOnlyResponse?: boolean } = {}
 ): EsseAgentTurnResult {
-  if (!isNonEmptyString(response.reply)) {
+  const rawPlan = response.plan ?? (options.acceptPlanOnlyResponse && isRawBatchPlan(response) ? (response as RawBatchPlan) : undefined);
+  const reply = isNonEmptyString(response.reply)
+    ? response.reply.trim()
+    : options.acceptPlanOnlyResponse && rawPlan
+      ? "方案已生成，等待确认。"
+      : undefined;
+
+  if (!reply) {
     throw new Error("Esse 未返回有效回复");
   }
 
-  const plan = response.plan ? normalizeBatchPlan(response.plan, input, selectedOutputSize) : undefined;
+  const plan = rawPlan ? normalizeBatchPlan(rawPlan, input, selectedOutputSize) : undefined;
   const fileTasks = normalizeFileTasks(response.fileTasks);
   const imageRequests = normalizeImageRequests(response.imageRequests, input, selectedOutputSize);
 
@@ -233,8 +285,13 @@ function normalizeEsseResponse(
     ...(fileTasks.length ? { fileTasks } : {}),
     ...(imageRequests.length ? { imageRequests } : {}),
     ...(plan ? { plan } : {}),
-    reply: response.reply.trim()
+    reply
   };
+}
+
+function isRawBatchPlan(response: RawEsseResponse): boolean {
+  const candidate = response as RawBatchPlan;
+  return Array.isArray(candidate.commands) || isNonEmptyString(candidate.globalInstruction) || isNonEmptyString(candidate.title);
 }
 
 function normalizeFileTasks(tasks: RawEsseFileTask[] | undefined): EsseFileTask[] {
@@ -384,16 +441,10 @@ function shouldUseProjectSourceSession(input: EsseAgentTurnInput): boolean {
 }
 
 function shouldReportMissingReferenceImage(input: EsseAgentTurnInput): boolean {
-  if (input.referenceImagePaths?.length) {
-    return false;
-  }
-
-  const latestUserMessage = [...input.messages]
-    .reverse()
-    .find((message) => message.role === "user" && isNonEmptyString(message.content))
-    ?.content.trim() ?? "";
-
-  return /(?:附件|附图|参考图|刚才.*图|之前.*图|上次.*图|第一个\s*prompt.*图|第一条\s*prompt.*图)/i.test(latestUserMessage);
+  return shouldReportMissingReferenceImageFromMessages({
+    messages: input.messages,
+    referenceImageCount: input.referenceImagePaths?.length ?? 0
+  });
 }
 
 function isValidImageRequest(request: RawEsseImageRequest): request is RawEsseImageRequest & { prompt: string } {
@@ -420,11 +471,11 @@ function createId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-interface PiLogState {
+interface AgentLogState {
   hasPublishedMessageUpdate: boolean;
 }
 
-function logPiEvent(event: unknown, logger: AppLogger | undefined, state: PiLogState): void {
+function logAgentEvent(event: unknown, logger: AppLogger | undefined, state: AgentLogState): void {
   if (!logger || typeof event !== "object" || event === null || !("type" in event) || typeof event.type !== "string") {
     return;
   }

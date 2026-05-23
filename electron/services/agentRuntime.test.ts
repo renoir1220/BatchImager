@@ -1,17 +1,17 @@
 import { describe, expect, test } from "vitest";
 import {
-  buildPiAgentSessionDescriptor,
-  loadPiCodingAgentSdk,
-  resetPiAgentRuntimeWarmupForTests,
-  type PiCodingAgentSdk,
-  warmupPiAgentRuntime
-} from "./piAgentRuntime";
+  buildAgentSessionDescriptor,
+  loadCodingAgentSdk,
+  resetAgentRuntimeWarmupForTests,
+  type CodingAgentSdk,
+  warmupAgentRuntime
+} from "./agentRuntime";
 
-describe("piAgentRuntime", () => {
+describe("agentRuntime", () => {
   test("warms and reuses the default Pi SDK import", async () => {
-    resetPiAgentRuntimeWarmupForTests();
+    resetAgentRuntimeWarmupForTests();
     let loadCount = 0;
-    const sdk: PiCodingAgentSdk = {
+    const sdk: CodingAgentSdk = {
       createAgentSession: async () => ({ session: { prompt: async () => undefined, subscribe: () => () => undefined } })
     };
     const loader = async () => {
@@ -19,16 +19,16 @@ describe("piAgentRuntime", () => {
       return sdk;
     };
 
-    await warmupPiAgentRuntime(loader);
-    await expect(loadPiCodingAgentSdk()).resolves.toBe(sdk);
-    await expect(loadPiCodingAgentSdk()).resolves.toBe(sdk);
+    await warmupAgentRuntime(loader);
+    await expect(loadCodingAgentSdk()).resolves.toBe(sdk);
+    await expect(loadCodingAgentSdk()).resolves.toBe(sdk);
 
     expect(loadCount).toBe(1);
-    resetPiAgentRuntimeWarmupForTests();
+    resetAgentRuntimeWarmupForTests();
   });
 
   test("builds a lightweight OpenClaw-style session descriptor for BatchImager", () => {
-    const descriptor = buildPiAgentSessionDescriptor({
+    const descriptor = buildAgentSessionDescriptor({
       model: "gpt-5.5",
       projectDirectory: "C:\\BatchImagerProjects\\project-1",
       sessionId: "img-1"
@@ -44,32 +44,31 @@ describe("piAgentRuntime", () => {
   });
 
   test("loads the Pi SDK through an injectable dynamic loader", async () => {
-    const sdk: PiCodingAgentSdk = {
+    const sdk: CodingAgentSdk = {
       createAgentSession: async () => ({ session: { prompt: async () => undefined, subscribe: () => () => undefined } })
     };
 
-    await expect(loadPiCodingAgentSdk(async () => sdk)).resolves.toBe(sdk);
+    await expect(loadCodingAgentSdk(async () => sdk)).resolves.toBe(sdk);
   });
 
   test("reports a clear error when the Pi SDK cannot be loaded", async () => {
     await expect(
-      loadPiCodingAgentSdk(async () => {
+      loadCodingAgentSdk(async () => {
         throw new Error("module not found");
       })
-    ).rejects.toThrow("Pi SDK 加载失败");
+    ).rejects.toThrow("智能体 SDK 加载失败");
   });
 
   test("creates a runtime with project cwd, broad built-ins, and provided custom tools", async () => {
     const createCalls: Record<string, unknown>[] = [];
     const unsubscribe = () => undefined;
     const prompts: string[] = [];
-    const runtime = await import("./piAgentRuntime").then(({ createPiAgentRuntime }) =>
-      createPiAgentRuntime({
+    const runtime = await import("./agentRuntime").then(({ createAgentRuntime }) =>
+      createAgentRuntime({
         customToolDefinitions: [{ name: "run_project_command" }],
         llmConfig: {
           apiKey: "test-key",
           baseUrl: "https://api.tu-zi.com/coding",
-          chatAgent: "pi",
           model: "gpt-5.5"
         },
         model: "gpt-5.5",
@@ -141,12 +140,11 @@ describe("piAgentRuntime", () => {
   });
 
   test("reads the last assistant text from SDK session messages when no helper exists", async () => {
-    const runtime = await import("./piAgentRuntime").then(({ createPiAgentRuntime }) =>
-      createPiAgentRuntime({
+    const runtime = await import("./agentRuntime").then(({ createAgentRuntime }) =>
+      createAgentRuntime({
         llmConfig: {
           apiKey: "test-key",
           baseUrl: "https://api.tu-zi.com/coding",
-          chatAgent: "pi",
           model: "gpt-5.5"
         },
         model: "gpt-5.5",

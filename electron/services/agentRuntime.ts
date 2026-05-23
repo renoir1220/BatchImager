@@ -1,6 +1,6 @@
 import type { TuziLlmApiConfig } from "./localConfig";
 
-export interface PiCodingAgentSdk {
+export interface CodingAgentSdk {
   AuthStorage?: {
     create: (...args: unknown[]) => unknown;
     inMemory?: () => unknown;
@@ -31,7 +31,7 @@ export interface PiCodingAgentSdk {
   }>;
 }
 
-export interface PiAgentSessionDescriptor {
+export interface AgentSessionDescriptor {
   builtInTools: string[];
   customTools: string[];
   model: string;
@@ -39,35 +39,35 @@ export interface PiAgentSessionDescriptor {
   sessionId: string;
 }
 
-interface BuildPiAgentSessionDescriptorOptions {
+interface BuildAgentSessionDescriptorOptions {
   model: string;
   projectDirectory: string;
   sessionId: string;
 }
 
-export interface CreatePiAgentRuntimeOptions extends BuildPiAgentSessionDescriptorOptions {
+export interface CreateAgentRuntimeOptions extends BuildAgentSessionDescriptorOptions {
   customToolDefinitions?: unknown[];
   llmConfig?: TuziLlmApiConfig;
-  sdk?: PiCodingAgentSdk;
+  sdk?: CodingAgentSdk;
 }
 
-export interface PiAgentRuntime {
-  descriptor: PiAgentSessionDescriptor;
+export interface AgentRuntime {
+  descriptor: AgentSessionDescriptor;
   dispose: () => void;
   getLastAssistantText: () => string | undefined;
   prompt: (text: string) => Promise<void>;
   subscribe: (listener: (event: unknown) => void) => () => void;
 }
 
-type PiSdkLoader = () => Promise<unknown>;
+type AgentSdkLoader = () => Promise<unknown>;
 
 const DEFAULT_BUILT_IN_TOOLS = ["read", "write", "edit", "grep", "find", "ls"];
 const DEFAULT_CUSTOM_TOOLS = ["run_project_command", "generate_image", "inspect_image", "batch_generate"];
-let piSdkLoadPromise: Promise<PiCodingAgentSdk> | undefined;
+let agentSdkLoadPromise: Promise<CodingAgentSdk> | undefined;
 
-export function buildPiAgentSessionDescriptor(
-  options: BuildPiAgentSessionDescriptorOptions
-): PiAgentSessionDescriptor {
+export function buildAgentSessionDescriptor(
+  options: BuildAgentSessionDescriptorOptions
+): AgentSessionDescriptor {
   return {
     builtInTools: [...DEFAULT_BUILT_IN_TOOLS],
     customTools: [...DEFAULT_CUSTOM_TOOLS],
@@ -77,50 +77,50 @@ export function buildPiAgentSessionDescriptor(
   };
 }
 
-export async function loadPiCodingAgentSdk(loader: PiSdkLoader = defaultPiSdkLoader): Promise<PiCodingAgentSdk> {
-  if (loader === defaultPiSdkLoader && piSdkLoadPromise) {
-    return piSdkLoadPromise;
+export async function loadCodingAgentSdk(loader: AgentSdkLoader = defaultAgentSdkLoader): Promise<CodingAgentSdk> {
+  if (loader === defaultAgentSdkLoader && agentSdkLoadPromise) {
+    return agentSdkLoadPromise;
   }
 
-  const promise = loadPiCodingAgentSdkOnce(loader);
+  const promise = loadCodingAgentSdkOnce(loader);
 
-  if (loader === defaultPiSdkLoader) {
-    piSdkLoadPromise = clearWarmupOnFailure(promise);
+  if (loader === defaultAgentSdkLoader) {
+    agentSdkLoadPromise = clearWarmupOnFailure(promise);
   }
 
   return promise;
 }
 
-export async function warmupPiAgentRuntime(loader: PiSdkLoader = defaultPiSdkLoader): Promise<void> {
-  if (!piSdkLoadPromise) {
-    piSdkLoadPromise = clearWarmupOnFailure(loadPiCodingAgentSdkOnce(loader));
+export async function warmupAgentRuntime(loader: AgentSdkLoader = defaultAgentSdkLoader): Promise<void> {
+  if (!agentSdkLoadPromise) {
+    agentSdkLoadPromise = clearWarmupOnFailure(loadCodingAgentSdkOnce(loader));
   }
 
-  await piSdkLoadPromise;
+  await agentSdkLoadPromise;
 }
 
-export function resetPiAgentRuntimeWarmupForTests(): void {
-  piSdkLoadPromise = undefined;
+export function resetAgentRuntimeWarmupForTests(): void {
+  agentSdkLoadPromise = undefined;
 }
 
-async function loadPiCodingAgentSdkOnce(loader: PiSdkLoader): Promise<PiCodingAgentSdk> {
+async function loadCodingAgentSdkOnce(loader: AgentSdkLoader): Promise<CodingAgentSdk> {
   try {
     const sdk = await loader();
 
-    if (isPiCodingAgentSdk(sdk)) {
+    if (isCodingAgentSdk(sdk)) {
       return sdk;
     }
   } catch (error) {
-    throw new Error(`Pi SDK 加载失败：${getErrorMessage(error)}`);
+    throw new Error(`智能体 SDK 加载失败：${getErrorMessage(error)}`);
   }
 
-  throw new Error("Pi SDK 加载失败：未找到 createAgentSession");
+  throw new Error("智能体 SDK 加载失败：未找到 createAgentSession");
 }
 
-export async function createPiAgentRuntime(options: CreatePiAgentRuntimeOptions): Promise<PiAgentRuntime> {
-  const descriptor = buildPiAgentSessionDescriptor(options);
-  const sdk = options.sdk ?? (await loadPiCodingAgentSdk());
-  const modelOptions = options.llmConfig ? createTuziPiModelOptions(options.llmConfig, sdk) : {};
+export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<AgentRuntime> {
+  const descriptor = buildAgentSessionDescriptor(options);
+  const sdk = options.sdk ?? (await loadCodingAgentSdk());
+  const modelOptions = options.llmConfig ? createTuziAgentModelOptions(options.llmConfig, sdk) : {};
   const { session } = await sdk.createAgentSession({
     cwd: descriptor.projectDirectory,
     customTools: options.customToolDefinitions ?? [],
@@ -196,12 +196,12 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function createTuziPiModelOptions(config: TuziLlmApiConfig, sdk: PiCodingAgentSdk): Record<string, unknown> {
+function createTuziAgentModelOptions(config: TuziLlmApiConfig, sdk: CodingAgentSdk): Record<string, unknown> {
   const AuthStorage = sdk.AuthStorage;
   const ModelRegistry = sdk.ModelRegistry;
 
   if (!AuthStorage || !ModelRegistry) {
-    throw new Error("Pi SDK 加载失败：缺少 AuthStorage 或 ModelRegistry");
+    throw new Error("智能体 SDK 加载失败：缺少 AuthStorage 或 ModelRegistry");
   }
 
   const authStorage = AuthStorage.inMemory?.() ?? AuthStorage.create();
@@ -242,7 +242,7 @@ function createTuziPiModelOptions(config: TuziLlmApiConfig, sdk: PiCodingAgentSd
 
   const model = modelRegistry.find("batchimager-tuzi", config.model);
   if (!model) {
-    throw new Error(`Pi SDK 模型注册失败：${config.model}`);
+    throw new Error(`智能体 SDK 模型注册失败：${config.model}`);
   }
 
   return {
@@ -258,22 +258,22 @@ function buildOpenAiCompatibleBaseUrl(baseUrl: string): string {
   return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
 }
 
-async function defaultPiSdkLoader(): Promise<unknown> {
+async function defaultAgentSdkLoader(): Promise<unknown> {
   const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<unknown>;
   return dynamicImport("@earendil-works/pi-coding-agent");
 }
 
-function isPiCodingAgentSdk(value: unknown): value is PiCodingAgentSdk {
-  return typeof value === "object" && value !== null && typeof (value as PiCodingAgentSdk).createAgentSession === "function";
+function isCodingAgentSdk(value: unknown): value is CodingAgentSdk {
+  return typeof value === "object" && value !== null && typeof (value as CodingAgentSdk).createAgentSession === "function";
 }
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : String(error);
 }
 
-function clearWarmupOnFailure(promise: Promise<PiCodingAgentSdk>): Promise<PiCodingAgentSdk> {
+function clearWarmupOnFailure(promise: Promise<CodingAgentSdk>): Promise<CodingAgentSdk> {
   return promise.catch((error) => {
-    piSdkLoadPromise = undefined;
+    agentSdkLoadPromise = undefined;
     throw error;
   });
 }

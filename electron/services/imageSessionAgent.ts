@@ -3,37 +3,102 @@ import type { TuziLlmApiConfig } from "./localConfig";
 import type { AppLogger } from "./appLogger";
 import { createBatchImagerCommandPolicy } from "./agentCommandPolicy";
 import { createRunProjectCommandTool } from "./batchImagerAgentTools";
-import type { ImageToolChatInput, ImageToolChatResult, ImageToolRequest, ReferenceImageCandidate } from "./openAiChatApi";
-import type { PiAgentRuntime, CreatePiAgentRuntimeOptions } from "./piAgentRuntime";
-import { createPiAgentRuntime, warmupPiAgentRuntime } from "./piAgentRuntime";
+import type { AgentRuntime, CreateAgentRuntimeOptions } from "./agentRuntime";
+import { createAgentRuntime, warmupAgentRuntime } from "./agentRuntime";
 import type { ProductImageResult } from "./tuziImageApi";
+import {
+  MISSING_REFERENCE_IMAGE_REPLY,
+  shouldReportMissingReferenceImage
+} from "./referenceAttachmentGuard";
 
-interface PiImageToolChatDeps {
-  createRuntime?: (options: CreatePiAgentRuntimeOptions) => Promise<PiAgentRuntime>;
+export type VisibleChatRole = "user" | "assistant";
+
+export interface VisibleChatMessage {
+  role: VisibleChatRole;
+  content: string;
+}
+
+export interface ImageToolChatContext {
+  currentImageLabel?: string;
+  fileName?: string;
+  originalImageLabel?: string;
+  previousGenerationPrompt?: string;
+  referenceImageCount?: number;
+}
+
+export interface ReferenceImageCandidate {
+  filePath: string;
+  id: string;
+  label: string;
+  pinned?: boolean;
+}
+
+export interface ImageToolChatInput {
+  context?: ImageToolChatContext;
+  generationMode?: "edit" | "generate";
+  imagePath: string;
+  messages: VisibleChatMessage[];
+  outputSize?: string;
+  referenceImages?: ReferenceImageCandidate[];
+  referenceImagePaths?: string[];
+  sessionId: string;
+}
+
+export interface ImageToolRequest {
+  imagePath: string;
+  prompt: string;
+  referenceImagePaths?: string[];
+  sessionId: string;
+  size?: string;
+}
+
+export interface ImageToolChatResult {
+  content: string;
+  generatedImage?: ProductImageResult;
+}
+
+interface ImageSessionAgentDeps {
+  createRuntime?: (options: CreateAgentRuntimeOptions) => Promise<AgentRuntime>;
   generateImage: (request: ImageToolRequest) => Promise<ProductImageResult>;
   logger?: AppLogger;
 }
 
-export async function runPiImageToolChat(
+export async function runImageSessionAgent(
   input: ImageToolChatInput,
   config: TuziLlmApiConfig,
   projectDirectory: string,
-  deps: PiImageToolChatDeps
+  deps: ImageSessionAgentDeps
 ): Promise<ImageToolChatResult> {
   const context = `chat:${input.sessionId}`;
   const selectedOutputSize = normalizeGenerationSizeValue(input.outputSize);
+  const expectsImageGeneration = shouldUseImageTool(input.messages, selectedOutputSize);
   const referenceImages = getReferenceImageCandidates(input);
   let generatedImage: ProductImageResult | undefined;
 
-  deps.logger?.info("Pi chat request started", {
+  if (
+    expectsImageGeneration &&
+    shouldReportMissingReferenceImage({
+      messages: input.messages,
+      referenceImageCount: referenceImages.length
+    })
+  ) {
+    deps.logger?.warn("Image session agent request referenced a missing attachment", {
+      context,
+      publicMessage: "没有收到参考图附件，请先粘贴或添加参考图。"
+    });
+    throw new Error(MISSING_REFERENCE_IMAGE_REPLY);
+  }
+
+  deps.logger?.info("Image session agent request started", {
     context,
     data: {
+      expectsImageGeneration,
       messageCount: input.messages.length,
       model: config.model,
       projectDirectory,
       referenceImageCount: referenceImages.length
     },
-    publicMessage: "Pi 会话已启动，正在理解图片任务..."
+    publicMessage: "图片会话智能体已启动，正在理解任务..."
   });
 
   const generateImageTool = createGenerateImageTool({
@@ -50,7 +115,7 @@ export async function runPiImageToolChat(
     commandPolicy: createBatchImagerCommandPolicy({ projectDirectory }),
     projectDirectory
   });
-  const runtime = await (deps.createRuntime ?? createPiAgentRuntime)({
+  const runtime = await (deps.createRuntime ?? createAgentRuntime)({
     customToolDefinitions: [generateImageTool, commandTool],
     llmConfig: config,
     model: config.model,
@@ -58,28 +123,37 @@ export async function runPiImageToolChat(
     sessionId: input.sessionId
   });
 
-  deps.logger?.info("Pi chat runtime ready", {
+  deps.logger?.info("Image session agent runtime ready", {
     context,
     data: {
       builtInTools: runtime.descriptor.builtInTools,
       customTools: runtime.descriptor.customTools
     },
-    publicMessage: "Pi 工具已就绪。"
+    publicMessage: "图片会话工具已就绪。"
   });
 
   try {
-    runtime.subscribe((event) => logPiEvent(event, context, deps.logger));
-    await runtime.prompt(buildPiPrompt(input, referenceImages, selectedOutputSize));
+    runtime.subscribe((event) => logAgentEvent(event, context, deps.logger));
+    await runtime.prompt(buildAgentPrompt(input, referenceImages, selectedOutputSize));
 
     const content = runtime.getLastAssistantText()?.trim();
     if (!content) {
       throw new Error("Pi 会话未返回文本回复");
     }
 
-    deps.logger?.info("Pi chat completed", {
+    if (expectsImageGeneration && !generatedImage) {
+      deps.logger?.error("Image session agent answered without image tool for a generation request", {
+        context,
+        data: { content },
+        publicMessage: "图片会话智能体未返回图片生成工具调用。"
+      });
+      throw new Error("Pi 未返回图片生成工具调用");
+    }
+
+    deps.logger?.info("Image session agent completed", {
       context,
       data: { generated: Boolean(generatedImage) },
-      publicMessage: generatedImage ? "Pi 会话已完成，图片已更新。" : "Pi 会话已完成。"
+      publicMessage: generatedImage ? "图片会话已完成，图片已更新。" : "图片会话已完成。"
     });
 
     return {
@@ -91,8 +165,8 @@ export async function runPiImageToolChat(
   }
 }
 
-export async function warmupPiImageToolChatDependencies(): Promise<void> {
-  await Promise.all([warmupPiAgentRuntime(), loadTypebox()]);
+export async function warmupImageSessionAgentDependencies(): Promise<void> {
+  await Promise.all([warmupAgentRuntime(), loadTypebox()]);
 }
 
 function createGenerateImageTool(options: {
@@ -168,7 +242,7 @@ async function loadTypebox(): Promise<TypeboxApi> {
   return (await import("typebox")) as TypeboxApi;
 }
 
-function buildPiPrompt(
+function buildAgentPrompt(
   input: ImageToolChatInput,
   referenceImages: ReferenceImageCandidate[],
   selectedOutputSize: string | undefined
@@ -179,7 +253,7 @@ function buildPiPrompt(
     .map((message) => `${message.role === "user" ? "用户" : "助手"}：${message.content}`)
     .join("\n");
   const contextLines = [
-    "你是 BatchImager 的右侧图片会话助手。你正在 Pi agent runtime 中工作。",
+    "你是 BatchImager 的右侧图片会话智能体。",
     "需要生成或修改图片时，必须调用 generate_image；不要假装已经生成图片。",
     "当前图片会自动作为 generate_image 的 imagePath 输入，用户不需要重新上传。",
     "回复要自然：先简短说明你准备做什么；工具完成后，总结结果。",
@@ -265,7 +339,38 @@ function getLatestUserMessage(input: ImageToolChatInput): string {
   );
 }
 
-function logPiEvent(event: unknown, context: string, logger: AppLogger | undefined): void {
+function shouldUseImageTool(messages: VisibleChatMessage[], selectedOutputSize: string | undefined): boolean {
+  return Boolean(selectedOutputSize) || shouldFallbackToImageGeneration(messages);
+}
+
+function shouldFallbackToImageGeneration(messages: VisibleChatMessage[]): boolean {
+  const latestUserMessage = getLatestUserMessage({ imagePath: "", messages, sessionId: "" }).toLowerCase();
+
+  if (!latestUserMessage) {
+    return false;
+  }
+
+  return [
+    "生成",
+    "重新生成",
+    "再生成",
+    "做成",
+    "改成",
+    "换成",
+    "处理",
+    "修图",
+    "商品图",
+    "白底",
+    "去背景",
+    "generate",
+    "regenerate",
+    "make ",
+    "turn ",
+    "create "
+  ].some((keyword) => latestUserMessage.includes(keyword));
+}
+
+function logAgentEvent(event: unknown, context: string, logger: AppLogger | undefined): void {
   if (!logger || typeof event !== "object" || event === null || !("type" in event) || typeof event.type !== "string") {
     return;
   }

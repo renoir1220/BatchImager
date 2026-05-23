@@ -10,7 +10,7 @@ import {
 
 export type UnifiedImageGenerationRequest =
   | ({ mode: "edit" } & ProductImageInput)
-  | ({ mode: "generate" } & PromptImageInput & { referenceImagePaths?: string[] });
+  | ({ mode: "generate" } & ProductImageInput);
 
 interface ImageGenerationExecutorDeps {
   editImage?: (request: ProductImageInput) => Promise<ProductImageResult>;
@@ -29,22 +29,22 @@ export function createImageGenerationExecutor(
 
   return (request) => {
     if (request.mode === "generate") {
-      const { mode: _mode, referenceImagePaths, ...promptRequest } = request;
+      const { imagePath: _imagePath, mode: _mode, referenceImagePaths, ...promptRequest } = request;
 
-      if (referenceImagePaths?.length) {
-        const [imagePath, ...additionalReferenceImagePaths] = referenceImagePaths;
-
-        return editImage({
-          imagePath,
-          ...(promptRequest.onRemoteImage ? { onRemoteImage: promptRequest.onRemoteImage } : {}),
-          prompt: promptRequest.prompt,
-          ...(additionalReferenceImagePaths.length ? { referenceImagePaths: additionalReferenceImagePaths } : {}),
-          sessionId: promptRequest.sessionId,
-          ...(promptRequest.size ? { size: promptRequest.size } : {})
-        });
+      if (!referenceImagePaths?.length) {
+        return generateImage(promptRequest);
       }
 
-      return generateImage(promptRequest);
+      const [imagePath, ...additionalReferenceImagePaths] = referenceImagePaths;
+
+      return editImage({
+        imagePath,
+        ...(promptRequest.onRemoteImage ? { onRemoteImage: promptRequest.onRemoteImage } : {}),
+        prompt: promptRequest.prompt,
+        ...(additionalReferenceImagePaths.length ? { referenceImagePaths: additionalReferenceImagePaths } : {}),
+        sessionId: promptRequest.sessionId,
+        ...(promptRequest.size ? { size: promptRequest.size } : {})
+      });
     }
 
     const { mode: _mode, ...editRequest } = request;

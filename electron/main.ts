@@ -17,14 +17,12 @@ import type {
 } from "./ipcTypes";
 import { createAppLogger, type AppLogger } from "./services/appLogger";
 import { createBlankGenerationSeed } from "./services/blankGenerationSeed";
-import { runEsseAgentTurn } from "./services/esseAgent";
+import { runEsseAgentTurn, runEssePlanTurn } from "./services/esseAgent";
 import { createImageGenerationExecutor, type ImageGenerationExecutor } from "./services/imageGenerationService";
 import { packageGeneratedImages } from "./services/imagePackage";
 import { loadTuziConfig, loadTuziLlmConfig } from "./services/localConfig";
 import { saveReferenceImageToDirectory } from "./services/localImageStorage";
-import { runImageToolChat } from "./services/openAiChatApi";
-import { runPiImageToolChat, warmupPiImageToolChatDependencies } from "./services/piImageToolChat";
-import { runProjectManagerPlanAgent } from "./services/projectManagerAgent";
+import { runImageSessionAgent, warmupImageSessionAgentDependencies } from "./services/imageSessionAgent";
 import { listProjectCards } from "./services/projectList";
 import { rememberProjectDirectory } from "./services/projectIndex";
 import {
@@ -277,7 +275,7 @@ function registerIpc(appLogger: AppLogger): void {
     });
 
     try {
-      const plan = await runProjectManagerPlanAgent(request, loadTuziLlmConfig(), projectDirectory, { logger: appLogger });
+      const plan = await runEssePlanTurn(request, loadTuziLlmConfig(), projectDirectory, { logger: appLogger });
 
       return { plan };
     } catch (error) {
@@ -347,35 +345,20 @@ function registerIpc(appLogger: AppLogger): void {
     try {
       const llmConfig = loadTuziLlmConfig();
       const generateImage = createProjectImageGenerationExecutor(requireActiveProjectDirectory(), appLogger);
-      const result =
-        llmConfig.chatAgent === "pi"
-          ? await runPiImageToolChat(request, llmConfig, requireActiveProjectDirectory(), {
-              generateImage: (toolRequest) =>
-                request.generationMode === "generate"
-                  ? generateImage({
-                      mode: "generate",
-                      prompt: toolRequest.prompt,
-                      ...(toolRequest.referenceImagePaths?.length ? { referenceImagePaths: toolRequest.referenceImagePaths } : {}),
-                      sessionId: toolRequest.sessionId,
-                      ...(toolRequest.size ? { size: toolRequest.size } : {})
-                    })
-                  : generateImage({ mode: "edit", ...toolRequest }),
-              logger: appLogger
-            })
-          : await runImageToolChat(request, llmConfig, {
-              fetch,
-              generateImage: (toolRequest) =>
-                request.generationMode === "generate"
-                  ? generateImage({
-                      mode: "generate",
-                      prompt: toolRequest.prompt,
-                      ...(toolRequest.referenceImagePaths?.length ? { referenceImagePaths: toolRequest.referenceImagePaths } : {}),
-                      sessionId: toolRequest.sessionId,
-                      ...(toolRequest.size ? { size: toolRequest.size } : {})
-                    })
-                  : generateImage({ mode: "edit", ...toolRequest }),
-              logger: appLogger
-            });
+      const result = await runImageSessionAgent(request, llmConfig, requireActiveProjectDirectory(), {
+        generateImage: (toolRequest) =>
+          request.generationMode === "generate"
+            ? generateImage({
+                imagePath: toolRequest.imagePath,
+                mode: "generate",
+                prompt: toolRequest.prompt,
+                ...(toolRequest.referenceImagePaths?.length ? { referenceImagePaths: toolRequest.referenceImagePaths } : {}),
+                sessionId: toolRequest.sessionId,
+                ...(toolRequest.size ? { size: toolRequest.size } : {})
+              })
+            : generateImage({ mode: "edit", ...toolRequest }),
+        logger: appLogger
+      });
 
       return {
         assistantMessage: result.content,
@@ -750,7 +733,7 @@ app.whenReady().then(() => {
   registerImageProtocol();
   registerIpc(logger);
   createWindow();
-  warmupPiChat(logger);
+  warmupImageSessionAgent(logger);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -759,17 +742,17 @@ app.whenReady().then(() => {
   });
 });
 
-function warmupPiChat(appLogger: AppLogger): void {
-  void warmupPiImageToolChatDependencies()
+function warmupImageSessionAgent(appLogger: AppLogger): void {
+  void warmupImageSessionAgentDependencies()
     .then(() => {
-      appLogger.info("Pi chat dependencies warmed", {
-        publicMessage: "Pi 会话引擎已预热。"
+      appLogger.info("Image session agent dependencies warmed", {
+        publicMessage: "图片会话智能体已预热。"
       });
     })
     .catch((error) => {
-      appLogger.warn("Pi chat dependency warmup failed", {
+      appLogger.warn("Image session agent dependency warmup failed", {
         error,
-        publicMessage: "Pi 会话引擎预热失败，将在首次使用时重试。"
+        publicMessage: "图片会话智能体预热失败，将在首次使用时重试。"
       });
     });
 }

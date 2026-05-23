@@ -50,17 +50,8 @@ TUZI_IMAGE_MODEL=gpt-image-2
     ).toEqual({
       apiKey: "coding-key",
       baseUrl: "https://api.tu-zi.com/coding",
-      chatAgent: "openai-tools",
       model: "gpt-5.5"
     });
   });
 
-  test("enables Pi chat agent mode through local configuration", () => {
-    expect(
-      resolveTuziLlmConfig({
-        BATCHIMAGER_CHAT_AGENT: "pi",
-        TUZI_LLM_API_KEY: "coding-key"
-      }).chatAgent
-    ).toBe("pi");
-  });
 });

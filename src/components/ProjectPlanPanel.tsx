@@ -19,12 +19,16 @@ import type { PreviewImage } from "./ImagePreviewDialog";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { MessageActions } from "./MessageActions";
 import { usePastedReferenceImages } from "./usePastedReferenceImages";
+import {
+  canRunPlanCommands,
+  type ProjectPlanExecutionMode
+} from "../domain/projectPlanExecution";
 
 interface ProjectPlanPanelProps {
   activityLogs: AppLogEntry[];
   isCreatingPlan: boolean;
   projectManagerState: ProjectManagerState;
-  onExecutePlan: (planId: string) => void;
+  onExecutePlan: (planId: string, mode: ProjectPlanExecutionMode) => void;
   onCopyImage: (imagePath: string) => void;
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
   onSendMessage: (content: string, outputSize?: string, referenceImagePaths?: string[], persona?: EssePersona) => void;
@@ -99,10 +103,10 @@ export function ProjectPlanPanel({
   }
 
   return (
-    <div className="project-plan-panel" aria-label="Esse智能体">
+    <div className="project-plan-panel" aria-label="项目方案">
       <div className="project-manager-thread">
         {projectManagerState.conversation.messages.length === 0 ? (
-          <div className="thread-line muted">直接和 Esse 说明你想做什么。它可以先讨论，也可以生成新图或创建待确认的批处理方案。</div>
+          <div className="thread-line muted">说明整批图片想怎么做。这里可以先讨论方向，也可以生成新图或创建待确认的批处理方案。</div>
         ) : (
           projectManagerState.conversation.messages.map((message, index) => {
             const plan = message.planId ? getPlan(projectManagerState, message.planId) : null;
@@ -213,10 +217,11 @@ function PlanCard({
   collapsed: boolean;
   plan: BatchPlan;
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
-  onExecutePlan: (planId: string) => void;
+  onExecutePlan: (planId: string, mode: ProjectPlanExecutionMode) => void;
   onToggleCollapse: () => void;
 }) {
-  const canExecute = plan.status === "draft" || plan.status === "failed";
+  const canExecute = canRunPlanCommands(plan, "all");
+  const canRetryFailed = canRunPlanCommands(plan, "failed");
 
   return (
     <section className={`batch-plan-card ${plan.status} ${collapsed ? "collapsed" : ""}`} aria-label={`批量方案：${plan.title}`}>
@@ -250,9 +255,17 @@ function PlanCard({
       )}
       <footer>
         {collapsed ? null : (
-          <button className="toolbar-button primary" type="button" disabled={!canExecute} onClick={() => onExecutePlan(plan.id)}>
-            确认执行
-          </button>
+          <>
+            {canRetryFailed ? (
+              <button className="toolbar-button primary" type="button" onClick={() => onExecutePlan(plan.id, "failed")}>
+                重试失败项
+              </button>
+            ) : (
+              <button className="toolbar-button primary" type="button" disabled={!canExecute} onClick={() => onExecutePlan(plan.id, "all")}>
+                确认执行
+              </button>
+            )}
+          </>
         )}
       </footer>
     </section>
@@ -352,22 +365,22 @@ function getCommandReferencePreviews(plan: BatchPlan, command: WorkerCommand): B
 
 function formatPlanApprovalTitle(plan: BatchPlan): string {
   if (plan.status === "running") {
-    return `Esse有${plan.commands.length}个任务执行中`;
+    return `方案有${plan.commands.length}个任务执行中`;
   }
 
   if (plan.status === "completed") {
-    return `Esse有${plan.commands.length}个任务已完成`;
+    return `方案有${plan.commands.length}个任务已完成`;
   }
 
   if (plan.status === "failed") {
-    return `Esse有${plan.commands.length}个任务有失败`;
+    return `方案有${plan.commands.length}个任务有失败`;
   }
 
   if (plan.status === "paused") {
-    return `Esse有${plan.commands.length}个任务已暂停`;
+    return `方案有${plan.commands.length}个任务已暂停`;
   }
 
-  return `Esse有${plan.commands.length}个任务待审批`;
+  return `方案有${plan.commands.length}个任务待审批`;
 }
 
 function formatWorkerStatus(report: WorkerReport | undefined): string {

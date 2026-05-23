@@ -62,14 +62,22 @@ export function setProjectManagerDraftPlan(
   );
 }
 
-export function markBatchPlanRunning(state: ProjectManagerState, planId: string): ProjectManagerState {
+export function markBatchPlanRunning(
+  state: ProjectManagerState,
+  planId: string,
+  commandIdsToRun?: string[]
+): ProjectManagerState {
+  const commandIdSet = commandIdsToRun ? new Set(commandIdsToRun) : null;
+
   return {
     ...state,
     plans: state.plans.map((plan) =>
       plan.id === planId
         ? {
             ...plan,
-            reports: [],
+            reports: commandIdSet
+              ? (plan.reports ?? []).filter((report) => !commandIdSet.has(report.commandId))
+              : [],
             status: "running"
           }
         : plan

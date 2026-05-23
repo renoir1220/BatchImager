@@ -230,8 +230,9 @@ describe("tuziImageApi", () => {
   test("notifies recovery tracking when a remote generated image url is available before download", async () => {
     const remoteEvents: Array<{ remoteUrl?: string; requestSize: string; sessionId: string }> = [];
 
-    await generateImageFromPrompt(
+    await generateProductImage(
       {
+        imagePath: "C:\\images\\placeholder.png",
         onRemoteImage: (event) => {
           remoteEvents.push(event);
         },
@@ -247,7 +248,7 @@ describe("tuziImageApi", () => {
       },
       {
         fetch: async (url) =>
-          String(url).endsWith("/v1/images/generations")
+          String(url).endsWith("/v1/images/edits")
             ? new Response(JSON.stringify({ data: [{ url: "https://cdn.example.com/generated.png" }] }), {
                 headers: { "content-type": "application/json" },
                 status: 200
@@ -255,12 +256,17 @@ describe("tuziImageApi", () => {
             : new Response(new Uint8Array([4, 5, 6]), { status: 200 }),
         makeNow: () => new Date("2026-05-21T13:00:00.000Z"),
         mkdir: async () => undefined,
-        prepareImage: async () => {
-          throw new Error("prompt-only generation must not prepare an edit input");
-        },
-        readFile: async () => {
-          throw new Error("prompt-only generation must not read a source image");
-        },
+        prepareImage: async () => ({
+          byteLength: 1024,
+          converted: false,
+          height: 1024,
+          imagePath: "C:\\prepared\\placeholder.png",
+          originalHeight: 1024,
+          originalWidth: 1536,
+          resized: false,
+          width: 1536
+        }),
+        readFile: async () => Buffer.from([9, 8, 7]),
         writeFile: async () => undefined
       }
     );
@@ -268,7 +274,7 @@ describe("tuziImageApi", () => {
     expect(remoteEvents).toEqual([
       {
         remoteUrl: "https://cdn.example.com/generated.png",
-        requestSize: "auto",
+        requestSize: "1536x1024",
         sessionId: "esse-image-1"
       }
     ]);
