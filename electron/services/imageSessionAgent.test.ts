@@ -1,4 +1,6 @@
 import { describe, expect, test } from "vitest";
+import type { AgentRuntime } from "./agentRuntime";
+import { AgentRuntimeRegistry } from "./agentRuntimeRegistry";
 import type { ProductImageResult } from "./tuziImageApi";
 import { runImageSessionAgent } from "./imageSessionAgent";
 
@@ -262,14 +264,204 @@ describe("imageSessionAgent", () => {
     expect(generatedRequests).toEqual([]);
   });
 
-  test("throws when a generation request finishes without calling the image tool", async () => {
+  test("returns the model reply without an image when the model defers the tool call", async () => {
     const generatedRequests: unknown[] = [];
 
+    const result = await runImageSessionAgent(
+      {
+        imagePath: "C:\\project\\images\\original\\img-1-flower.jpg",
+        messages: [{ role: "user", content: "生成这个花朵在家居环境下的商品图" }],
+        sessionId: "img-1"
+      },
+      {
+        apiKey: "coding-key",
+        baseUrl: "https://api.tu-zi.com/coding",
+        model: "gpt-5.5"
+      },
+      "C:\\project",
+      {
+        createRuntime: async (options) => ({
+          descriptor: {
+            builtInTools: [],
+            customTools: [],
+            model: options.model,
+            projectDirectory: options.projectDirectory,
+            sessionId: options.sessionId
+          },
+          dispose: () => undefined,
+          getLastAssistantText: () => "我需要先确认一下：你想保留花朵还是只保留容器？",
+          prompt: async () => undefined,
+          subscribe: () => () => undefined
+        }),
+        generateImage: async (request) => {
+          generatedRequests.push(request);
+          return { outputPath: "unused.png" };
+        }
+      }
+    );
+
+    expect(result).toEqual({ content: "我需要先确认一下：你想保留花朵还是只保留容器？" });
+    expect(generatedRequests).toEqual([]);
+  });
+
+  test("reuses the cached runtime on the next turn and sends an incremental prompt", async () => {
+    const registry = new AgentRuntimeRegistry();
+    const config = { apiKey: "coding-key", baseUrl: "https://api.tu-zi.com/coding", model: "gpt-5.5" };
+    const projectDirectory = "C:\\project";
+    let factoryCalls = 0;
+    const prompts: string[] = [];
+    const buildRuntime = (): AgentRuntime => ({
+      descriptor: { builtInTools: [], customTools: [], model: "gpt-5.5", projectDirectory, sessionId: "img-9" },
+      dispose: () => undefined,
+      getLastAssistantText: () => "回复 #" + prompts.length,
+      prompt: async (text) => {
+        prompts.push(text);
+      },
+      subscribe: () => () => undefined
+    });
+    const deps = {
+      registry,
+      createRuntime: async () => {
+        factoryCalls += 1;
+        return buildRuntime();
+      },
+      generateImage: async () => ({ outputPath: "unused.png" })
+    };
+
+    await runImageSessionAgent(
+      {
+        imagePath: "C:\\project\\images\\original\\img-9.jpg",
+        messages: [{ role: "user", content: "把背景换成纯白" }],
+        sessionId: "img-9"
+      },
+      config,
+      projectDirectory,
+      deps
+    );
+    await runImageSessionAgent(
+      {
+        imagePath: "C:\\project\\images\\generated\\img-9.png",
+        messages: [
+          { role: "user", content: "把背景换成纯白" },
+          { role: "assistant", content: "回复 #1" },
+          { role: "user", content: "再换成米色" }
+        ],
+        sessionId: "img-9"
+      },
+      config,
+      projectDirectory,
+      deps
+    );
+
+    expect(factoryCalls).toBe(1);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain("硬性规则");
+    expect(prompts[0]).toContain("把背景换成纯白");
+    expect(prompts[1]).toContain("[环境更新]");
+    expect(prompts[1]).not.toContain("硬性规则");
+    expect(prompts[1]).toContain("- 当前图片路径：C:\\project\\images\\generated\\img-9.png");
+    expect(prompts[1]).toContain("再换成米色");
+  });
+
+  test("rebuilds the runtime when the user starts a fresh conversation on the same session", async () => {
+    const registry = new AgentRuntimeRegistry();
+    const config = { apiKey: "coding-key", baseUrl: "https://api.tu-zi.com/coding", model: "gpt-5.5" };
+    const projectDirectory = "C:\\project";
+    let factoryCalls = 0;
+    const buildRuntime = (): AgentRuntime => ({
+      descriptor: { builtInTools: [], customTools: [], model: "gpt-5.5", projectDirectory, sessionId: "img-9" },
+      dispose: () => undefined,
+      getLastAssistantText: () => "ok",
+      prompt: async () => undefined,
+      subscribe: () => () => undefined
+    });
+    const deps = {
+      registry,
+      createRuntime: async () => {
+        factoryCalls += 1;
+        return buildRuntime();
+      },
+      generateImage: async () => ({ outputPath: "unused.png" })
+    };
+
+    await runImageSessionAgent(
+      {
+        imagePath: "C:\\project\\images\\original\\img-9.jpg",
+        messages: [{ role: "user", content: "第一轮" }],
+        sessionId: "img-9"
+      },
+      config,
+      projectDirectory,
+      deps
+    );
+    // 用户清空对话，又从一条 user 开始
+    await runImageSessionAgent(
+      {
+        imagePath: "C:\\project\\images\\original\\img-9.jpg",
+        messages: [{ role: "user", content: "重新开始的第一轮" }],
+        sessionId: "img-9"
+      },
+      config,
+      projectDirectory,
+      deps
+    );
+
+    expect(factoryCalls).toBe(2);
+  });
+
+  test("keeps runtimes isolated across different session ids", async () => {
+    const registry = new AgentRuntimeRegistry();
+    const config = { apiKey: "coding-key", baseUrl: "https://api.tu-zi.com/coding", model: "gpt-5.5" };
+    const projectDirectory = "C:\\project";
+    let factoryCalls = 0;
+    const buildRuntime = (sessionId: string): AgentRuntime => ({
+      descriptor: { builtInTools: [], customTools: [], model: "gpt-5.5", projectDirectory, sessionId },
+      dispose: () => undefined,
+      getLastAssistantText: () => "ok",
+      prompt: async () => undefined,
+      subscribe: () => () => undefined
+    });
+    const deps = (sessionId: string) => ({
+      registry,
+      createRuntime: async () => {
+        factoryCalls += 1;
+        return buildRuntime(sessionId);
+      },
+      generateImage: async () => ({ outputPath: "unused.png" })
+    });
+
+    await runImageSessionAgent(
+      {
+        imagePath: "C:\\project\\images\\original\\img-a.jpg",
+        messages: [{ role: "user", content: "a" }],
+        sessionId: "img-a"
+      },
+      config,
+      projectDirectory,
+      deps("img-a")
+    );
+    await runImageSessionAgent(
+      {
+        imagePath: "C:\\project\\images\\original\\img-b.jpg",
+        messages: [{ role: "user", content: "b" }],
+        sessionId: "img-b"
+      },
+      config,
+      projectDirectory,
+      deps("img-b")
+    );
+
+    expect(factoryCalls).toBe(2);
+    expect(registry.has("image-session:c:\\project:img-a")).toBe(true);
+    expect(registry.has("image-session:c:\\project:img-b")).toBe(true);
+  });
+
+  test("rejects image paths that point outside the project directory", async () => {
     await expect(
       runImageSessionAgent(
         {
-          imagePath: "C:\\project\\images\\original\\img-1-flower.jpg",
-          messages: [{ role: "user", content: "生成这个花朵在家居环境下的商品图" }],
+          imagePath: "C:\\elsewhere\\malicious.png",
+          messages: [{ role: "user", content: "看看这张图" }],
           sessionId: "img-1"
         },
         {
@@ -279,27 +471,12 @@ describe("imageSessionAgent", () => {
         },
         "C:\\project",
         {
-          createRuntime: async (options) => ({
-            descriptor: {
-              builtInTools: [],
-              customTools: [],
-              model: options.model,
-              projectDirectory: options.projectDirectory,
-              sessionId: options.sessionId
-            },
-            dispose: () => undefined,
-            getLastAssistantText: () => "我会为你生成一张图。",
-            prompt: async () => undefined,
-            subscribe: () => () => undefined
-          }),
-          generateImage: async (request) => {
-            generatedRequests.push(request);
-            return { outputPath: "unused.png" };
-          }
+          createRuntime: async () => {
+            throw new Error("runtime should not be created");
+          },
+          generateImage: async () => ({ outputPath: "unused.png" })
         }
       )
-    ).rejects.toThrow("Pi 未返回图片生成工具调用");
-
-    expect(generatedRequests).toEqual([]);
+    ).rejects.toThrow("项目目录之外");
   });
 });

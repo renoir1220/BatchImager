@@ -19,7 +19,7 @@ import {
   markSessionEsseTask,
   markSessionProjectCommand,
   markSessionGenerating,
-  removeAllImageSessions,
+  moveImageSession,
   removeImageSession,
   toggleSessionListImageSource
 } from "./domain/imageSessions";
@@ -47,7 +47,6 @@ import {
 } from "./domain/sessionPanelWidth";
 import type { ImageSession, ImageSessionChatMessage } from "./types/image";
 import { AppToolbar } from "./components/AppToolbar";
-import { BatchDialog } from "./components/BatchDialog";
 import { EmptyWorkspace } from "./components/EmptyWorkspace";
 import { ImagePreviewDialog, type PreviewImage } from "./components/ImagePreviewDialog";
 import { ImageWorkspace } from "./components/ImageWorkspace";
@@ -99,7 +98,6 @@ export function App() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>("image");
   const [columns, setColumns] = useState(DEFAULT_COLUMNS);
-  const [isBatchDialogOpen, setIsBatchDialogOpen] = useState(false);
   const [isCreatingProjectPlan, setIsCreatingProjectPlan] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isLogPanelOpen, setIsLogPanelOpen] = useState(false);
@@ -231,7 +229,6 @@ export function App() {
     selectedSessionIdRef.current = nextSelectedSessionId;
     setPreviewSessionId(null);
     setChatImagePreview(null);
-    setIsBatchDialogOpen(false);
     setIsProjectListOpen(false);
   }
 
@@ -366,16 +363,6 @@ export function App() {
     await importImagePaths(paths);
   }
 
-  function handleBatchGenerate(prompt: string, referenceImagePaths: string[], outputSize?: string): void {
-    setIsBatchDialogOpen(false);
-    setActiveSidebarTab("project");
-    console.info("[BatchImager UI] Batch generation started", {
-      count: sessions.length,
-      referenceImageCount: referenceImagePaths.length
-    });
-    void createProjectPlan(prompt, referenceImagePaths, outputSize);
-  }
-
   function handleSendChatMessage(
     sessionId: string,
     content: string,
@@ -425,6 +412,18 @@ export function App() {
     setChatImagePreview(null);
   }
 
+  function handleReorderSessions(sourceSessionId: string, targetSessionId: string): void {
+    setSessions((currentSessions) => {
+      const nextSessions = moveImageSession(currentSessions, sourceSessionId, targetSessionId);
+
+      if (nextSessions === currentSessions) {
+        return currentSessions;
+      }
+
+      return updateAndPersistSessions(nextSessions, selectedSessionIdRef.current);
+    });
+  }
+
   function handleRetrySession(sessionId: string): void {
     const session = sessionsRef.current.find((currentSession) => currentSession.id === sessionId);
     const retryRequest = session ? getSessionRetryRequest(session) : null;
@@ -440,60 +439,6 @@ export function App() {
       undefined,
       retryRequest.sourceImagePath
     );
-  }
-
-  function handleClearSessions(): void {
-    if (sessions.length === 0 || !window.confirm(`确定清空当前 ${sessions.length} 张图片和会话记录吗？`)) {
-      return;
-    }
-
-    const result = removeAllImageSessions();
-    setSessions(result.sessions);
-    setSelectedSessionId(result.selectedSessionId);
-    persistProjectSnapshot(result.sessions, result.selectedSessionId);
-    setPreviewSessionId(null);
-    setChatImagePreview(null);
-    setIsBatchDialogOpen(false);
-  }
-
-  async function createProjectPlan(prompt: string, referenceImagePaths: string[], outputSize?: string): Promise<void> {
-    const userMessageId = createMessageId("pm-user");
-    const currentSessions = sessionsRef.current;
-    const nextState = createProjectManagerUserMessage(projectManagerStateRef.current, prompt, userMessageId);
-
-    setProjectManagerState(nextState);
-    persistProjectSnapshot(currentSessions, selectedSessionIdRef.current, nextState);
-    setIsCreatingProjectPlan(true);
-
-    try {
-      const result = await window.batchImager?.createProjectManagerPlan({
-        ...(outputSize ? { outputSize } : {}),
-        prompt,
-        ...(referenceImagePaths.length ? { referenceImagePaths } : {}),
-        sessions: currentSessions.map((session) => ({
-          fileName: session.fileName,
-          id: session.id
-        }))
-      });
-
-      if (!result) {
-        throw new Error("当前运行环境不支持 Esse 智能体");
-      }
-
-      const withPlan = setProjectManagerDraftPlan(nextState, result.plan, createMessageId("pm-plan"));
-      setProjectManagerState(withPlan);
-      persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, withPlan);
-    } catch (error) {
-      const errorState = appendProjectManagerError(
-        nextState,
-        error instanceof Error ? error.message : "方案生成失败",
-        createMessageId("pm-error")
-      );
-      setProjectManagerState(errorState);
-      persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, errorState);
-    } finally {
-      setIsCreatingProjectPlan(false);
-    }
   }
 
   async function handleSendEsseMessage(
@@ -1158,11 +1103,8 @@ export function App() {
     >
       <AppToolbar
         columns={columns}
-        hasProject={Boolean(currentProject)}
         imageCount={sessions.length}
         logCount={logs.length}
-        onBatchProcess={() => setIsBatchDialogOpen(true)}
-        onClear={handleClearSessions}
         onColumnsChange={setColumns}
         onImport={handleSelectImages}
         onNewProject={handleNewProject}
@@ -1197,6 +1139,7 @@ export function App() {
               onDraggingChange={setIsDragging}
               onOpenPreview={setPreviewSessionId}
               onRetrySession={handleRetrySession}
+              onReorderSessions={handleReorderSessions}
               onSelectSession={(sessionId) => {
                 setSelectedSessionId(sessionId);
                 setActiveSidebarTab("image");
@@ -1233,7 +1176,7 @@ export function App() {
               onClick={() => setActiveSidebarTab("project")}
             >
               <img className="sidebar-tab-mascot" src={esseTabMascot} alt="" aria-hidden="true" draggable={false} />
-              <span className="sidebar-tab-label">项目方案</span>
+              <span className="sidebar-tab-label">Esse</span>
               {projectManagerState.plans.some((plan) => plan.status === "running") ? <span className="tab-dot running" /> : null}
             </button>
             <button
@@ -1271,10 +1214,6 @@ export function App() {
           )}
         </aside>
       </main>
-
-      {isBatchDialogOpen ? (
-        <BatchDialog imageCount={sessions.length} onClose={() => setIsBatchDialogOpen(false)} onGenerate={handleBatchGenerate} />
-      ) : null}
 
       {isLogPanelOpen ? <LogPanel logs={logs} onClose={() => setIsLogPanelOpen(false)} /> : null}
 

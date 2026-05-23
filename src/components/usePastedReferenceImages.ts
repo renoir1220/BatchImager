@@ -1,4 +1,5 @@
 import { ClipboardEvent, useEffect, useRef, useState } from "react";
+import { getFileName } from "./workspaceImageDrag";
 
 export interface PastedReferenceImage {
   fileName: string;
@@ -59,6 +60,24 @@ export function usePastedReferenceImages() {
     }
   }
 
+  function addReferenceImagePath(filePath: string, fileName = getFileName(filePath)): void {
+    setReferenceError(null);
+    setReferenceImages((currentImages) => {
+      if (currentImages.some((referenceImage) => referenceImage.filePath === filePath)) {
+        return currentImages;
+      }
+
+      return [
+        ...currentImages,
+        {
+          fileName,
+          filePath,
+          previewUrl: window.batchImager?.getImageUrl(filePath) ?? filePath
+        }
+      ];
+    });
+  }
+
   function handlePaste(event: ClipboardEvent<HTMLElement>): void {
     const files = getClipboardImageFiles(event);
 
@@ -73,8 +92,9 @@ export function usePastedReferenceImages() {
       const removed = currentImages.find((referenceImage) => referenceImage.filePath === filePath);
 
       if (removed) {
-        URL.revokeObjectURL(removed.previewUrl);
-        previewUrlsRef.current.delete(removed.previewUrl);
+        if (previewUrlsRef.current.delete(removed.previewUrl)) {
+          URL.revokeObjectURL(removed.previewUrl);
+        }
       }
 
       return currentImages.filter((referenceImage) => referenceImage.filePath !== filePath);
@@ -91,6 +111,7 @@ export function usePastedReferenceImages() {
   }
 
   return {
+    addReferenceImagePath,
     clearReferenceImages,
     handlePaste,
     isSavingReference,

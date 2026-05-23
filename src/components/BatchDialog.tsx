@@ -4,6 +4,7 @@ import {
   isGenerationSizeSelectionValid,
   resolveGenerationSizeSelection
 } from "./GenerationSizeControl";
+import { OsDialog, OsDialogClose, OsDialogTitle } from "./os";
 
 interface BatchReferenceImage {
   fileName: string;
@@ -117,77 +118,74 @@ export function BatchDialog({ imageCount, onClose, onGenerate }: BatchDialogProp
   }
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-      <section
-        className="batch-dialog"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="batch-dialog-title"
-        onMouseDown={(event) => event.stopPropagation()}
-        onPaste={handlePaste}
-      >
-        <div className="dialog-header">
+    <OsDialog contentClassName="batch-dialog" aria-labelledby="batch-dialog-title" onClose={onClose} onPaste={handlePaste}>
+      <div className="dialog-header">
+        <OsDialogTitle asChild>
           <h2 id="batch-dialog-title">批量处理</h2>
-          <button className="icon-button" type="button" aria-label="关闭" onClick={onClose}>
+        </OsDialogTitle>
+        <OsDialogClose asChild>
+          <button className="icon-button" type="button" aria-label="关闭">
             ×
           </button>
-        </div>
-        <label className="prompt-field">
-          <span>本轮提示词</span>
-          <textarea
-            value={prompt}
-            placeholder="将花束生成明亮室内商品图，保留花材颜色和形态。"
-            onChange={(event) => setPrompt(event.target.value)}
-          />
-        </label>
-        <div className="reference-field">
-          <div className="reference-field-header">
-            <span>参考图</span>
-            <button className="toolbar-button" type="button" onClick={() => fileInputRef.current?.click()}>
-              添加图片
-            </button>
-          </div>
-          <input ref={fileInputRef} type="file" accept="image/*" multiple hidden onChange={handleFileChange} />
-          {referenceImages.length > 0 ? (
-            <div className="reference-strip">
-              {referenceImages.map((referenceImage) => (
-                <button
-                  className="reference-thumb"
-                  key={referenceImage.filePath}
-                  type="button"
-                  aria-label={`移除参考图 ${referenceImage.fileName}`}
-                  onClick={() => removeReferenceImage(referenceImage.filePath)}
-                >
-                  <img src={referenceImage.previewUrl} alt={referenceImage.fileName} draggable={false} />
-                  <span>×</span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="reference-drop">粘贴房间、场景或风格参考图</div>
-          )}
-          {isSavingReference ? <div className="dialog-meta">正在保存参考图...</div> : null}
-          {referenceError ? <div className="dialog-error">{referenceError}</div> : null}
-        </div>
-        <GenerationSizeControl
-          customValue={customSize}
-          disabled={isSavingReference}
-          idPrefix="batch"
-          label="生成比例："
-          selectedValue={selectedSize}
-          onCustomValueChange={setCustomSize}
-          onSelectedValueChange={setSelectedSize}
+        </OsDialogClose>
+      </div>
+      <label className="prompt-field">
+        <span>本轮提示词</span>
+        <textarea
+          value={prompt}
+          placeholder="将花束生成明亮室内商品图，保留花材颜色和形态。"
+          onChange={(event) => setPrompt(event.target.value)}
         />
-        <div className="dialog-meta">作用范围：全部图片 {imageCount} 张</div>
-        <div className="dialog-actions">
-          <button className="toolbar-button" type="button" onClick={onClose}>
+      </label>
+      <div className="reference-field">
+        <div className="reference-field-header">
+          <span>参考图</span>
+          <button className="toolbar-button" type="button" onClick={() => fileInputRef.current?.click()}>
+            添加图片
+          </button>
+        </div>
+        <input ref={fileInputRef} type="file" accept="image/*" multiple hidden onChange={handleFileChange} />
+        {referenceImages.length > 0 ? (
+          <div className="reference-strip">
+            {referenceImages.map((referenceImage) => (
+              <button
+                className="reference-thumb"
+                key={referenceImage.filePath}
+                type="button"
+                aria-label={`移除参考图 ${referenceImage.fileName}`}
+                onClick={() => removeReferenceImage(referenceImage.filePath)}
+              >
+                <img src={referenceImage.previewUrl} alt={referenceImage.fileName} draggable={false} />
+                <span>×</span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="reference-drop">粘贴房间、场景或风格参考图</div>
+        )}
+        {isSavingReference ? <div className="dialog-meta">正在保存参考图...</div> : null}
+        {referenceError ? <div className="dialog-error">{referenceError}</div> : null}
+      </div>
+      <GenerationSizeControl
+        customValue={customSize}
+        disabled={isSavingReference}
+        idPrefix="batch"
+        label="生成比例："
+        selectedValue={selectedSize}
+        onCustomValueChange={setCustomSize}
+        onSelectedValueChange={setSelectedSize}
+      />
+      <div className="dialog-meta">作用范围：全部图片 {imageCount} 张</div>
+      <div className="dialog-actions">
+        <OsDialogClose asChild>
+          <button className="toolbar-button" type="button">
             取消
           </button>
-          <button className="toolbar-button primary" type="button" disabled={!canGenerate} onClick={handleGenerate}>
-            生成方案
-          </button>
-        </div>
-      </section>
-    </div>
+        </OsDialogClose>
+        <button className="toolbar-button primary" type="button" disabled={!canGenerate} onClick={handleGenerate}>
+          生成方案
+        </button>
+      </div>
+    </OsDialog>
   );
 }

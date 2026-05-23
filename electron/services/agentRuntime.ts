@@ -6,29 +6,30 @@ export interface CodingAgentSdk {
     inMemory?: () => unknown;
   };
   ModelRegistry?: {
-    create: (authStorage: unknown, modelsJsonPath?: string) => {
-      find: (provider: string, modelId: string) => unknown;
-      registerProvider: (providerName: string, config: Record<string, unknown>) => void;
-    };
-    inMemory?: (authStorage: unknown) => {
-      find: (provider: string, modelId: string) => unknown;
-      registerProvider: (providerName: string, config: Record<string, unknown>) => void;
-    };
+    create: (authStorage: unknown, modelsJsonPath?: string) => CodingAgentModelRegistry;
+    inMemory?: (authStorage: unknown) => CodingAgentModelRegistry;
   };
   createAgentSession: (options?: Record<string, unknown>) => Promise<{
-    session: {
-      dispose?: () => void;
-      agent?: {
-        state?: {
-          messages?: unknown[];
-        };
-      };
-      getLastAssistantText?: () => string | undefined;
-      messages?: unknown[];
-      prompt: (text: string, options?: Record<string, unknown>) => Promise<void>;
-      subscribe: (listener: (event: unknown) => void) => () => void;
-    };
+    session: CodingAgentSession;
   }>;
+}
+
+export interface CodingAgentModelRegistry {
+  find: (provider: string, modelId: string) => unknown;
+  registerProvider: (providerName: string, config: Record<string, unknown>) => void;
+}
+
+export interface CodingAgentSession {
+  dispose?: () => void;
+  agent?: {
+    state?: {
+      messages?: unknown[];
+    };
+  };
+  getLastAssistantText?: () => string | undefined;
+  messages?: unknown[];
+  prompt: (text: string, options?: Record<string, unknown>) => Promise<void>;
+  subscribe: (listener: (event: unknown) => void) => () => void;
 }
 
 export interface AgentSessionDescriptor {
@@ -40,6 +41,7 @@ export interface AgentSessionDescriptor {
 }
 
 interface BuildAgentSessionDescriptorOptions {
+  customToolNames?: string[];
   model: string;
   projectDirectory: string;
   sessionId: string;
@@ -61,8 +63,39 @@ export interface AgentRuntime {
 
 type AgentSdkLoader = () => Promise<unknown>;
 
-const DEFAULT_BUILT_IN_TOOLS = ["read", "write", "edit", "grep", "find", "ls"];
-const DEFAULT_CUSTOM_TOOLS = ["run_project_command", "generate_image", "inspect_image", "batch_generate"];
+// pi SDK 的内置文件工具会在 SDK 进程内直接执行，无法被本仓的策略层拦截。
+// 默认只暴露只读能力，确保 LLM 即使忽略系统提示也无法改写工程文件；
+// 真正需要写入/删除的动作走 run_project_command（受 agentCommandPolicy 限制）。
+const DEFAULT_BUILT_IN_TOOLS = ["read", "grep", "find", "ls"];
+
+interface ModelRegistration {
+  contextWindow: number;
+  maxTokens: number;
+  reasoning: boolean;
+  thinkingLevel?: "low" | "medium" | "high";
+}
+
+const DEFAULT_MODEL_REGISTRATION: ModelRegistration = {
+  contextWindow: 200_000,
+  maxTokens: 16_384,
+  reasoning: true,
+  thinkingLevel: "medium"
+};
+
+// 按 model id 前缀匹配；最早匹配优先。当前所有支持的模型走默认 registration，
+// 等到具体模型需要不同参数（contextWindow / maxTokens / thinkingLevel）时再加条目。
+const MODEL_REGISTRATIONS: Array<{ match: RegExp; registration: ModelRegistration }> = [];
+
+function resolveModelRegistration(modelId: string): ModelRegistration {
+  for (const entry of MODEL_REGISTRATIONS) {
+    if (entry.match.test(modelId)) {
+      return entry.registration;
+    }
+  }
+
+  return DEFAULT_MODEL_REGISTRATION;
+}
+
 let agentSdkLoadPromise: Promise<CodingAgentSdk> | undefined;
 
 export function buildAgentSessionDescriptor(
@@ -70,11 +103,40 @@ export function buildAgentSessionDescriptor(
 ): AgentSessionDescriptor {
   return {
     builtInTools: [...DEFAULT_BUILT_IN_TOOLS],
-    customTools: [...DEFAULT_CUSTOM_TOOLS],
+    customTools: [...(options.customToolNames ?? [])],
     model: options.model,
     projectDirectory: options.projectDirectory,
     sessionId: options.sessionId
   };
+}
+
+function extractCustomToolNames(definitions: unknown[] | undefined): string[] {
+  if (!Array.isArray(definitions)) {
+    return [];
+  }
+
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const definition of definitions) {
+    if (!definition || typeof definition !== "object") {
+      continue;
+    }
+
+    const name = (definition as { name?: unknown }).name;
+    if (typeof name !== "string" || !name.trim()) {
+      continue;
+    }
+
+    const trimmed = name.trim();
+    if (seen.has(trimmed)) {
+      continue;
+    }
+
+    seen.add(trimmed);
+    names.push(trimmed);
+  }
+
+  return names;
 }
 
 export async function loadCodingAgentSdk(loader: AgentSdkLoader = defaultAgentSdkLoader): Promise<CodingAgentSdk> {
@@ -91,6 +153,10 @@ export async function loadCodingAgentSdk(loader: AgentSdkLoader = defaultAgentSd
   return promise;
 }
 
+// 注意：warmup 不论传哪个 loader 都会写入模块级缓存，而 loadCodingAgentSdk 只在默认
+// loader 时读缓存。这种不对称是有意为之——测试可以 warm 一个 mock loader，让后续
+// 默认调用拿到 mock SDK；生产里只用默认 loader，不会出现 loader 不一致的情况。
+// 测试隔离靠 resetAgentRuntimeWarmupForTests。
 export async function warmupAgentRuntime(loader: AgentSdkLoader = defaultAgentSdkLoader): Promise<void> {
   if (!agentSdkLoadPromise) {
     agentSdkLoadPromise = clearWarmupOnFailure(loadCodingAgentSdkOnce(loader));
@@ -118,31 +184,57 @@ async function loadCodingAgentSdkOnce(loader: AgentSdkLoader): Promise<CodingAge
 }
 
 export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Promise<AgentRuntime> {
-  const descriptor = buildAgentSessionDescriptor(options);
+  const customToolNames = extractCustomToolNames(options.customToolDefinitions);
+  const descriptor = buildAgentSessionDescriptor({ ...options, customToolNames });
   const sdk = options.sdk ?? (await loadCodingAgentSdk());
   const modelOptions = options.llmConfig ? createTuziAgentModelOptions(options.llmConfig, sdk) : {};
   const { session } = await sdk.createAgentSession({
     cwd: descriptor.projectDirectory,
     customTools: options.customToolDefinitions ?? [],
     noTools: "builtin",
+    // tools 白名单与实际注册的 custom 工具同步，避免给 LLM 暴露不存在的工具名。
     tools: [...descriptor.builtInTools, ...descriptor.customTools],
     ...modelOptions
   });
 
+  const subscriptions = new Set<() => void>();
+  let disposed = false;
+
   return {
     descriptor,
-    dispose: () => session.dispose?.(),
+    dispose: () => {
+      if (disposed) {
+        return;
+      }
+
+      disposed = true;
+
+      for (const unsubscribe of subscriptions) {
+        try {
+          unsubscribe();
+        } catch {
+          // 忽略单个监听器解绑异常，继续清理剩余订阅。
+        }
+      }
+
+      subscriptions.clear();
+      session.dispose?.();
+    },
     getLastAssistantText: () => getLastAssistantText(session),
     prompt: (text) => session.prompt(text),
-    subscribe: (listener) => session.subscribe(listener)
+    subscribe: (listener) => {
+      const unsubscribe = session.subscribe(listener);
+      subscriptions.add(unsubscribe);
+      return () => {
+        if (subscriptions.delete(unsubscribe)) {
+          unsubscribe();
+        }
+      };
+    }
   };
 }
 
-function getLastAssistantText(session: {
-  agent?: { state?: { messages?: unknown[] } };
-  getLastAssistantText?: () => string | undefined;
-  messages?: unknown[];
-}): string | undefined {
+function getLastAssistantText(session: CodingAgentSession): string | undefined {
   const directText = session.getLastAssistantText?.();
 
   if (isNonEmptyString(directText)) {
@@ -206,15 +298,17 @@ function createTuziAgentModelOptions(config: TuziLlmApiConfig, sdk: CodingAgentS
 
   const authStorage = AuthStorage.inMemory?.() ?? AuthStorage.create();
   const modelRegistry = ModelRegistry.inMemory?.(authStorage) ?? ModelRegistry.create(authStorage);
+  const baseUrl = buildOpenAiCompatibleBaseUrl(config.baseUrl);
+  const registration = resolveModelRegistration(config.model);
   modelRegistry.registerProvider("batchimager-tuzi", {
     api: "openai-completions",
     apiKey: config.apiKey,
     authHeader: true,
-    baseUrl: buildOpenAiCompatibleBaseUrl(config.baseUrl),
+    baseUrl,
     models: [
       {
         api: "openai-completions",
-        baseUrl: buildOpenAiCompatibleBaseUrl(config.baseUrl),
+        baseUrl,
         compat: {
           maxTokensField: "max_completion_tokens",
           requiresToolResultName: false,
@@ -224,7 +318,7 @@ function createTuziAgentModelOptions(config: TuziLlmApiConfig, sdk: CodingAgentS
           supportsStrictMode: true,
           supportsUsageInStreaming: false
         },
-        contextWindow: 200_000,
+        contextWindow: registration.contextWindow,
         cost: {
           cacheRead: 0,
           cacheWrite: 0,
@@ -233,9 +327,9 @@ function createTuziAgentModelOptions(config: TuziLlmApiConfig, sdk: CodingAgentS
         },
         id: config.model,
         input: ["text", "image"],
-        maxTokens: 16_384,
+        maxTokens: registration.maxTokens,
         name: config.model,
-        reasoning: true
+        reasoning: registration.reasoning
       }
     ]
   });
@@ -249,7 +343,7 @@ function createTuziAgentModelOptions(config: TuziLlmApiConfig, sdk: CodingAgentS
     authStorage,
     model,
     modelRegistry,
-    thinkingLevel: "medium"
+    ...(registration.thinkingLevel ? { thinkingLevel: registration.thinkingLevel } : {})
   };
 }
 
@@ -259,6 +353,8 @@ function buildOpenAiCompatibleBaseUrl(baseUrl: string): string {
 }
 
 async function defaultAgentSdkLoader(): Promise<unknown> {
+  // pi 包是 ESM-only；这个项目编译目标是 CommonJS，TS 会把静态 `import()` 改写成 require。
+  // 这里用 `new Function` 包一层 dynamic import，绕过编译器改写，保留运行时的真正动态 import。
   const dynamicImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<unknown>;
   return dynamicImport("@earendil-works/pi-coding-agent");
 }

@@ -27,7 +27,7 @@ describe("project manager state", () => {
 
     expect(withPlan.conversation.messages).toEqual([
       { id: "pm-1", role: "user", content: "做一批白底主图" },
-      { id: "pm-2", role: "assistant", content: "已生成批量方案：白底主图", planId: "plan-1" }
+      { id: "pm-2", role: "assistant", content: "", planId: "plan-1" }
     ]);
     expect(withPlan.conversation.currentPlanId).toBe("plan-1");
     expect(withPlan.plans).toEqual([plan]);

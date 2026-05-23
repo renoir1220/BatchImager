@@ -1,12 +1,10 @@
 import type { ReactNode } from "react";
+import { OsMenu, OsMenuItem } from "./os";
 
 interface AppToolbarProps {
   columns: number;
   imageCount: number;
   logCount?: number;
-  hasProject: boolean;
-  onBatchProcess: () => void;
-  onClear: () => void;
   onColumnsChange: (columns: number) => void;
   onNewProject: () => void;
   onImport: () => void;
@@ -17,11 +15,8 @@ interface AppToolbarProps {
 
 export function AppToolbar({
   columns,
-  hasProject,
   imageCount,
   logCount = 0,
-  onBatchProcess,
-  onClear,
   onColumnsChange,
   onNewProject,
   onImport,
@@ -47,12 +42,6 @@ export function AppToolbar({
           <MenuBarItem onClick={onImport}>
             导入图片
           </MenuBarItem>
-
-          <MenuBarItem variant="primary" disabled={!hasProject || imageCount === 0} onClick={onBatchProcess}>
-            批量处理
-          </MenuBarItem>
-
-          <MoreMenuButton disabled={!hasProject || imageCount === 0} onClear={onClear} />
         </MenuBarGroup>
 
         <MenuBarDivider />
@@ -66,13 +55,13 @@ export function AppToolbar({
 
       <MenuBar ariaLabel="状态操作">
         <MenuBarGroup className="toolbar-status-actions">
-        {onOpenLogs ? (
-          <MenuBarItem onClick={onOpenLogs}>
-            日志{logCount > 0 ? ` ${logCount}` : ""}
-          </MenuBarItem>
-        ) : null}
+          {onOpenLogs ? (
+            <MenuBarItem onClick={onOpenLogs}>
+              日志{logCount > 0 ? ` ${logCount}` : ""}
+            </MenuBarItem>
+          ) : null}
 
-        <span className="toolbar-count">{imageCount > 0 ? `${imageCount} 张图片` : "等待导入"}</span>
+          <span className="toolbar-count">{imageCount > 0 ? `${imageCount} 张图片` : "等待导入"}</span>
         </MenuBarGroup>
       </MenuBar>
     </header>
@@ -112,16 +101,14 @@ interface ProjectMenuButtonProps {
 
 function ProjectMenuButton({ onOpenProject, projectLabel }: ProjectMenuButtonProps) {
   return (
-    <details className="toolbar-menu-button project-menu-button">
-      <summary className="toolbar-button toolbar-project-label">
+    <OsMenu
+      triggerClassName="toolbar-button toolbar-project-label project-menu-button"
+      trigger={
         <span>{projectLabel ?? "未打开项目"}</span>
-      </summary>
-      <div className="toolbar-popover" role="menu">
-        <button type="button" role="menuitem" onClick={onOpenProject}>
-          打开项目
-        </button>
-      </div>
-    </details>
+      }
+    >
+      <OsMenuItem onSelect={onOpenProject}>打开项目</OsMenuItem>
+    </OsMenu>
   );
 }
 
@@ -137,26 +124,6 @@ function MenuBarItem({ children, disabled = false, onClick, variant = "default" 
     <button className={`toolbar-button ${variant === "primary" ? "primary" : ""}`.trim()} type="button" disabled={disabled} onClick={onClick}>
       {children}
     </button>
-  );
-}
-
-interface MoreMenuButtonProps {
-  disabled: boolean;
-  onClear: () => void;
-}
-
-function MoreMenuButton({ disabled, onClear }: MoreMenuButtonProps) {
-  return (
-    <details className="toolbar-menu-button more-menu-button">
-      <summary className="toolbar-button icon-like" aria-label="更多操作">
-        更多
-      </summary>
-      <div className="toolbar-popover align-end" role="menu">
-        <button type="button" role="menuitem" disabled={disabled} onClick={onClear}>
-          清空当前图片
-        </button>
-      </div>
-    </details>
   );
 }
 

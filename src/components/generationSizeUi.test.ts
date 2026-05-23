@@ -12,12 +12,15 @@ describe("generation size UI wiring", () => {
     expect(readProjectFile("src/components/SessionPanel.tsx")).toContain("GenerationSizeControl");
   });
 
-  test("generation size control uses clickable 4K ratio tiles instead of a select or custom input", () => {
+  test("generation size control uses an icon-only heading with clickable 4K ratio tiles", () => {
     const control = readProjectFile("src/components/GenerationSizeControl.tsx");
 
     expect(readProjectFile("src/components/SessionPanel.tsx")).toContain('label="生成比例："');
     expect(readProjectFile("src/components/BatchDialog.tsx")).toContain('label="生成比例："');
-    expect(control).toContain("generation-size-label");
+    expect(control).toContain("GenerationSizeIcon");
+    expect(control).toContain("generation-size-heading-icon");
+    expect(control).toContain("title={label}");
+    expect(control).not.toContain("generation-size-label");
     expect(control).toContain("ratio-icon");
     expect(control).toContain("ratio-icon-landscape");
     expect(control).toContain("ratio-icon-portrait");
@@ -30,17 +33,15 @@ describe("generation size UI wiring", () => {
     expect(control).not.toContain("2048x2048");
   });
 
-  test("selected ratio icon turns blue without drawing a selected border", () => {
+  test("selected ratio icon uses a refined tinted active state", () => {
     const styles = readProjectFile("src/styles.css");
     const selectedRule = styles.match(/\.generation-size-tile\.selected\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? "";
     const hoverRule = styles.match(/\.generation-size-tile:hover:not\(:disabled\)\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? "";
     const selectedIconRule = styles.match(/\.generation-size-tile\.selected \.ratio-icon::before\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? "";
 
-    expect(selectedRule).toContain("border-color: transparent");
-    expect(selectedRule).toContain("background: transparent");
+    expect(selectedRule).toContain("background: color-mix");
     expect(selectedRule).toContain("color: var(--blue)");
-    expect(selectedRule).not.toContain("color-mix");
-    expect(hoverRule).toContain("background: transparent");
+    expect(hoverRule).toContain("background: color-mix");
     expect(selectedIconRule).toContain("border-color: var(--blue)");
     expect(selectedIconRule).toContain("background: color-mix");
   });
@@ -49,7 +50,7 @@ describe("generation size UI wiring", () => {
     const styles = readProjectFile("src/styles.css");
     const iconRule = styles.match(/(?:^|\n)\.ratio-icon::before\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? "";
 
-    expect(iconRule).toContain("border: 1.5px solid currentColor");
+    expect(iconRule).toContain("border: 1.35px solid currentColor");
     expect(styles).toContain(".ratio-icon-landscape::before");
     expect(styles).toContain(".ratio-icon-portrait::before");
   });

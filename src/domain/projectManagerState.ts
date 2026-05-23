@@ -54,7 +54,7 @@ export function setProjectManagerDraftPlan(
       plans: nextPlans
     },
     {
-      content: `已生成批量方案：${plan.title}`,
+      content: "",
       id: messageId,
       planId: plan.id,
       role: "assistant"

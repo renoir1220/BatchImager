@@ -14,6 +14,7 @@ import {
   markSessionEsseTask,
   markSessionGenerating,
   markSessionProjectCommand,
+  moveImageSession,
   removeImageSession,
   removeAllImageSessions,
   toggleSessionListImageSource
@@ -293,6 +294,44 @@ describe("image sessions", () => {
     expect(getSessionDisplayPath(showingOriginal[0])).toBe("C:/shots/IMG_0001.JPG");
     expect(getSessionGenerationSourcePath(showingOriginal[0])).toBe("C:/generated/out.png");
     expect(getSessionDisplayPath(showingCurrentAgain[0])).toBe("C:/generated/out.png");
+  });
+
+  it("moves one image session before another without changing session state", () => {
+    const sessions = applyGeneratedImageResult(
+      createImageSessions(["C:/shots/IMG_0001.JPG", "C:/shots/IMG_0002.JPG", "C:/shots/IMG_0003.JPG"]),
+      "img-3",
+      "C:/generated/out.png"
+    );
+
+    const moved = moveImageSession(sessions, "img-3", "img-1");
+
+    expect(moved.map((session) => session.id)).toEqual(["img-3", "img-1", "img-2"]);
+    expect(moved[0]).toMatchObject({
+      filePath: "C:/shots/IMG_0003.JPG",
+      generatedFilePath: "C:/generated/out.png",
+      generatedFilePaths: ["C:/generated/out.png"],
+      status: "completed"
+    });
+  });
+
+  it("moves a dragged image session to a later target position", () => {
+    const sessions = createImageSessions([
+      "C:/shots/IMG_0001.JPG",
+      "C:/shots/IMG_0002.JPG",
+      "C:/shots/IMG_0003.JPG"
+    ]);
+
+    const moved = moveImageSession(sessions, "img-1", "img-3");
+
+    expect(moved.map((session) => session.id)).toEqual(["img-2", "img-3", "img-1"]);
+  });
+
+  it("returns the same order when image session move ids are not usable", () => {
+    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG", "C:/shots/IMG_0002.JPG"]);
+
+    expect(moveImageSession(sessions, "img-1", "img-1")).toBe(sessions);
+    expect(moveImageSession(sessions, "img-404", "img-1")).toBe(sessions);
+    expect(moveImageSession(sessions, "img-1", "img-404")).toBe(sessions);
   });
 
   it("removes the selected image and selects the next image", () => {

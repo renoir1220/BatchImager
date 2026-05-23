@@ -1,4 +1,5 @@
-import { FormEvent, KeyboardEvent, MouseEvent, useState } from "react";
+import { useState } from "react";
+import type { DragEvent, FormEvent, KeyboardEvent, MouseEvent } from "react";
 import type { AppLogEntry } from "../../electron/ipcTypes";
 import type {
   BatchPlan,
@@ -18,7 +19,9 @@ import { ComposerReferenceStrip } from "./ComposerReferenceStrip";
 import type { PreviewImage } from "./ImagePreviewDialog";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { MessageActions } from "./MessageActions";
+import { OsSelect, type OsSelectOption } from "./os";
 import { usePastedReferenceImages } from "./usePastedReferenceImages";
+import { hasWorkspaceImageDrag, readWorkspaceImageDragPayload } from "./workspaceImageDrag";
 import {
   canRunPlanCommands,
   type ProjectPlanExecutionMode
@@ -34,11 +37,11 @@ interface ProjectPlanPanelProps {
   onSendMessage: (content: string, outputSize?: string, referenceImagePaths?: string[], persona?: EssePersona) => void;
 }
 
-const ESSE_PERSONA_OPTIONS: { label: string; value: EssePersona }[] = [
-  { label: "老黄牛", value: "old-ox" },
-  { label: "优秀员工", value: "excellent-employee" },
-  { label: "问题少女", value: "question-girl" },
-  { label: "无情的机器人", value: "robot" }
+const ESSE_PERSONA_OPTIONS: OsSelectOption<EssePersona>[] = [
+  { description: "勤恳耐造", label: "牛马设计师", value: "old-ox" },
+  { description: "审美稳准", label: "真正的设计师", value: "excellent-employee" },
+  { description: "爱问细节", label: "问题少女", value: "question-girl" },
+  { description: "规则优先", label: "无情的机器人", value: "robot" }
 ];
 export function ProjectPlanPanel({
   activityLogs,
@@ -50,10 +53,12 @@ export function ProjectPlanPanel({
   onSendMessage
 }: ProjectPlanPanelProps) {
   const [expandedPlanIds, setExpandedPlanIds] = useState<Set<string>>(() => new Set());
+  const [collapsedPlanIds, setCollapsedPlanIds] = useState<Set<string>>(() => new Set());
   const [message, setMessage] = useState("");
   const [selectedSize, setSelectedSize] = useState("");
   const [customSize, setCustomSize] = useState("");
   const [selectedPersona, setSelectedPersona] = useState<EssePersona>("excellent-employee");
+  const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
   const pastedReferences = usePastedReferenceImages();
   const isAgentWorking = isCreatingPlan || projectManagerState.plans.some((plan) => plan.status === "running");
   const currentActivityLog = activityLogs.at(-1);
@@ -85,6 +90,45 @@ export function ProjectPlanPanel({
     }
   }
 
+  function handleReferenceDragEnter(event: DragEvent<HTMLDivElement>): void {
+    if (!hasWorkspaceImageDrag(event.dataTransfer)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsReferenceDragActive(true);
+  }
+
+  function handleReferenceDragOver(event: DragEvent<HTMLDivElement>): void {
+    if (!hasWorkspaceImageDrag(event.dataTransfer)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleReferenceDragLeave(event: DragEvent<HTMLDivElement>): void {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      return;
+    }
+
+    setIsReferenceDragActive(false);
+  }
+
+  function handleReferenceDrop(event: DragEvent<HTMLDivElement>): void {
+    const payload = readWorkspaceImageDragPayload(event.dataTransfer);
+
+    if (!payload) {
+      return;
+    }
+
+    event.preventDefault();
+    setIsReferenceDragActive(false);
+    pastedReferences.addReferenceImagePath(payload.imagePath, payload.fileName);
+  }
+
   function handleImageContextMenu(event: MouseEvent, imagePath: string): void {
     event.preventDefault();
     onCopyImage(imagePath);
@@ -103,20 +147,30 @@ export function ProjectPlanPanel({
   }
 
   return (
-    <div className="project-plan-panel" aria-label="项目方案">
+    <div
+      className={`project-plan-panel ${isReferenceDragActive ? "reference-drag-active" : ""}`}
+      aria-label="项目方案"
+      onDragEnter={handleReferenceDragEnter}
+      onDragLeave={handleReferenceDragLeave}
+      onDragOver={handleReferenceDragOver}
+      onDrop={handleReferenceDrop}
+    >
       <div className="project-manager-thread">
         {projectManagerState.conversation.messages.length === 0 ? (
           <div className="thread-line muted">说明整批图片想怎么做。这里可以先讨论方向，也可以生成新图或创建待确认的批处理方案。</div>
         ) : (
           projectManagerState.conversation.messages.map((message, index) => {
             const plan = message.planId ? getPlan(projectManagerState, message.planId) : null;
-            const shouldCollapse = plan ? hasLaterUserMessage(projectManagerState, index) : false;
-            const collapsed = Boolean(plan && shouldCollapse && !expandedPlanIds.has(plan.id));
+            const shouldAutoCollapse = plan ? hasLaterUserMessage(projectManagerState, index) : false;
+            const collapsed = Boolean(
+              plan && (collapsedPlanIds.has(plan.id) || (shouldAutoCollapse && !expandedPlanIds.has(plan.id)))
+            );
+            const hasMessageContent = !plan && message.content.trim().length > 0;
 
             return (
               <div className={`message-row ${message.role}`} key={message.id}>
                 <div className={`thread-line ${message.role}`}>
-                  <MarkdownMessage content={message.content} />
+                  {hasMessageContent ? <MarkdownMessage content={message.content} /> : null}
                   {message.referenceFilePaths?.length ? (
                     <div className="thread-image-card">
                       <div className="thread-image-title">
@@ -143,13 +197,11 @@ export function ProjectPlanPanel({
                       plan={plan}
                       onOpenImagePreview={onOpenImagePreview}
                       onExecutePlan={onExecutePlan}
-                      onToggleCollapse={() =>
-                        setExpandedPlanIds((currentIds) => toggleExpandedPlanId(currentIds, plan.id))
-                      }
+                      onToggleCollapse={() => togglePlanCollapse(plan.id, collapsed)}
                     />
                   ) : null}
                 </div>
-                <MessageActions content={message.content} tone={message.role} />
+                {hasMessageContent ? <MessageActions content={message.content} tone={message.role} /> : null}
               </div>
             );
           })
@@ -182,21 +234,7 @@ export function ProjectPlanPanel({
               onCustomValueChange={setCustomSize}
               onSelectedValueChange={setSelectedSize}
             />
-            <label className="esse-persona-switch">
-              <span>人格：</span>
-              <select
-                aria-label="选择 Esse 人格"
-                disabled={isCreatingPlan}
-                value={selectedPersona}
-                onChange={(event) => setSelectedPersona(event.target.value as EssePersona)}
-              >
-                {ESSE_PERSONA_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <EssePersonaSelect disabled={isCreatingPlan} value={selectedPersona} onChange={setSelectedPersona} />
           </div>
           <button type="submit" disabled={!canSend} aria-label="发送">
             ↑
@@ -204,6 +242,62 @@ export function ProjectPlanPanel({
         </form>
       </div>
     </div>
+  );
+
+  function togglePlanCollapse(planId: string, isCollapsed: boolean): void {
+    setExpandedPlanIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+
+      if (isCollapsed) {
+        nextIds.add(planId);
+      } else {
+        nextIds.delete(planId);
+      }
+
+      return nextIds;
+    });
+    setCollapsedPlanIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+
+      if (isCollapsed) {
+        nextIds.delete(planId);
+      } else {
+        nextIds.add(planId);
+      }
+
+      return nextIds;
+    });
+  }
+}
+
+function EssePersonaSelect({
+  disabled,
+  onChange,
+  value
+}: {
+  disabled?: boolean;
+  onChange: (value: EssePersona) => void;
+  value: EssePersona;
+}) {
+  return (
+    <OsSelect
+      ariaLabel="选择 Esse 人格"
+      disabled={disabled}
+      icon={<EssePersonaIcon />}
+      listLabel="Esse 人格"
+      options={ESSE_PERSONA_OPTIONS}
+      value={value}
+      onValueChange={onChange}
+    />
+  );
+}
+
+function EssePersonaIcon() {
+  return (
+    <svg viewBox="0 0 20 20" focusable="false" aria-hidden="true">
+      <path d="M10 10.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z" />
+      <path d="M4.4 16.2c.7-2.5 2.7-4 5.6-4s4.9 1.5 5.6 4" />
+    </svg>
   );
 }
 
@@ -226,7 +320,8 @@ function PlanCard({
   return (
     <section className={`batch-plan-card ${plan.status} ${collapsed ? "collapsed" : ""}`} aria-label={`批量方案：${plan.title}`}>
       <header>
-        <div>
+        <div className="plan-title-row">
+          {plan.status === "running" ? <span className="plan-title-spinner" role="img" aria-label="任务执行中" /> : null}
           <strong className="plan-title">{formatPlanApprovalTitle(plan)}</strong>
         </div>
         <button
@@ -335,18 +430,6 @@ function hasLaterUserMessage(state: ProjectManagerState, index: number): boolean
   return state.conversation.messages.slice(index + 1).some((message) => message.role === "user");
 }
 
-function toggleExpandedPlanId(currentIds: Set<string>, planId: string): Set<string> {
-  const nextIds = new Set(currentIds);
-
-  if (nextIds.has(planId)) {
-    nextIds.delete(planId);
-  } else {
-    nextIds.add(planId);
-  }
-
-  return nextIds;
-}
-
 function findReport(plan: BatchPlan, commandId: string): WorkerReport | undefined {
   return plan.reports?.find((report) => report.commandId === commandId);
 }
@@ -365,22 +448,28 @@ function getCommandReferencePreviews(plan: BatchPlan, command: WorkerCommand): B
 
 function formatPlanApprovalTitle(plan: BatchPlan): string {
   if (plan.status === "running") {
-    return `方案有${plan.commands.length}个任务执行中`;
+    const reportedCount = countReportedCommands(plan);
+    return `Esse工作进度：${reportedCount}/${plan.commands.length}`;
   }
 
   if (plan.status === "completed") {
-    return `方案有${plan.commands.length}个任务已完成`;
+    return `Esse完成了${plan.commands.length}个任务`;
   }
 
   if (plan.status === "failed") {
-    return `方案有${plan.commands.length}个任务有失败`;
+    const failedCount = plan.reports?.filter((report) => report.status === "failed").length ?? 0;
+    return `Esse有${failedCount || plan.commands.length}个任务失败`;
   }
 
   if (plan.status === "paused") {
-    return `方案有${plan.commands.length}个任务已暂停`;
+    return `Esse暂停了${plan.commands.length}个任务`;
   }
 
-  return `方案有${plan.commands.length}个任务待审批`;
+  return `Esse有${plan.commands.length}个任务等你确认`;
+}
+
+function countReportedCommands(plan: BatchPlan): number {
+  return new Set((plan.reports ?? []).map((report) => report.commandId)).size;
 }
 
 function formatWorkerStatus(report: WorkerReport | undefined): string {

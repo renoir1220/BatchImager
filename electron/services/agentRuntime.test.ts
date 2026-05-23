@@ -27,20 +27,31 @@ describe("agentRuntime", () => {
     resetAgentRuntimeWarmupForTests();
   });
 
-  test("builds a lightweight OpenClaw-style session descriptor for BatchImager", () => {
+  test("builds a session descriptor that mirrors the registered custom tools", () => {
     const descriptor = buildAgentSessionDescriptor({
+      customToolNames: ["run_project_command", "generate_image"],
       model: "gpt-5.5",
       projectDirectory: "C:\\BatchImagerProjects\\project-1",
       sessionId: "img-1"
     });
 
     expect(descriptor).toEqual({
-      builtInTools: ["read", "write", "edit", "grep", "find", "ls"],
-      customTools: ["run_project_command", "generate_image", "inspect_image", "batch_generate"],
+      builtInTools: ["read", "grep", "find", "ls"],
+      customTools: ["run_project_command", "generate_image"],
       model: "gpt-5.5",
       projectDirectory: "C:\\BatchImagerProjects\\project-1",
       sessionId: "img-1"
     });
+  });
+
+  test("falls back to an empty custom tool list when no tools are registered", () => {
+    const descriptor = buildAgentSessionDescriptor({
+      model: "gpt-5.5",
+      projectDirectory: "C:\\BatchImagerProjects\\project-1",
+      sessionId: "esse-agent"
+    });
+
+    expect(descriptor.customTools).toEqual([]);
   });
 
   test("loads the Pi SDK through an injectable dynamic loader", async () => {
@@ -121,21 +132,18 @@ describe("agentRuntime", () => {
         thinkingLevel: "medium",
         tools: [
           "read",
-          "write",
-          "edit",
           "grep",
           "find",
           "ls",
-          "run_project_command",
-          "generate_image",
-          "inspect_image",
-          "batch_generate"
+          "run_project_command"
         ]
       })
     ]);
     await runtime.prompt("hello");
     expect(prompts).toEqual(["hello"]);
-    expect(runtime.subscribe(() => undefined)).toBe(unsubscribe);
+    const externalUnsubscribe = runtime.subscribe(() => undefined);
+    expect(typeof externalUnsubscribe).toBe("function");
+    externalUnsubscribe();
     expect(runtime.getLastAssistantText()).toBe("done");
   });
 

@@ -25,7 +25,9 @@ export function GenerationSizeControl({
 }: GenerationSizeControlProps) {
   return (
     <div className="generation-size-control" aria-label={label}>
-      <span className="generation-size-label">{label}</span>
+      <span className="composer-tool-icon generation-size-heading-icon" title={label} aria-hidden="true">
+        <GenerationSizeIcon />
+      </span>
       <div className="generation-size-tiles">
         {VISUAL_4K_SIZE_OPTIONS.map((option) => {
           const isSelected = selectedValue === option.value;
@@ -46,6 +48,19 @@ export function GenerationSizeControl({
         })}
       </div>
     </div>
+  );
+}
+
+function GenerationSizeIcon() {
+  return (
+    <svg viewBox="0 0 20 20" focusable="false" aria-hidden="true">
+      <path d="M4.2 5.8h11.6" />
+      <path d="M4.2 10h11.6" />
+      <path d="M4.2 14.2h11.6" />
+      <path d="M7 4.4v2.8" />
+      <path d="M13.1 8.6v2.8" />
+      <path d="M9.7 12.8v2.8" />
+    </svg>
   );
 }
 

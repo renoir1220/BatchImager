@@ -1,3 +1,4 @@
+import path from "node:path";
 import { normalizeGenerationSizeValue } from "../generationSizes";
 import type { TuziLlmApiConfig } from "./localConfig";
 import type { AppLogger } from "./appLogger";
@@ -5,6 +6,7 @@ import { createBatchImagerCommandPolicy } from "./agentCommandPolicy";
 import { createRunProjectCommandTool } from "./batchImagerAgentTools";
 import type { AgentRuntime, CreateAgentRuntimeOptions } from "./agentRuntime";
 import { createAgentRuntime, warmupAgentRuntime } from "./agentRuntime";
+import { type AgentRuntimeRegistry, getSharedAgentRuntimeRegistry } from "./agentRuntimeRegistry";
 import type { ProductImageResult } from "./tuziImageApi";
 import {
   MISSING_REFERENCE_IMAGE_REPLY,
@@ -61,7 +63,21 @@ interface ImageSessionAgentDeps {
   createRuntime?: (options: CreateAgentRuntimeOptions) => Promise<AgentRuntime>;
   generateImage: (request: ImageToolRequest) => Promise<ProductImageResult>;
   logger?: AppLogger;
+  registry?: AgentRuntimeRegistry;
 }
+
+// 工具调用是异步发生的，工具实例由首轮 factory 创建并被 SDK 内部持有。
+// 后续轮如果直接 closure capture 当轮 input/deps，工具看到的会是首轮的旧值。
+// 用模块级 TurnState Map + key 绑定让工具在 execute 时实时读最新一轮的状态。
+interface TurnState {
+  generateImage: (request: ImageToolRequest) => Promise<ProductImageResult>;
+  imagePath: string;
+  referenceImages: ReferenceImageCandidate[];
+  selectedOutputSize: string | undefined;
+  sessionId: string;
+}
+
+const turnStateByKey = new Map<string, TurnState>();
 
 export async function runImageSessionAgent(
   input: ImageToolChatInput,
@@ -70,13 +86,12 @@ export async function runImageSessionAgent(
   deps: ImageSessionAgentDeps
 ): Promise<ImageToolChatResult> {
   const context = `chat:${input.sessionId}`;
+  const registryKey = buildRegistryKey(projectDirectory, input.sessionId);
   const selectedOutputSize = normalizeGenerationSizeValue(input.outputSize);
-  const expectsImageGeneration = shouldUseImageTool(input.messages, selectedOutputSize);
   const referenceImages = getReferenceImageCandidates(input);
   let generatedImage: ProductImageResult | undefined;
 
   if (
-    expectsImageGeneration &&
     shouldReportMissingReferenceImage({
       messages: input.messages,
       referenceImageCount: referenceImages.length
@@ -89,10 +104,14 @@ export async function runImageSessionAgent(
     throw new Error(MISSING_REFERENCE_IMAGE_REPLY);
   }
 
+  assertPathInsideProject(input.imagePath, projectDirectory, "当前图片路径");
+  for (const referenceImage of referenceImages) {
+    assertPathInsideProject(referenceImage.filePath, projectDirectory, `参考图 ${referenceImage.id}`);
+  }
+
   deps.logger?.info("Image session agent request started", {
     context,
     data: {
-      expectsImageGeneration,
       messageCount: input.messages.length,
       model: config.model,
       projectDirectory,
@@ -101,79 +120,101 @@ export async function runImageSessionAgent(
     publicMessage: "图片会话智能体已启动，正在理解任务..."
   });
 
-  const generateImageTool = createGenerateImageTool({
+  // 首轮（含用户清空 / 刚切到此会话）强制丢弃旧 runtime，开新对话。
+  const userMessageCount = countUserMessages(input.messages);
+  const registry = deps.registry ?? getSharedAgentRuntimeRegistry();
+  if (userMessageCount <= 1) {
+    registry.invalidate(registryKey);
+  }
+
+  // 当轮状态写入 turnState，工具在 execute 时通过 key 读到。
+  turnStateByKey.set(registryKey, {
     generateImage: async (request) => {
       generatedImage = await deps.generateImage(request);
       return generatedImage;
     },
-    input,
+    imagePath: input.imagePath,
     referenceImages,
     selectedOutputSize,
-    typebox: await loadTypebox()
-  });
-  const commandTool = createRunProjectCommandTool({
-    commandPolicy: createBatchImagerCommandPolicy({ projectDirectory }),
-    projectDirectory
-  });
-  const runtime = await (deps.createRuntime ?? createAgentRuntime)({
-    customToolDefinitions: [generateImageTool, commandTool],
-    llmConfig: config,
-    model: config.model,
-    projectDirectory,
     sessionId: input.sessionId
   });
 
-  deps.logger?.info("Image session agent runtime ready", {
-    context,
-    data: {
-      builtInTools: runtime.descriptor.builtInTools,
-      customTools: runtime.descriptor.customTools
+  return await registry.use(
+    {
+      key: registryKey,
+      factory: async () => {
+        const typebox = await loadTypebox();
+        const generateImageTool = createGenerateImageTool({ registryKey, typebox });
+        const commandTool = createRunProjectCommandTool({
+          commandPolicy: createBatchImagerCommandPolicy({ projectDirectory }),
+          projectDirectory
+        });
+        return await (deps.createRuntime ?? createAgentRuntime)({
+          customToolDefinitions: [generateImageTool, commandTool],
+          llmConfig: config,
+          model: config.model,
+          projectDirectory,
+          sessionId: input.sessionId
+        });
+      },
+      onCreate: (runtime) => {
+        runtime.subscribe((event) => logPiEvent(event, context, deps.logger));
+        deps.logger?.info("Image session agent runtime ready", {
+          context,
+          data: {
+            builtInTools: runtime.descriptor.builtInTools,
+            customTools: runtime.descriptor.customTools
+          },
+          publicMessage: "图片会话工具已就绪。"
+        });
+      }
     },
-    publicMessage: "图片会话工具已就绪。"
-  });
+    async ({ runtime, isFreshRuntime }) => {
+      const promptText = isFreshRuntime
+        ? buildFullPrompt(input, referenceImages, selectedOutputSize)
+        : buildTurnPrompt(input, referenceImages, selectedOutputSize);
 
-  try {
-    runtime.subscribe((event) => logAgentEvent(event, context, deps.logger));
-    await runtime.prompt(buildAgentPrompt(input, referenceImages, selectedOutputSize));
+      await runtime.prompt(promptText);
 
-    const content = runtime.getLastAssistantText()?.trim();
-    if (!content) {
-      throw new Error("Pi 会话未返回文本回复");
-    }
+      const content = runtime.getLastAssistantText()?.trim();
+      if (!content) {
+        throw new Error("Pi 会话未返回文本回复");
+      }
 
-    if (expectsImageGeneration && !generatedImage) {
-      deps.logger?.error("Image session agent answered without image tool for a generation request", {
+      deps.logger?.info("Image session agent completed", {
         context,
-        data: { content },
-        publicMessage: "图片会话智能体未返回图片生成工具调用。"
+        data: { generated: Boolean(generatedImage), reused: !isFreshRuntime },
+        publicMessage: generatedImage ? "图片会话已完成，图片已更新。" : "图片会话已完成。"
       });
-      throw new Error("Pi 未返回图片生成工具调用");
+
+      return {
+        content,
+        ...(generatedImage ? { generatedImage } : {})
+      };
     }
-
-    deps.logger?.info("Image session agent completed", {
-      context,
-      data: { generated: Boolean(generatedImage) },
-      publicMessage: generatedImage ? "图片会话已完成，图片已更新。" : "图片会话已完成。"
-    });
-
-    return {
-      content,
-      generatedImage
-    };
-  } finally {
-    runtime.dispose();
-  }
+  );
 }
 
 export async function warmupImageSessionAgentDependencies(): Promise<void> {
   await Promise.all([warmupAgentRuntime(), loadTypebox()]);
 }
 
+function buildRegistryKey(projectDirectory: string, sessionId: string): string {
+  return `image-session:${path.resolve(projectDirectory).toLowerCase()}:${sessionId}`;
+}
+
+function countUserMessages(messages: VisibleChatMessage[]): number {
+  let count = 0;
+  for (const message of messages) {
+    if (message.role === "user") {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 function createGenerateImageTool(options: {
-  generateImage: (request: ImageToolRequest) => Promise<ProductImageResult>;
-  input: ImageToolChatInput;
-  referenceImages: ReferenceImageCandidate[];
-  selectedOutputSize: string | undefined;
+  registryKey: string;
   typebox: TypeboxApi;
 }): Record<string, unknown> {
   const Type = options.typebox.Type;
@@ -199,6 +240,14 @@ function createGenerateImageTool(options: {
       { additionalProperties: false }
     ),
     async execute(_toolCallId: string, params: { prompt: string; referenceImageIds?: string[]; size?: string }) {
+      const state = turnStateByKey.get(options.registryKey);
+      if (!state) {
+        return {
+          content: [{ type: "text", text: "图片会话当前轮的上下文不可用，请重试。" }],
+          isError: true
+        };
+      }
+
       const prompt = params.prompt.trim();
       if (!prompt) {
         return {
@@ -207,14 +256,14 @@ function createGenerateImageTool(options: {
         };
       }
 
-      const referenceImagePaths = selectReferenceImagePaths(params.referenceImageIds, options.referenceImages);
+      const referenceImagePaths = selectReferenceImagePaths(params.referenceImageIds, state.referenceImages);
       const toolOutputSize = typeof params.size === "string" ? normalizeGenerationSizeValue(params.size) : undefined;
-      const generated = await options.generateImage({
-        imagePath: options.input.imagePath,
+      await state.generateImage({
+        imagePath: state.imagePath,
         prompt,
         ...(referenceImagePaths.length ? { referenceImagePaths } : {}),
-        sessionId: options.input.sessionId,
-        ...(options.selectedOutputSize ?? toolOutputSize ? { size: options.selectedOutputSize ?? toolOutputSize } : {})
+        sessionId: state.sessionId,
+        ...(state.selectedOutputSize ?? toolOutputSize ? { size: state.selectedOutputSize ?? toolOutputSize } : {})
       });
 
       return {
@@ -242,7 +291,10 @@ async function loadTypebox(): Promise<TypeboxApi> {
   return (await import("typebox")) as TypeboxApi;
 }
 
-function buildAgentPrompt(
+// 首轮 prompt：角色定位 + 硬性规则 + 全部上下文 + 全部历史 + 本轮 user。
+// 这是 SDK 看到的第一个 user message，会和后续轮一起留在 KV cache 里，
+// 所以把"规则"塞进这里足以让模型在后续轮也记得。
+function buildFullPrompt(
   input: ImageToolChatInput,
   referenceImages: ReferenceImageCandidate[],
   selectedOutputSize: string | undefined
@@ -252,32 +304,83 @@ function buildAgentPrompt(
     .slice(0, -1)
     .map((message) => `${message.role === "user" ? "用户" : "助手"}：${message.content}`)
     .join("\n");
-  const contextLines = [
-    "你是 BatchImager 的右侧图片会话智能体。",
-    "需要生成或修改图片时，必须调用 generate_image；不要假装已经生成图片。",
-    "当前图片会自动作为 generate_image 的 imagePath 输入，用户不需要重新上传。",
-    "回复要自然：先简短说明你准备做什么；工具完成后，总结结果。",
-    "图片生成完成后，不要在回复中展示本地路径、远端 URL 或下载链接。",
-    "不要展示隐藏推理链，只展示用户能理解的计划、进度和结果。",
-    `当前图片路径：${input.imagePath}`,
-    ...(input.context?.fileName ? [`初始图片文件名：${input.context.fileName}`] : []),
-    ...(input.context?.currentImageLabel ? [`当前编辑输入：${input.context.currentImageLabel}`] : []),
-    ...(input.context?.previousGenerationPrompt ? [`最近一次批量处理任务：${input.context.previousGenerationPrompt}`] : []),
-    ...(selectedOutputSize ? [`本次用户已选择输出分辨率：${selectedOutputSize}；调用 generate_image 时必须使用这个 size。`] : []),
-    ...(referenceImages.length
-      ? [
-          "可引用参考图索引：",
-          ...referenceImages.map((referenceImage) =>
-            `- ${referenceImage.id}：${referenceImage.label}${referenceImage.pinned ? "（已固定）" : ""}`
-          )
-        ]
-      : []),
-    ...(history ? ["可见会话历史：", history] : []),
-    "用户本轮要求：",
-    latestUserMessage
+
+  const sections: string[] = [
+    "你是 BatchImager 的右侧图片会话智能体，负责按用户要求生成或修改单张商品图。",
+    "硬性规则：",
+    "1) 需要生成或修改图片时必须调用 generate_image，不要假装已经生成。",
+    "2) 不要在回复中展示本地路径、远端 URL 或下载链接。",
+    "3) 不要展示隐藏推理链，只展示用户能理解的计划、进度和结果。",
+    "4) 当前图片会自动作为 generate_image 的 imagePath 输入，用户不需要重新上传。",
+    "5) 回复要自然：先简短说明你准备做什么；工具完成后总结结果；若只是讨论或澄清，不要强行生成。",
+    "6) 后续每轮我会在 [环境更新] 段告诉你最新的图片路径 / 选中分辨率 / 参考图索引；以最新一轮为准。",
+    "上下文：",
+    `- 当前图片路径：${input.imagePath}`
   ];
 
-  return contextLines.join("\n");
+  if (input.context?.fileName) {
+    sections.push(`- 初始图片文件名：${input.context.fileName}`);
+  }
+  if (input.context?.currentImageLabel) {
+    sections.push(`- 当前编辑输入：${input.context.currentImageLabel}`);
+  }
+  if (input.context?.previousGenerationPrompt) {
+    sections.push(`- 最近一次批量处理任务：${input.context.previousGenerationPrompt}`);
+  }
+  if (selectedOutputSize) {
+    sections.push(`- 本次用户已选择输出分辨率：${selectedOutputSize}；调用 generate_image 时必须使用这个 size。`);
+  }
+
+  if (referenceImages.length) {
+    sections.push("可引用参考图索引：");
+    for (const referenceImage of referenceImages) {
+      sections.push(`- ${referenceImage.id}：${referenceImage.label}${referenceImage.pinned ? "（已固定）" : ""}`);
+    }
+  }
+
+  if (history) {
+    sections.push("可见会话历史：", history);
+  }
+
+  sections.push("用户本轮要求：", latestUserMessage);
+
+  return sections.join("\n");
+}
+
+// 增量 prompt：只发本轮环境 + 当前用户输入；不重发角色、规则、历史。
+// SDK 内部 messages 已含上一轮的 system 段（首轮的完整 prompt）与 assistant 回复。
+function buildTurnPrompt(
+  input: ImageToolChatInput,
+  referenceImages: ReferenceImageCandidate[],
+  selectedOutputSize: string | undefined
+): string {
+  const latestUserMessage = getLatestUserMessage(input);
+  const sections: string[] = [
+    "[环境更新]",
+    `- 当前图片路径：${input.imagePath}`
+  ];
+
+  if (input.context?.currentImageLabel) {
+    sections.push(`- 当前编辑输入：${input.context.currentImageLabel}`);
+  }
+  if (selectedOutputSize) {
+    sections.push(`- 本次用户已选择输出分辨率：${selectedOutputSize}；调用 generate_image 时必须使用这个 size。`);
+  } else {
+    sections.push("- 用户当前没有选定输出分辨率。");
+  }
+
+  if (referenceImages.length) {
+    sections.push("- 可引用参考图索引（覆盖此前）：");
+    for (const referenceImage of referenceImages) {
+      sections.push(`  - ${referenceImage.id}：${referenceImage.label}${referenceImage.pinned ? "（已固定）" : ""}`);
+    }
+  } else {
+    sections.push("- 本轮没有可引用的参考图。");
+  }
+
+  sections.push("[用户本轮要求]", latestUserMessage);
+
+  return sections.join("\n");
 }
 
 function getReferenceImageCandidates(input: ImageToolChatInput): ReferenceImageCandidate[] {
@@ -339,38 +442,30 @@ function getLatestUserMessage(input: ImageToolChatInput): string {
   );
 }
 
-function shouldUseImageTool(messages: VisibleChatMessage[], selectedOutputSize: string | undefined): boolean {
-  return Boolean(selectedOutputSize) || shouldFallbackToImageGeneration(messages);
-}
+const PATH_COMPARISON_IS_CASE_INSENSITIVE = process.platform === "win32" || process.platform === "darwin";
 
-function shouldFallbackToImageGeneration(messages: VisibleChatMessage[]): boolean {
-  const latestUserMessage = getLatestUserMessage({ imagePath: "", messages, sessionId: "" }).toLowerCase();
-
-  if (!latestUserMessage) {
-    return false;
+function assertPathInsideProject(targetPath: string, projectDirectory: string, label: string): void {
+  if (!targetPath) {
+    throw new Error(`${label}为空。`);
   }
 
-  return [
-    "生成",
-    "重新生成",
-    "再生成",
-    "做成",
-    "改成",
-    "换成",
-    "处理",
-    "修图",
-    "商品图",
-    "白底",
-    "去背景",
-    "generate",
-    "regenerate",
-    "make ",
-    "turn ",
-    "create "
-  ].some((keyword) => latestUserMessage.includes(keyword));
+  const normalizedTarget = normalizePathForCompare(path.resolve(targetPath));
+  const normalizedRoot = normalizePathForCompare(path.resolve(projectDirectory));
+
+  if (normalizedTarget === normalizedRoot) {
+    return;
+  }
+
+  if (!normalizedTarget.startsWith(`${normalizedRoot}${path.sep}`)) {
+    throw new Error(`${label}指向项目目录之外：${targetPath}`);
+  }
 }
 
-function logAgentEvent(event: unknown, context: string, logger: AppLogger | undefined): void {
+function normalizePathForCompare(value: string): string {
+  return PATH_COMPARISON_IS_CASE_INSENSITIVE ? value.toLowerCase() : value;
+}
+
+function logPiEvent(event: unknown, context: string, logger: AppLogger | undefined): void {
   if (!logger || typeof event !== "object" || event === null || !("type" in event) || typeof event.type !== "string") {
     return;
   }
@@ -395,12 +490,36 @@ function logAgentEvent(event: unknown, context: string, logger: AppLogger | unde
   }
 }
 
+const SENSITIVE_KEY_PATTERN = /key|token|authorization|secret|password/i;
+// 通用 token/sk-/bearer 等敏感串；超过 32 字符的高熵串也按敏感处理。
+// TODO: 这套黑名单一定会漏（ghp_xxx / xoxb- / AKIA… 等格式）。更稳的方向是把事件日志
+// 切到白名单：只保留 event.type、tool name、exitCode、durationMs 等显式安全字段。
+// 没立刻做是因为：完整事件字段对调试 pi 行为很关键，先观察实际泄漏案例再收紧。
+const SENSITIVE_VALUE_PATTERN = /(?:sk-[A-Za-z0-9_-]{8,}|bearer\s+[A-Za-z0-9._-]+|[A-Fa-f0-9]{32,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/i;
+
 function sanitizePiEvent(event: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(event)
-      .filter(([key]) => !/key|token|authorization|secret/i.test(key))
-      .map(([key, value]) => [key, typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? value : typeof value])
-  );
+  const result: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(event)) {
+    if (SENSITIVE_KEY_PATTERN.test(key)) {
+      result[key] = "[redacted]";
+      continue;
+    }
+
+    if (typeof value === "string") {
+      result[key] = SENSITIVE_VALUE_PATTERN.test(value) ? "[redacted]" : truncateForLog(value);
+    } else if (typeof value === "number" || typeof value === "boolean" || value === null) {
+      result[key] = value;
+    } else {
+      result[key] = typeof value;
+    }
+  }
+
+  return result;
+}
+
+function truncateForLog(value: string): string {
+  return value.length > 500 ? `${value.slice(0, 500)}…` : value;
 }
 
 function getFileName(filePath: string): string {

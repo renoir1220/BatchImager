@@ -52,4 +52,39 @@ describe("agentCommandPolicy", () => {
     expect(policy.checkCommand(`rm -rf "${path.join(projectDirectory, "images", "generated", "old")}"`).allowed).toBe(true);
     expect(policy.checkCommand(`Remove-Item -Recurse "${path.join(projectDirectory, "dist")}"`).allowed).toBe(true);
   });
+
+  test("allows pipelines whose every segment is safe", () => {
+    expect(policy.checkCommand("git status --short | grep modified").allowed).toBe(true);
+    expect(policy.checkCommand("npm run build && npm test").allowed).toBe(true);
+  });
+
+  test.each([
+    "git status; shutdown /s /t 0",
+    "git status && rm -rf /",
+    "ls || Format-Volume -DriveLetter D",
+    "git log | taskkill /f /im explorer.exe",
+    "git status & shutdown /s /t 0"
+  ])("denies the whole pipeline when any segment is dangerous: %s", (command) => {
+    expect(policy.checkCommand(command).allowed).toBe(false);
+  });
+
+  test.each([
+    "echo $(rm -rf /)",
+    "echo `shutdown /s /t 0`",
+    "git log --pretty=$(taskkill /f /im explorer.exe)"
+  ])("denies commands that smuggle dangerous calls through command substitution: %s", (command) => {
+    const decision = policy.checkCommand(command);
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain("命令替换");
+  });
+
+  test.each([
+    "echo $(shutdown /s $(date))",
+    "echo $(echo $(taskkill /f /im explorer.exe))",
+    "git log $(echo $(rm -rf /))"
+  ])("denies dangerous calls hidden inside nested command substitution: %s", (command) => {
+    const decision = policy.checkCommand(command);
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain("命令替换");
+  });
 });

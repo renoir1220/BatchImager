@@ -39,7 +39,9 @@ interface CreateRunProjectCommandToolOptions {
   timeoutMs?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+// 5 分钟够覆盖 npm install / build / test 等长耗时项目命令；
+// 之前 2 分钟会腰斩这些常规命令，LLM 拿到 timeout 后会自动重试，浪费 token。
+const DEFAULT_TIMEOUT_MS = 300_000;
 const MAX_OUTPUT_CHARS = 12_000;
 
 export function createRunProjectCommandTool(options: CreateRunProjectCommandToolOptions): BatchImagerAgentTool {

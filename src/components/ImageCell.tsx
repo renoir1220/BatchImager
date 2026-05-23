@@ -1,12 +1,21 @@
 import { useEffect, useState } from "react";
-import type { KeyboardEvent, MouseEvent } from "react";
+import type { DragEvent, KeyboardEvent, MouseEvent } from "react";
 import type { ImageSession, ImageSessionStatus } from "../types/image";
 import { getSessionDisplayPath } from "../domain/imageSessions";
+import {
+  type WorkspaceImageDragPayload,
+  writeWorkspaceImageDragPayload
+} from "./workspaceImageDrag";
 
 interface ImageCellProps {
+  dragPayload: WorkspaceImageDragPayload;
+  isDragTarget: boolean;
   isSelected: boolean;
   session: ImageSession;
   onDelete: () => void;
+  onDragLeave: () => void;
+  onDragOver: (event: DragEvent<HTMLDivElement>) => void;
+  onDrop: (event: DragEvent<HTMLDivElement>) => void;
   onSelect: () => void;
   onRetry: () => void;
   onToggleImageSource: () => void;
@@ -22,7 +31,20 @@ const STATUS_ICON: Record<ImageSessionStatus, string> = {
   failed: "×"
 };
 
-export function ImageCell({ isSelected, session, onDelete, onOpenPreview, onRetry, onSelect, onToggleImageSource }: ImageCellProps) {
+export function ImageCell({
+  dragPayload,
+  isDragTarget,
+  isSelected,
+  session,
+  onDelete,
+  onDragLeave,
+  onDragOver,
+  onDrop,
+  onOpenPreview,
+  onRetry,
+  onSelect,
+  onToggleImageSource
+}: ImageCellProps) {
   const [isDeleteConfirming, setIsDeleteConfirming] = useState(false);
   const displayPath = getSessionDisplayPath(session);
   const imageUrl = window.batchImager?.getImageUrl(displayPath) ?? displayPath;
@@ -59,9 +81,14 @@ export function ImageCell({ isSelected, session, onDelete, onOpenPreview, onRetr
     onSelect();
   }
 
+  function handleDragStart(event: DragEvent<HTMLDivElement>): void {
+    writeWorkspaceImageDragPayload(event.dataTransfer, dragPayload);
+  }
+
   return (
     <div
-      className={`image-cell ${isSelected ? "selected" : ""}`}
+      className={`image-cell ${isSelected ? "selected" : ""} ${isDragTarget ? "drag-target" : ""}`}
+      draggable
       role="button"
       tabIndex={0}
       onClick={onSelect}
@@ -70,6 +97,10 @@ export function ImageCell({ isSelected, session, onDelete, onOpenPreview, onRetr
         onToggleImageSource();
       }}
       onDoubleClick={onOpenPreview}
+      onDragLeave={onDragLeave}
+      onDragOver={onDragOver}
+      onDragStart={handleDragStart}
+      onDrop={onDrop}
       onKeyDown={handleCellKeyDown}
       title={session.generatedFilePath ? "右键切换原图/当前图，双击查看大图" : "双击查看大图"}
     >

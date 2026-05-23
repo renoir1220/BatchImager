@@ -23,6 +23,7 @@ import { packageGeneratedImages } from "./services/imagePackage";
 import { loadTuziConfig, loadTuziLlmConfig } from "./services/localConfig";
 import { saveReferenceImageToDirectory } from "./services/localImageStorage";
 import { runImageSessionAgent, warmupImageSessionAgentDependencies } from "./services/imageSessionAgent";
+import { getSharedAgentRuntimeRegistry } from "./services/agentRuntimeRegistry";
 import { listProjectCards } from "./services/projectList";
 import { rememberProjectDirectory } from "./services/projectIndex";
 import {
@@ -110,6 +111,8 @@ function registerIpc(appLogger: AppLogger): void {
   ipcMain.handle("project:create", async () => {
     const projectsDirectory = getProjectsDirectory();
     const snapshot = await createProject({ projectsDirectory });
+    // 切换到新项目前，丢弃所有缓存的 agent runtime（它们绑在旧项目目录上）。
+    getSharedAgentRuntimeRegistry().invalidateAll();
     activeProjectDirectory = snapshot.project.directory;
     appLogger.info("Project created", {
       data: { projectDirectory: snapshot.project.directory, projectId: snapshot.project.id },
@@ -141,6 +144,8 @@ function registerIpc(appLogger: AppLogger): void {
     });
     await recoverProjectBeforeOpen(projectDirectory, appLogger);
     const snapshot = await openProject(projectDirectory);
+    // 切到新项目，丢弃旧项目的 agent runtime 缓存。
+    getSharedAgentRuntimeRegistry().invalidateAll();
     activeProjectDirectory = snapshot.project.directory;
     appLogger.info("Project opened", {
       data: {
@@ -836,6 +841,11 @@ function toUserErrorMessage(error: unknown): string {
 
   return "未知错误";
 }
+
+app.on("before-quit", () => {
+  // 退出前清空 agent runtime 注册表，触发各 runtime 的 dispose（解绑订阅 + SDK 清理）。
+  getSharedAgentRuntimeRegistry().invalidateAll();
+});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ProjectListEntry } from "../../electron/ipcTypes";
+import { OsDialog, OsDialogClose, OsDialogTitle } from "./os";
 
 interface ProjectListDialogProps {
   isLoading: boolean;
@@ -21,39 +22,46 @@ export function ProjectListDialog({
   onRenameProject
 }: ProjectListDialogProps) {
   return (
-    <div className="modal-backdrop project-list-backdrop">
-      <section className="project-list-dialog" role="dialog" aria-modal="true" aria-label="项目列表">
-        <header className="project-list-header">
-          <div>
+    <OsDialog
+      overlayClassName="modal-backdrop project-list-backdrop"
+      contentClassName="project-list-dialog"
+      aria-label="项目列表"
+      onClose={onClose}
+    >
+      <header className="project-list-header">
+        <div>
+          <OsDialogTitle asChild>
             <h2>打开项目</h2>
-            <span>{isLoading ? "正在读取项目..." : `${projects.length} 个项目`}</span>
-          </div>
-          <div className="project-list-header-actions">
-            <button className="toolbar-button" type="button" onClick={onRefresh}>
-              刷新
-            </button>
-            <button className="toolbar-button" type="button" onClick={onAddDirectory}>
-              添加项目文件夹
-            </button>
-            <button className="icon-button" type="button" onClick={onClose} aria-label="关闭">
+          </OsDialogTitle>
+          <span>{isLoading ? "正在读取项目..." : `${projects.length} 个项目`}</span>
+        </div>
+        <div className="project-list-header-actions">
+          <button className="toolbar-button" type="button" onClick={onRefresh}>
+            刷新
+          </button>
+          <button className="toolbar-button" type="button" onClick={onAddDirectory}>
+            添加项目文件夹
+          </button>
+          <OsDialogClose asChild>
+            <button className="icon-button" type="button" aria-label="关闭">
               ×
             </button>
-          </div>
-        </header>
-
-        <div className="project-list-body">
-          {!isLoading && projects.length === 0 ? <div className="project-list-empty">还没有项目。</div> : null}
-          {projects.map((project) => (
-            <ProjectListRow
-              key={project.directory}
-              project={project}
-              onOpenProject={onOpenProject}
-              onRenameProject={onRenameProject}
-            />
-          ))}
+          </OsDialogClose>
         </div>
-      </section>
-    </div>
+      </header>
+
+      <div className="project-list-body">
+        {!isLoading && projects.length === 0 ? <div className="project-list-empty">还没有项目。</div> : null}
+        {projects.map((project) => (
+          <ProjectListRow
+            key={project.directory}
+            project={project}
+            onOpenProject={onOpenProject}
+            onRenameProject={onRenameProject}
+          />
+        ))}
+      </div>
+    </OsDialog>
   );
 }
 

@@ -209,6 +209,29 @@ export function toggleSessionListImageSource(sessions: ImageSession[], sessionId
   );
 }
 
+export function moveImageSession(sessions: ImageSession[], sourceSessionId: string, targetSessionId: string): ImageSession[] {
+  if (sourceSessionId === targetSessionId) {
+    return sessions;
+  }
+
+  const sourceIndex = sessions.findIndex((session) => session.id === sourceSessionId);
+  const targetIndex = sessions.findIndex((session) => session.id === targetSessionId);
+
+  if (sourceIndex < 0 || targetIndex < 0) {
+    return sessions;
+  }
+
+  const nextSessions = [...sessions];
+  const [movedSession] = nextSessions.splice(sourceIndex, 1);
+
+  if (!movedSession) {
+    return sessions;
+  }
+
+  nextSessions.splice(targetIndex, 0, movedSession);
+  return nextSessions;
+}
+
 export function getSessionDisplayPath(session: ImageSession): string {
   return session.showOriginalInList ? session.filePath : getSessionGenerationSourcePath(session);
 }

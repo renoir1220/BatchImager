@@ -12,7 +12,7 @@ describe("project plan UI wiring", () => {
     const panel = readProjectFile("src/components/ProjectPlanPanel.tsx");
     const styles = readProjectFile("src/styles.css");
 
-    expect(app).toContain("项目方案");
+    expect(app).toContain("Esse");
     expect(app).toContain("当前图片");
     expect(app).toContain("ProjectPlanPanel");
     expect(app).toContain("SessionPanel");
@@ -24,9 +24,13 @@ describe("project plan UI wiring", () => {
     expect(styles).toContain("grid-template-rows: minmax(0, 1fr) auto;");
   });
 
-  test("batch dialog submits a plan request instead of direct generation copy", () => {
-    expect(readProjectFile("src/components/BatchDialog.tsx")).toContain("生成方案");
-    expect(readProjectFile("src/App.tsx")).toContain("createProjectManagerPlan");
+  test("the main app no longer exposes the unavailable batch dialog entrypoint", () => {
+    const app = readProjectFile("src/App.tsx");
+    const toolbar = readProjectFile("src/components/AppToolbar.tsx");
+
+    expect(app).not.toContain("BatchDialog");
+    expect(app).not.toContain("createProjectManagerPlan");
+    expect(toolbar).not.toContain("批量处理");
   });
 
   test("Esse IPC is exposed only through preload", () => {
@@ -54,7 +58,10 @@ describe("project plan UI wiring", () => {
 
     expect(panel).toContain("formatPlanApprovalTitle(plan)");
     expect(panel).toContain('className="plan-title"');
-    expect(panel).toContain("方案有${plan.commands.length}个任务待审批");
+    expect(panel).toContain("Esse有${plan.commands.length}个任务等你确认");
+    expect(panel).toContain("Esse工作进度：${reportedCount}/${plan.commands.length}");
+    expect(panel).toContain("Esse完成了${plan.commands.length}个任务");
+    expect(panel).toContain("plan-title-spinner");
     expect(panel).not.toContain("plan-eyebrow");
     expect(panel).not.toContain("plan-summary-line");
     expect(panel).not.toContain("<p>{plan.globalInstruction}</p>");
@@ -112,15 +119,32 @@ describe("project plan UI wiring", () => {
     const styles = readProjectFile("src/styles.css");
 
     expect(panel).toContain("ESSE_PERSONA_OPTIONS");
-    expect(panel).toContain("老黄牛");
-    expect(panel).toContain("优秀员工");
+    expect(panel).toContain("牛马设计师");
+    expect(panel).toContain("勤恳耐造");
+    expect(panel).toContain("真正的设计师");
+    expect(panel).toContain("审美稳准");
     expect(panel).toContain("问题少女");
+    expect(panel).toContain("爱问细节");
     expect(panel).toContain("无情的机器人");
+    expect(panel).toContain("规则优先");
     expect(panel).toContain('useState<EssePersona>("excellent-employee")');
     expect(panel).toContain("resolveGenerationSizeSelection(selectedSize, customSize),");
     expect(panel).toContain("selectedPersona");
+    expect(panel).toContain("EssePersonaIcon");
+    expect(panel).toContain("OsSelect");
+    expect(panel).toContain("EssePersonaSelect");
+    expect(panel).toContain('ariaLabel="选择 Esse 人格"');
+    expect(panel).toContain('listLabel="Esse 人格"');
     expect(app).toContain("persona");
-    expect(styles).toContain(".esse-persona-switch");
+    expect(styles).not.toContain(".esse-persona-switch");
+    expect(styles).not.toContain(".esse-persona-button");
+    expect(styles).not.toContain(".esse-persona-menu");
+    expect(styles).toContain(".os-select-trigger");
+    expect(styles).toContain(".os-select-content");
+    expect(styles).toContain(".os-select-leading-icon");
+    expect(styles).toContain("--radix-popper-available-width");
+    expect(styles).toContain("--radix-popper-available-height");
+    expect(styles).toContain("text-overflow: ellipsis");
   });
 
   test("sidebar tab status dot stays next to the tab label", () => {
@@ -131,5 +155,25 @@ describe("project plan UI wiring", () => {
     expect(tabDotRule).not.toContain("right:");
     expect(tabDotRule).toContain("flex:");
     expect(tabDotRule).toContain("margin-left:");
+  });
+
+  test("workspace images can be reordered and dropped into the Esse composer as references", () => {
+    const app = readProjectFile("src/App.tsx");
+    const workspace = readProjectFile("src/components/ImageWorkspace.tsx");
+    const cell = readProjectFile("src/components/ImageCell.tsx");
+    const panel = readProjectFile("src/components/ProjectPlanPanel.tsx");
+    const references = readProjectFile("src/components/usePastedReferenceImages.ts");
+    const drag = readProjectFile("src/components/workspaceImageDrag.ts");
+
+    expect(cell).toContain("writeWorkspaceImageDragPayload");
+    expect(drag).toContain("BATCHIMAGER_IMAGE_DRAG_TYPE");
+    expect(drag).toContain("dataTransfer.setData");
+    expect(workspace).toContain("onReorderSessions");
+    expect(workspace).toContain("onImageDragPayload");
+    expect(app).toContain("moveImageSession");
+    expect(app).toContain("handleReorderSessions");
+    expect(panel).toContain("handleReferenceDrop");
+    expect(panel).toContain("addReferenceImagePath");
+    expect(references).toContain("addReferenceImagePath");
   });
 });

@@ -19,17 +19,18 @@ describe("AppToolbar layout", () => {
     expect(toolbarSource).toContain("MenuBarItem");
     expect(toolbarSource).toContain("ProjectMenuButton");
     expect(toolbarSource).toContain("ToolbarSegmentedControl");
-    expect(toolbarSource).toContain("MoreMenuButton");
     expect(toolbarSource).toContain("toolbar-main-actions");
     expect(toolbarSource).toContain("toolbar-view-actions");
     expect(toolbarSource).toContain("toolbar-status-actions");
     expect(toolbarSource).toContain("toolbar-count");
   });
 
-  it("moves low frequency destructive actions out of the primary toolbar row", () => {
-    expect(toolbarSource).toContain("更多");
-    expect(toolbarSource).toContain("onClear");
-    expect(toolbarSource).not.toContain("<MenuBarItem disabled={!hasProject || imageCount === 0} onClick={onClear}>");
+  it("does not expose unavailable batch or overflow actions", () => {
+    expect(toolbarSource).not.toContain("批量处理");
+    expect(toolbarSource).not.toContain("更多");
+    expect(toolbarSource).not.toContain("onBatchProcess");
+    expect(toolbarSource).not.toContain("onClear");
+    expect(toolbarSource).not.toContain("MoreMenuButton");
   });
 
   it("keeps a visible new project button in the top toolbar after a project is open", () => {
