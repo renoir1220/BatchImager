@@ -25,7 +25,11 @@ function renderProjectPlanPanel(onSendMessage = vi.fn()): ReturnType<typeof vi.f
 function renderProjectPlanPanelWithState(
   projectManagerState: ProjectManagerState,
   onSendMessage = vi.fn(),
-  imageSessions: ImageSession[] = []
+  imageSessions: ImageSession[] = [],
+  overrides: {
+    onStopWork?: () => void;
+    showFileInFolder?: (request: { filePath: string }) => Promise<{ ok: true }>;
+  } = {}
 ): ReturnType<typeof vi.fn> {
   renderWithBatchImager(
     <ProjectPlanPanel
@@ -43,8 +47,11 @@ function renderProjectPlanPanelWithState(
       onResolvePermission={vi.fn()}
       onResolvePreflight={vi.fn()}
       onSendMessage={onSendMessage}
-      onStopWork={vi.fn()}
-    />
+      onStopWork={overrides.onStopWork ?? vi.fn()}
+    />,
+    {
+      ...(overrides.showFileInFolder ? { showFileInFolder: overrides.showFileInFolder } : {})
+    }
   );
 
   return onSendMessage;
@@ -93,7 +100,9 @@ describe("ProjectPlanPanel persona behavior", () => {
 });
 
 describe("ProjectPlanPanel bash execution cards", () => {
-  test("renders streaming bash output and final output path", () => {
+  test("renders streaming bash output and opens the final output path", async () => {
+    const user = userEvent.setup();
+    const showFileInFolder = vi.fn();
     renderProjectPlanPanelWithState({
       conversation: {
         id: "conversation-1",
@@ -117,11 +126,42 @@ describe("ProjectPlanPanel bash execution cards", () => {
         ]
       },
       plans: []
-    });
+    }, vi.fn(), [], { showFileInFolder });
 
     expect(screen.getByRole("region", { name: "Esse Bash 执行" })).toHaveTextContent("xlsx-export · bash");
     expect(screen.getByText(/Exported 1 rows/)).toBeInTheDocument();
-    expect(screen.getByText("输出：/project/exports/all-sessions.xlsx")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "打开输出文件" }));
+    expect(showFileInFolder).toHaveBeenCalledWith({ filePath: "/project/exports/all-sessions.xlsx" });
+  });
+
+  test("clicking the bash card stop button cancels active Esse work", async () => {
+    const user = userEvent.setup();
+    const onStopWork = vi.fn();
+    renderProjectPlanPanelWithState({
+      conversation: {
+        id: "conversation-1",
+        messages: [
+          {
+            bashExecution: {
+              command: "npm install --omit=dev",
+              cwd: "/skills/xlsx-export",
+              output: "installing...",
+              skillName: "xlsx-export",
+              status: "running",
+              toolCallId: "bash-running"
+            },
+            content: "",
+            contextType: "esse-bash-execution",
+            id: "message-bash-running",
+            role: "context"
+          }
+        ]
+      },
+      plans: []
+    }, vi.fn(), [], { onStopWork });
+
+    await user.click(screen.getByRole("button", { name: "中止" }));
+    expect(onStopWork).toHaveBeenCalledTimes(1);
   });
 });
 

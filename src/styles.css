@@ -1326,6 +1326,12 @@ textarea {
   font-size: 12px;
 }
 
+.esse-bash-status-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
 .esse-bash-card code,
 .esse-bash-card pre {
   display: block;

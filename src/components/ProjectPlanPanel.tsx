@@ -263,7 +263,7 @@ export function ProjectPlanPanel({
                       onRetryItem={onRetryBatchTaskItem}
                     />
                   ) : null}
-                  {message.bashExecution ? <EsseBashExecutionCard execution={message.bashExecution} /> : null}
+                  {message.bashExecution ? <EsseBashExecutionCard execution={message.bashExecution} onStop={onStopWork} /> : null}
                 </div>
                 {hasMessageContent ? <MessageActions content={message.content} /> : null}
               </div>
@@ -333,9 +333,11 @@ export function ProjectPlanPanel({
 }
 
 function EsseBashExecutionCard({
-  execution
+  execution,
+  onStop
 }: {
   execution: NonNullable<ProjectManagerState["conversation"]["messages"][number]["bashExecution"]>;
+  onStop: () => void;
 }) {
   const statusLabel = execution.status === "running" ? "运行中" : execution.status === "completed" ? "完成" : "失败";
   const output = execution.output?.trim();
@@ -344,14 +346,29 @@ function EsseBashExecutionCard({
     <section className={`esse-bash-card ${execution.status}`} aria-label="Esse Bash 执行">
       <header>
         <strong>{execution.skillName ? `${execution.skillName} · bash` : "bash"}</strong>
-        <span>{statusLabel}{execution.exitCode !== undefined ? ` · exit ${execution.exitCode ?? "null"}` : ""}</span>
+        <div className="esse-bash-status-actions">
+          <span>{statusLabel}{execution.exitCode !== undefined ? ` · exit ${execution.exitCode ?? "null"}` : ""}</span>
+          {execution.status === "running" ? (
+            <button className="toolbar-button" type="button" onClick={onStop}>
+              中止
+            </button>
+          ) : null}
+        </div>
       </header>
       <code>{execution.command}</code>
       {output ? <pre>{tailLines(output, 200)}</pre> : <p>等待输出...</p>}
       {execution.outputPath || execution.fullOutputPath ? (
         <footer>
-          {execution.outputPath ? <span>输出：{execution.outputPath}</span> : null}
-          {execution.fullOutputPath ? <span>完整日志：{execution.fullOutputPath}</span> : null}
+          {execution.outputPath ? (
+            <button className="toolbar-button" type="button" onClick={() => showFileInFolder(execution.outputPath ?? "")}>
+              打开输出文件
+            </button>
+          ) : null}
+          {execution.fullOutputPath ? (
+            <button className="toolbar-button" type="button" onClick={() => showFileInFolder(execution.fullOutputPath ?? "")}>
+              打开完整日志
+            </button>
+          ) : null}
         </footer>
       ) : null}
     </section>
@@ -934,6 +951,14 @@ function tailLines(text: string, maxLines: number): string {
   }
 
   return [`+${lines.length - maxLines} 行已折叠`, ...lines.slice(-maxLines)].join("\n");
+}
+
+function showFileInFolder(filePath: string): void {
+  if (!filePath.trim()) {
+    return;
+  }
+
+  void window.batchImager?.showFileInFolder?.({ filePath });
 }
 
 function formatWorkerStatus(report: WorkerReport | undefined): string {

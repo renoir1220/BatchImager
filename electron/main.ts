@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, net, protocol } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, net, protocol, shell } from "electron";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
@@ -26,6 +26,7 @@ import type {
   SendEsseMessageRequest,
   EssePermissionResponse,
   EssePreflightResponse,
+  ShowFileInFolderRequest,
   SetEsseSkillEnabledRequest,
   ProjectSnapshot
 } from "./ipcTypes";
@@ -369,6 +370,12 @@ function registerIpc(appLogger: AppLogger): void {
       publicMessage: "API 设置已保存。"
     });
     return snapshot;
+  });
+
+  ipcMain.handle("files:show-in-folder", (_event, request: ShowFileInFolderRequest) => {
+    assertShowFileInFolderRequest(request);
+    shell.showItemInFolder(request.filePath);
+    return { ok: true };
   });
 
   ipcMain.handle("esse:skills-list", async () => buildEsseSkillsSnapshot(true));
@@ -1168,6 +1175,12 @@ function assertSaveApiSettingsRequest(request: SaveApiSettingsRequest): void {
     (request.llmApiKey !== undefined && typeof request.llmApiKey !== "string")
   ) {
     throw new Error("Invalid API settings request");
+  }
+}
+
+function assertShowFileInFolderRequest(request: ShowFileInFolderRequest): void {
+  if (typeof request !== "object" || request === null || typeof request.filePath !== "string" || !request.filePath.trim()) {
+    throw new Error("Invalid file show request");
   }
 }
 

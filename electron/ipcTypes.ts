@@ -103,6 +103,10 @@ export interface ReadEsseSkillFileResponse {
   filePath: string;
 }
 
+export interface ShowFileInFolderRequest {
+  filePath: string;
+}
+
 export type EsseBashExecutionStatus = "running" | "completed" | "failed";
 
 export interface EsseBashExecutionEvent {

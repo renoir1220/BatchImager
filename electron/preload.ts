@@ -44,6 +44,7 @@ import type {
   SendEsseMessageRequest,
   SendEsseMessageResponse,
   EsseSkillsSnapshot,
+  ShowFileInFolderRequest,
   SetEsseSkillEnabledRequest
 } from "./ipcTypes";
 
@@ -102,6 +103,8 @@ const api = {
     ipcRenderer.invoke("esse:skills-remove", request),
   readEsseSkillFile: async (request: ReadEsseSkillFileRequest): Promise<ReadEsseSkillFileResponse> =>
     ipcRenderer.invoke("esse:skills-read-file", request),
+  showFileInFolder: async (request: ShowFileInFolderRequest): Promise<{ ok: true }> =>
+    ipcRenderer.invoke("files:show-in-folder", request),
   setRunningWorkCount: (count: number): void => {
     ipcRenderer.send("app:set-running-work-count", count);
   },
