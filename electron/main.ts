@@ -514,14 +514,22 @@ function registerIpc(appLogger: AppLogger): void {
     }
   });
 
-  ipcMain.handle("esse:preflight-response", (_event, response: EssePreflightResponse) => {
+  ipcMain.handle("esse:preflight-response", async (_event, response: EssePreflightResponse) => {
     assertEssePreflightResponse(response);
-    return { accepted: essePreflightBroker.respond(response) };
+    const accepted = essePreflightBroker.respond(response);
+    if (accepted) {
+      await markEssePreflightDecision(requireActiveProjectDirectory(), response);
+    }
+    return { accepted };
   });
 
-  ipcMain.handle("esse:permission-response", (_event, response: EssePermissionResponse) => {
+  ipcMain.handle("esse:permission-response", async (_event, response: EssePermissionResponse) => {
     assertEssePermissionResponse(response);
-    return { accepted: essePermissionBroker.respond(response) };
+    const accepted = essePermissionBroker.respond(response);
+    if (accepted) {
+      await markEssePermissionDecision(requireActiveProjectDirectory(), response);
+    }
+    return { accepted };
   });
 
   ipcMain.handle("esse:batch-task-cancel-item", (_event, request: CancelEsseBatchTaskItemRequest) => {
@@ -614,6 +622,44 @@ async function createRetryWorkspaceRuntime(projectDirectory: string) {
     initialSnapshot: await openProject(projectDirectory),
     sink: getProjectSnapshotSink(projectDirectory)
   });
+}
+
+async function markEssePreflightDecision(projectDirectory: string, response: EssePreflightResponse): Promise<void> {
+  await getProjectSnapshotSink(projectDirectory).apply((snapshot) => ({
+    ...snapshot,
+    projectManagerState: snapshot.projectManagerState
+      ? {
+          ...snapshot.projectManagerState,
+          conversation: {
+            ...snapshot.projectManagerState.conversation,
+            messages: snapshot.projectManagerState.conversation.messages.map((message) =>
+              message.preflightRequest?.requestId === response.requestId
+                ? { ...message, preflightDecision: response.decision }
+                : message
+            )
+          }
+        }
+      : snapshot.projectManagerState
+  }), { countRevision: false });
+}
+
+async function markEssePermissionDecision(projectDirectory: string, response: EssePermissionResponse): Promise<void> {
+  await getProjectSnapshotSink(projectDirectory).apply((snapshot) => ({
+    ...snapshot,
+    projectManagerState: snapshot.projectManagerState
+      ? {
+          ...snapshot.projectManagerState,
+          conversation: {
+            ...snapshot.projectManagerState.conversation,
+            messages: snapshot.projectManagerState.conversation.messages.map((message) =>
+              message.permissionRequest?.requestId === response.requestId
+                ? { ...message, permissionDecision: response.decision }
+                : message
+            )
+          }
+        }
+      : snapshot.projectManagerState
+  }), { countRevision: false });
 }
 
 function findBatchTaskFailedSessionIds(snapshot: ProjectSnapshot, batchTaskId: string): string[] {

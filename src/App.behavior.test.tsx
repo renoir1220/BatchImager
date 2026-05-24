@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 import type { ProjectSnapshot } from "../electron/ipcTypes";
@@ -47,6 +47,59 @@ describe("App image preview behavior", () => {
     expect(screen.getByRole("dialog", { name: "flower.jpg" })).toBeInTheDocument();
 
     await waitFor(() => expect(screen.getByRole("dialog", { name: "flower.jpg" })).toBeInTheDocument());
+  });
+
+  test("does not persist stale sessions when confirming an Esse preflight request", async () => {
+    const user = userEvent.setup();
+    let preflightListener: Parameters<NonNullable<Window["batchImager"]>["subscribeEssePreflightRequests"]>[0] | undefined;
+    const snapshot = makeProjectSnapshot();
+    const saveProjectSnapshot = vi.fn().mockResolvedValue(snapshot);
+    const respondEssePreflight = vi.fn().mockResolvedValue({ accepted: true });
+
+    renderWithBatchImager(<App />, {
+      createProject: vi.fn().mockResolvedValue(makeProjectSnapshot([])),
+      getLogs: vi.fn().mockResolvedValue([]),
+      importImages: vi.fn().mockResolvedValue(snapshot),
+      listProjects: vi.fn().mockResolvedValue([]),
+      respondEssePreflight,
+      saveProjectSnapshot,
+      setRunningWorkCount: vi.fn(),
+      subscribeEssePermissionRequests: vi.fn().mockReturnValue(() => undefined),
+      subscribeEssePreflightRequests: vi.fn().mockImplementation((listener) => {
+        preflightListener = listener;
+        return () => undefined;
+      }),
+      subscribeLogs: vi.fn().mockReturnValue(() => undefined),
+      subscribeProjectSnapshotUpdates: vi.fn().mockReturnValue(() => undefined),
+      subscribeProjectThumbnailUpdates: vi.fn().mockReturnValue(() => undefined)
+    });
+
+    await user.click(screen.getAllByRole("button", { name: "导入图片" })[0]);
+
+    act(() => {
+      preflightListener?.({
+        payload: {
+          commands: [
+            {
+              displayLabel: "img-1",
+              mode: "edit",
+              prompt: "改成温馨室内家居商品图",
+              target: { sessionId: "img-1", type: "existing" }
+            }
+          ],
+          estimatedApiCalls: 1,
+          tool: "generate_image"
+        },
+        requestId: "preflight-1"
+      });
+    });
+    await waitFor(() => expect(saveProjectSnapshot).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole("tab", { name: "Esse" }));
+    await user.click(screen.getByRole("button", { name: "执行" }));
+
+    await waitFor(() => expect(respondEssePreflight).toHaveBeenCalledWith({ decision: "execute", requestId: "preflight-1" }));
+    expect(saveProjectSnapshot).toHaveBeenCalledTimes(1);
   });
 });
 

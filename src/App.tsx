@@ -747,7 +747,6 @@ export function App() {
     const nextState = markEssePreflightDecision(projectManagerStateRef.current, requestId, decision);
     projectManagerStateRef.current = nextState;
     setProjectManagerState(nextState);
-    persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
   }
 
   async function handleResolveEssePermission(requestId: string, decision: EssePermissionResponse["decision"]): Promise<void> {
@@ -759,7 +758,6 @@ export function App() {
     const nextState = markEssePermissionDecision(projectManagerStateRef.current, requestId, decision);
     projectManagerStateRef.current = nextState;
     setProjectManagerState(nextState);
-    persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
   }
 
   function handleCancelEsseBatchTaskItem(batchTaskId: string, sessionId: string): void {
