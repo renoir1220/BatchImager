@@ -116,6 +116,7 @@ export interface PersistedImageSession {
   generatedFilePaths?: string[];
   lastPrompt?: string;
   errorMessage?: string;
+  originatedFromGeneration?: boolean;
   showOriginalInList?: boolean;
   status: PersistedImageSessionStatus;
 }

@@ -74,6 +74,13 @@ function resolveSessionImagePath(
     };
   }
 
+  if (session.originatedFromGeneration) {
+    return {
+      filePath: session.filePath,
+      sourceType: "current"
+    };
+  }
+
   return {
     filePath: session.filePath,
     sourceType: "original"

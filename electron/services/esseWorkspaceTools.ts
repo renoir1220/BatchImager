@@ -509,6 +509,7 @@ function createGetSessionRecordsTool(runtime: EsseWorkspaceToolRuntime): BatchIm
         records: (session.generatedFilePaths ?? []).map((filePath, index) => ({
           fileName: basenameFromPath(filePath),
           isCurrent: filePath === session.generatedFilePath && !session.showOriginalInList,
+          ...(session.originatedFromGeneration && index === 0 ? { isPrimary: true } : {}),
           recordIndex: index + 1
         })),
         sessionId
@@ -702,6 +703,10 @@ function deleteSessionRecord(state: EsseWorkspaceState, params: { recordIndex: n
   }
 
   const remaining = resolved.session.generatedFilePaths?.filter((_filePath, index) => index !== params.recordIndex - 1) ?? [];
+  if (resolved.session.originatedFromGeneration && remaining.length === 0) {
+    return deleteSession(state, { sessionId: params.sessionId });
+  }
+
   const fallback = chooseFallback(resolved.session, params.recordIndex, remaining);
   return ok(
     updateSession(state, params.sessionId, (session) => ({
@@ -722,6 +727,19 @@ function restoreOriginal(state: EsseWorkspaceState, params: { sessionId: string 
   const session = findSession(state, params.sessionId);
   if (!session) {
     return fail(state, "session not found", `no session with id ${params.sessionId}`, "call list_sessions to list current ids.");
+  }
+
+  if (session.originatedFromGeneration) {
+    const primaryGeneratedPath = session.generatedFilePaths?.[0] ?? session.generatedFilePath ?? session.filePath;
+    return ok(
+      updateSession(state, params.sessionId, (current) => ({
+        ...current,
+        generatedFilePath: primaryGeneratedPath,
+        showOriginalInList: false
+      })),
+      [params.sessionId],
+      "已切回第一张生成图。"
+    );
   }
 
   return ok(
@@ -1035,6 +1053,10 @@ function chooseFallback(session: PersistedImageSession, recordIndex: number, rem
 }
 
 function getCurrentImageSource(session: PersistedImageSession): "generated" | "original" {
+  if (session.originatedFromGeneration) {
+    return "generated";
+  }
+
   return session.generatedFilePath && !session.showOriginalInList ? "generated" : "original";
 }
 

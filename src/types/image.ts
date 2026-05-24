@@ -24,6 +24,7 @@ export interface ImageSession {
   generatedFilePaths?: string[];
   lastPrompt?: string;
   errorMessage?: string;
+  originatedFromGeneration?: boolean;
   showOriginalInList?: boolean;
   status: ImageSessionStatus;
 }

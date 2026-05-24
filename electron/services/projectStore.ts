@@ -48,6 +48,7 @@ interface ImageSessionRow {
   generated_file_paths_json: string | null;
   id: string;
   last_prompt: string | null;
+  originated_from_generation: number;
   show_original_in_list: number;
   status: string;
 }
@@ -290,9 +291,10 @@ function writeProjectSnapshotRowsWithinTransaction(db: DatabaseSync, input: Save
         generation_mode,
         last_prompt,
         error_message,
+        originated_from_generation,
         show_original_in_list,
         sort_order
-      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       session.id,
       session.filePath,
@@ -305,6 +307,7 @@ function writeProjectSnapshotRowsWithinTransaction(db: DatabaseSync, input: Save
       session.generationMode ?? null,
       session.lastPrompt ?? null,
       session.errorMessage ?? null,
+      session.originatedFromGeneration ? 1 : 0,
       session.showOriginalInList ? 1 : 0,
       index
     );
@@ -365,6 +368,7 @@ function initializeSchema(db: DatabaseSync): void {
       generation_mode text,
       last_prompt text,
       error_message text,
+      originated_from_generation integer not null default 0,
       show_original_in_list integer not null default 0,
       sort_order integer not null
     );
@@ -391,6 +395,8 @@ function initializeSchema(db: DatabaseSync): void {
 
   ensureProjectsNameColumn(db);
   ensureImageSessionsGenerationModeColumn(db);
+  ensureImageSessionsOriginatedFromGenerationColumn(db);
+  migrateGeneratedSeedSessions(db);
   migrateLegacyImageSessionIds(db);
 
   const projectCount = db.prepare("select count(*) as count from projects").get() as { count: number };
@@ -410,6 +416,53 @@ function ensureProjectsNameColumn(db: DatabaseSync): void {
   if (!columns.some((column) => column.name === "name")) {
     db.exec("alter table projects add column name text");
   }
+}
+
+function ensureImageSessionsOriginatedFromGenerationColumn(db: DatabaseSync): void {
+  const columns = db.prepare("pragma table_info(image_sessions)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "originated_from_generation")) {
+    db.exec("alter table image_sessions add column originated_from_generation integer not null default 0");
+  }
+}
+
+function migrateGeneratedSeedSessions(db: DatabaseSync): void {
+  const rows = db.prepare(
+    `select id, file_path, generated_file_path, generated_file_paths_json, originated_from_generation
+      from image_sessions`
+  ).all() as Array<{
+    file_path: string;
+    generated_file_path: string | null;
+    generated_file_paths_json: string | null;
+    id: string;
+    originated_from_generation: number;
+  }>;
+
+  for (const row of rows) {
+    if (row.originated_from_generation || !isGeneratedSeedPath(row.file_path)) {
+      continue;
+    }
+
+    const generatedFilePaths = parseOptionalArray(row.generated_file_paths_json);
+    const primaryGeneratedPath = generatedFilePaths?.[0];
+    if (!primaryGeneratedPath) {
+      continue;
+    }
+
+    db.prepare(
+      `update image_sessions
+        set file_path = ?,
+          original_source_path = ?,
+          generated_file_path = coalesce(generated_file_path, ?),
+          originated_from_generation = 1,
+          show_original_in_list = 0
+        where id = ?`
+    ).run(primaryGeneratedPath, normalizeSourcePath(primaryGeneratedPath), primaryGeneratedPath, row.id);
+  }
+}
+
+function isGeneratedSeedPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/");
+  return /\/images\/generated\/seeds\/[^/]+\.png$/i.test(normalized);
 }
 
 async function createProjectDirectories(projectDirectory: string): Promise<void> {
@@ -478,6 +531,7 @@ function mapSessionRow(db: DatabaseSync, row: ImageSessionRow): PersistedImageSe
     generatedFilePaths: parseOptionalArray(row.generated_file_paths_json),
     id: row.id,
     lastPrompt: row.last_prompt ?? undefined,
+    originatedFromGeneration: row.originated_from_generation ? true : undefined,
     showOriginalInList: Boolean(row.show_original_in_list),
     status: row.status as PersistedImageSession["status"]
   });

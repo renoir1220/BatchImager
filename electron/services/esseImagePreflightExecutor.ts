@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { unlink } from "node:fs/promises";
 import path from "node:path";
 import type { EssePreflightCommand, PersistedImageSession, ProjectSnapshot } from "../ipcTypes";
 import { createBlankGenerationSeed } from "./blankGenerationSeed";
@@ -57,6 +58,9 @@ export function createEsseImagePreflightExecutor(options: CreateEsseImagePreflig
       if (!mutation.result.ok) {
         return mutation.result;
       }
+      if (prepared.blankSeedPath && prepared.blankSeedPath !== result.outputPath) {
+        await unlinkBlankSeedSafely(prepared.blankSeedPath);
+      }
       affectedSessionIds.push(prepared.sessionId);
     }
 
@@ -77,7 +81,7 @@ async function prepareCommand(
     projectDirectory: string;
   }
 ): Promise<
-  | { imagePath: string; ok: true; referenceImagePaths: string[]; sessionId: string }
+  | { blankSeedPath?: string; imagePath: string; ok: true; referenceImagePaths: string[]; sessionId: string }
   | Extract<WorkspaceMutationResult, { ok: false }>
 > {
   if (!command.mode || !command.prompt) {
@@ -121,6 +125,7 @@ async function prepareCommand(
   }
 
   return {
+    blankSeedPath: seedPath,
     imagePath: seedPath,
     ok: true,
     referenceImagePaths,
@@ -150,6 +155,7 @@ function addNewSession(
     filePath: params.filePath,
     generationMode: params.generationMode,
     id: params.sessionId,
+    originatedFromGeneration: true,
     status: "queued"
   };
 
@@ -199,6 +205,10 @@ function appendGeneratedResult(
                   role: "context"
                 }
               ],
+              filePath:
+                current.originatedFromGeneration && !(current.generatedFilePaths?.length)
+                  ? params.outputPath
+                  : current.filePath,
               generatedFilePath: params.outputPath,
               generatedFilePaths: appendUnique(current.generatedFilePaths, params.outputPath),
               showOriginalInList: false,
@@ -257,4 +267,12 @@ function createSessionId(): string {
 
 function createMessageId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function unlinkBlankSeedSafely(filePath: string): Promise<void> {
+  try {
+    await unlink(filePath);
+  } catch {
+    // Best-effort cleanup: the generated image has already been committed.
+  }
 }

@@ -672,6 +672,77 @@ describe("esseWorkspaceRuntime", () => {
     expect(result?.isError).toBe(true);
     expect(result?.content[0]?.text).toContain("Reason: edit mode requires an existing target.");
   });
+
+  test("treats generation-originated sessions as generated primaries", async () => {
+    let persisted = createSnapshot({
+      sessions: [
+        createSession("sess_generated", {
+          filePath: "/project/generated/primary.png",
+          generatedFilePath: "/project/generated/second.png",
+          generatedFilePaths: ["/project/generated/primary.png", "/project/generated/second.png"],
+          originatedFromGeneration: true,
+          showOriginalInList: true
+        })
+      ]
+    });
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const runtime = createProjectSnapshotWorkspaceRuntime({ initialSnapshot: persisted, sink });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    const listResult = await tools.get("list_sessions")?.execute("list", {});
+    const recordsResult = await tools.get("get_session_records")?.execute("records", { sessionId: "sess_generated" });
+    const restoreResult = await tools.get("restore_original")?.execute("restore", { sessionId: "sess_generated" });
+
+    expect(listResult?.details?.sessions).toEqual([
+      expect.objectContaining({ currentImageSource: "generated", id: "sess_generated" })
+    ]);
+    expect(recordsResult?.details?.records).toEqual([
+      expect.objectContaining({ isPrimary: true, recordIndex: 1 }),
+      expect.objectContaining({ recordIndex: 2 })
+    ]);
+    expect(restoreResult?.isError).toBeUndefined();
+    expect(persisted.sessions[0]).toMatchObject({
+      generatedFilePath: "/project/generated/primary.png",
+      showOriginalInList: false
+    });
+  });
+
+  test("deleting the only record of a generation-originated session removes the session", async () => {
+    let persisted = createSnapshot({
+      selectedSessionId: "sess_generated",
+      sessions: [
+        createSession("sess_generated", {
+          filePath: "/project/generated/primary.png",
+          generatedFilePath: "/project/generated/primary.png",
+          generatedFilePaths: ["/project/generated/primary.png"],
+          originatedFromGeneration: true
+        })
+      ]
+    });
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const runtime = createProjectSnapshotWorkspaceRuntime({ initialSnapshot: persisted, sink });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    const result = await tools.get("delete_session_record")?.execute("delete", {
+      recordIndex: 1,
+      sessionId: "sess_generated"
+    });
+
+    expect(result?.isError).toBeUndefined();
+    expect(persisted.sessions).toEqual([]);
+    expect(persisted.project.imageCount).toBe(0);
+    expect(persisted.selectedSessionId).toBeNull();
+  });
 });
 
 function toolsByName(tools: ReturnType<typeof createEsseWorkspaceTools>) {

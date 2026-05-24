@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { access, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
@@ -61,7 +61,12 @@ describe("esseImagePreflightExecutor", () => {
       snapshot = nextSnapshot;
     });
     const executor = createEsseImagePreflightExecutor({
-      createSeed: async ({ sessionId }) => path.join(projectDirectory, "images", "generated", "seeds", `${sessionId}.png`),
+      createSeed: async ({ sessionId }) => {
+        const seedPath = path.join(projectDirectory, "images", "generated", "seeds", `${sessionId}.png`);
+        await mkdir(path.dirname(seedPath), { recursive: true });
+        await writeFile(seedPath, "seed");
+        return seedPath;
+      },
       generateImage: createFakeGenerator(generatedRequests, path.join(projectDirectory, "images", "generated", "new-output.png")),
       makeSessionId: () => "sess_new",
       projectDirectory
@@ -94,12 +99,16 @@ describe("esseImagePreflightExecutor", () => {
     ]);
     expect(snapshot.sessions.map((session) => session.id)).toEqual(["sess_1", "sess_new"]);
     expect(snapshot.selectedSessionId).toBe("sess_new");
+    const generatedPath = path.join(projectDirectory, "images", "generated", "new-output.png");
     expect(snapshot.sessions[1]).toMatchObject({
       fileName: "scene.png",
-      generatedFilePath: path.join(projectDirectory, "images", "generated", "new-output.png"),
-      generatedFilePaths: [path.join(projectDirectory, "images", "generated", "new-output.png")],
+      filePath: generatedPath,
+      generatedFilePath: generatedPath,
+      generatedFilePaths: [generatedPath],
+      originatedFromGeneration: true,
       status: "completed"
     });
+    await expect(access(path.join(projectDirectory, "images", "generated", "seeds", "sess_new.png"))).rejects.toThrow();
   });
 });
 

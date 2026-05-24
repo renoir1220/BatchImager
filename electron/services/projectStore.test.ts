@@ -107,6 +107,7 @@ describe("projectStore", () => {
         generatedFilePaths: [path.join(project.project.directory, "images", "generated", "out.png")],
         id: "sess_test_1",
         lastPrompt: "白底商品图",
+        originatedFromGeneration: true,
         showOriginalInList: false,
         status: "completed"
       }
@@ -124,6 +125,45 @@ describe("projectStore", () => {
     expect(reopened.sessions).toEqual(sessions);
     expect(reopened.selectedSessionId).toBe("sess_test_1");
     expect(reopened.project.imageCount).toBe(1);
+  });
+
+  test("migrates generated blank seed sessions to generation-originated primary images", async () => {
+    const root = await makeTempRoot();
+    const project = await createProject({
+      makeId: () => "project-1",
+      makeNow: () => new Date("2026-05-21T15:00:00.000Z"),
+      projectsDirectory: root
+    });
+    const seedPath = path.join(project.project.directory, "images", "generated", "seeds", "sess_new-1536x1024.png");
+    const outputPath = path.join(project.project.directory, "images", "generated", "new-output.png");
+
+    await saveProjectSnapshot(project.project.directory, {
+      selectedSessionId: "sess_new",
+      sessions: [
+        {
+          chatMessages: [],
+          chatStatus: "idle",
+          fileName: "scene.png",
+          filePath: seedPath,
+          generatedFilePath: outputPath,
+          generatedFilePaths: [outputPath],
+          id: "sess_new",
+          status: "completed"
+        }
+      ]
+    });
+
+    await expect(openProject(project.project.directory)).resolves.toMatchObject({
+      sessions: [
+        {
+          filePath: outputPath,
+          generatedFilePath: outputPath,
+          generatedFilePaths: [outputPath],
+          originatedFromGeneration: true,
+          showOriginalInList: false
+        }
+      ]
+    });
   });
 
   test("persists project manager state in project_state json", async () => {
