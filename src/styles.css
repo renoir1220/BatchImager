@@ -1329,6 +1329,34 @@ textarea {
   line-height: 1.45;
 }
 
+.esse-preflight-command label,
+.esse-preflight-command textarea {
+  grid-column: 1 / -1;
+}
+
+.esse-preflight-command label {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+
+.esse-preflight-command select,
+.esse-preflight-command input,
+.esse-preflight-command textarea {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.esse-preflight-command textarea {
+  resize: vertical;
+}
+
 .esse-batch-task-list {
   display: grid;
   gap: 6px;

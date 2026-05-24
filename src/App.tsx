@@ -62,6 +62,7 @@ import type {
   EsseAgentHistoryMessage,
   EssePermissionRequest,
   EssePermissionResponse,
+  EssePreflightCommand,
   EssePreflightRequest,
   EssePreflightResponse,
   ProjectListEntry,
@@ -729,8 +730,16 @@ export function App() {
     }
   }
 
-  async function handleResolveEssePreflight(requestId: string, decision: EssePreflightResponse["decision"]): Promise<void> {
-    const result = await window.batchImager?.respondEssePreflight({ requestId, decision });
+  async function handleResolveEssePreflight(
+    requestId: string,
+    decision: EssePreflightResponse["decision"],
+    modifiedCommands?: EssePreflightCommand[]
+  ): Promise<void> {
+    const result = await window.batchImager?.respondEssePreflight({
+      requestId,
+      decision,
+      ...(modifiedCommands ? { modifiedCommands } : {})
+    });
     if (!result?.accepted) {
       return;
     }
@@ -1451,8 +1460,8 @@ export function App() {
               onResolvePermission={(requestId, decision) => {
                 void handleResolveEssePermission(requestId, decision);
               }}
-              onResolvePreflight={(requestId, decision) => {
-                void handleResolveEssePreflight(requestId, decision);
+              onResolvePreflight={(requestId, decision, modifiedCommands) => {
+                void handleResolveEssePreflight(requestId, decision, modifiedCommands);
               }}
               onSendMessage={(content, outputSize, referenceImagePaths, persona) => {
                 void handleSendEsseMessage(content, outputSize, referenceImagePaths, persona);

@@ -1,6 +1,13 @@
 import { useMemo, useRef, useState } from "react";
 import type { DragEvent, FormEvent, KeyboardEvent, MouseEvent } from "react";
-import type { AppLogEntry, EssePermissionRequest, EssePermissionResponse, EssePreflightRequest, EssePreflightResponse } from "../../electron/ipcTypes";
+import type {
+  AppLogEntry,
+  EssePermissionRequest,
+  EssePermissionResponse,
+  EssePreflightCommand,
+  EssePreflightRequest,
+  EssePreflightResponse
+} from "../../electron/ipcTypes";
 import type {
   BatchPlan,
   BatchPlanReferenceImage,
@@ -44,7 +51,7 @@ interface ProjectPlanPanelProps {
   onRetryBatchTaskFailed: (batchTaskId: string) => void;
   onRetryBatchTaskItem: (batchTaskId: string, sessionId: string) => void;
   onResolvePermission: (requestId: string, decision: EssePermissionResponse["decision"]) => void;
-  onResolvePreflight: (requestId: string, decision: EssePreflightResponse["decision"]) => void;
+  onResolvePreflight: (requestId: string, decision: EssePreflightResponse["decision"], modifiedCommands?: EssePreflightCommand[]) => void;
   onSendMessage: (content: string, outputSize?: string, referenceImagePaths?: string[], persona?: EssePersona) => void;
   onStopWork: () => void;
 }
@@ -361,11 +368,14 @@ function EssePreflightCard({
   request
 }: {
   decision: NonNullable<ProjectManagerState["conversation"]["messages"][number]["preflightDecision"]>;
-  onResolve: (requestId: string, decision: EssePreflightResponse["decision"]) => void;
+  onResolve: (requestId: string, decision: EssePreflightResponse["decision"], modifiedCommands?: EssePreflightCommand[]) => void;
   request: EssePreflightRequest;
 }) {
   const commandLabel = formatPreflightToolLabel(request.payload.tool);
   const isPending = decision === "pending";
+  const canModify = request.payload.tool !== "package_generated_images";
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedCommands, setEditedCommands] = useState<EssePreflightCommand[]>(() => request.payload.commands);
 
   return (
     <section className={`esse-preflight-card ${decision}`} aria-label="Esse 生成确认">
@@ -374,12 +384,59 @@ function EssePreflightCard({
         <span>{request.payload.estimatedApiCalls} 次 API 调用</span>
       </header>
       <div className="esse-preflight-command-list">
-        {request.payload.commands.map((command, index) => (
+        {(isEditing ? editedCommands : request.payload.commands).map((command, index) => (
           <div className="esse-preflight-command" key={`${request.requestId}-${index}`}>
             <span>{command.displayLabel ?? command.target?.fileName ?? `任务 ${index + 1}`}</span>
-            <strong>{formatPreflightCommandMode(command.mode)}</strong>
-            {command.size ? <em>{command.size}</em> : null}
-            <p>{command.prompt ?? "未填写提示词"}</p>
+            {isEditing ? (
+              <>
+                <label>
+                  <span>模式</span>
+                  <select
+                    value={command.mode ?? "edit"}
+                    onChange={(event) => {
+                      setEditedCommands((current) =>
+                        current.map((item, itemIndex) =>
+                          itemIndex === index ? { ...item, mode: event.target.value === "generate" ? "generate" : "edit" } : item
+                        )
+                      );
+                    }}
+                  >
+                    <option value="edit">编辑</option>
+                    <option value="generate">生成</option>
+                  </select>
+                </label>
+                <label>
+                  <span>参考图 ID</span>
+                  <input
+                    value={(command.referenceImageIds ?? []).join(", ")}
+                    onChange={(event) => {
+                      const referenceImageIds = event.target.value.split(",").map((value) => value.trim()).filter(Boolean);
+                      setEditedCommands((current) =>
+                        current.map((item, itemIndex) =>
+                          itemIndex === index ? { ...item, referenceImageIds: referenceImageIds.length ? referenceImageIds : undefined } : item
+                        )
+                      );
+                    }}
+                  />
+                </label>
+                <textarea
+                  aria-label={`任务 ${index + 1} 提示词`}
+                  rows={3}
+                  value={command.prompt ?? ""}
+                  onChange={(event) => {
+                    setEditedCommands((current) =>
+                      current.map((item, itemIndex) => (itemIndex === index ? { ...item, prompt: event.target.value } : item))
+                    );
+                  }}
+                />
+              </>
+            ) : (
+              <>
+                <strong>{formatPreflightCommandMode(command.mode)}</strong>
+                {command.size ? <em>{command.size}</em> : null}
+                <p>{command.prompt ?? "未填写提示词"}</p>
+              </>
+            )}
           </div>
         ))}
       </div>
@@ -389,12 +446,23 @@ function EssePreflightCard({
             <button className="toolbar-button primary" type="button" onClick={() => onResolve(request.requestId, "execute")}>
               执行
             </button>
+            {canModify ? (
+              isEditing ? (
+                <button className="toolbar-button primary" type="button" onClick={() => onResolve(request.requestId, "modify", editedCommands)}>
+                  按修改执行
+                </button>
+              ) : (
+                <button className="toolbar-button" type="button" onClick={() => setIsEditing(true)}>
+                  修改
+                </button>
+              )
+            ) : null}
             <button className="toolbar-button" type="button" onClick={() => onResolve(request.requestId, "cancel")}>
               取消
             </button>
           </>
         ) : (
-          <span>{decision === "execute" ? "已确认执行" : "已取消"}</span>
+          <span>{decision === "execute" ? "已确认执行" : decision === "modify" ? "已按修改执行" : "已取消"}</span>
         )}
       </footer>
     </section>

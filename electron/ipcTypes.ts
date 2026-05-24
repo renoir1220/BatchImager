@@ -198,6 +198,8 @@ export interface ProjectManagerMessage {
   planId?: string;
   permissionDecision?: "pending" | "allow-once" | "allow-session" | "deny";
   permissionRequest?: EssePermissionRequest;
+  preflightDecision?: "pending" | "execute" | "modify" | "cancel";
+  preflightRequest?: EssePreflightRequest;
   referenceFilePaths?: string[];
 }
 
@@ -300,8 +302,9 @@ export interface EssePreflightRequest {
 }
 
 export interface EssePreflightResponse {
-  decision: "execute" | "cancel";
+  decision: "execute" | "modify" | "cancel";
   detail?: string;
+  modifiedCommands?: EssePreflightCommand[];
   requestId: string;
 }
 

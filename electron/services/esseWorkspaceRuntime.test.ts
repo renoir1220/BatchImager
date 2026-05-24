@@ -628,6 +628,67 @@ describe("esseWorkspaceRuntime", () => {
     expect(executed).toBe(false);
   });
 
+  test("executes modified preflight commands without another model turn", async () => {
+    const executions: EsseImagePreflightExecutionRequest[] = [];
+    const runtime = createProjectSnapshotWorkspaceRuntime({
+      executeImagePreflightTool: async (request) => {
+        executions.push(request);
+        return { affectedSessionIds: ["sess_1"], ok: true, summary: "已按修改提交生成任务。" };
+      },
+      initialSnapshot: createSnapshot(),
+      requestPreflight: async (payload) => ({
+        decision: "modify",
+        modifiedCommands: [
+          {
+            ...payload.commands[0],
+            mode: "generate",
+            prompt: "用户修改后的浅灰场景图"
+          }
+        ]
+      }),
+      sink: createNoopSink()
+    });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    const result = await tools.get("generate_image")?.execute("call-1", {
+      mode: "edit",
+      prompt: "模型原始白底主图",
+      target: { sessionId: "sess_1", type: "existing" }
+    });
+
+    expect(result?.isError).toBeUndefined();
+    expect(executions).toHaveLength(1);
+    expect(executions[0].commands[0]).toMatchObject({
+      mode: "generate",
+      prompt: "用户修改后的浅灰场景图",
+      target: { sessionId: "sess_1", type: "existing" }
+    });
+  });
+
+  test("rejects modified preflight commands that change command count", async () => {
+    let executed = false;
+    const runtime = createProjectSnapshotWorkspaceRuntime({
+      executeImagePreflightTool: async () => {
+        executed = true;
+        return { affectedSessionIds: ["sess_1"], ok: true, summary: "should not execute" };
+      },
+      initialSnapshot: createSnapshot(),
+      requestPreflight: async () => ({ decision: "modify", modifiedCommands: [] }),
+      sink: createNoopSink()
+    });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    const result = await tools.get("generate_image")?.execute("call-1", {
+      mode: "edit",
+      prompt: "模型原始白底主图",
+      target: { sessionId: "sess_1", type: "existing" }
+    });
+
+    expect(result?.isError).toBe(true);
+    expect(result?.content[0]?.text).toContain("invalid modified preflight commands");
+    expect(executed).toBe(false);
+  });
+
   test("preflights batch generation with explicit command modes and explicit sizes only", async () => {
     const preflightPayloads: EssePreflightPayload[] = [];
     const runtime = createProjectSnapshotWorkspaceRuntime({

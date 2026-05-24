@@ -288,10 +288,23 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
     expect(screen.getByText("保留主体，换成白底主图")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "执行" }));
+    await user.click(screen.getByRole("button", { name: "修改" }));
+    await user.clear(screen.getByRole("textbox", { name: "任务 1 提示词" }));
+    await user.type(screen.getByRole("textbox", { name: "任务 1 提示词" }), "用户修改后的浅灰场景图");
+    await user.selectOptions(screen.getByLabelText("模式"), "generate");
+    await user.click(screen.getByRole("button", { name: "按修改执行" }));
     await user.click(screen.getByRole("button", { name: "取消" }));
 
     expect(onResolvePreflight).toHaveBeenNthCalledWith(1, "request-1", "execute");
-    expect(onResolvePreflight).toHaveBeenNthCalledWith(2, "request-1", "cancel");
+    expect(onResolvePreflight).toHaveBeenNthCalledWith(2, "request-1", "modify", [
+      {
+        displayLabel: "img-1",
+        mode: "generate",
+        prompt: "用户修改后的浅灰场景图",
+        target: { sessionId: "sess_1", type: "existing" }
+      }
+    ]);
+    expect(onResolvePreflight).toHaveBeenNthCalledWith(3, "request-1", "cancel");
   });
 
   test("labels package preflight cards as file export instead of image generation", () => {

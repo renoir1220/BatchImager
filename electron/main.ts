@@ -945,8 +945,9 @@ function assertEssePreflightResponse(response: EssePreflightResponse): void {
     response === null ||
     typeof response.requestId !== "string" ||
     !response.requestId.trim() ||
-    (response.decision !== "execute" && response.decision !== "cancel") ||
-    (response.detail !== undefined && typeof response.detail !== "string")
+    (response.decision !== "execute" && response.decision !== "modify" && response.decision !== "cancel") ||
+    (response.detail !== undefined && typeof response.detail !== "string") ||
+    (response.modifiedCommands !== undefined && !Array.isArray(response.modifiedCommands))
   ) {
     throw new Error("Invalid Esse preflight response");
   }

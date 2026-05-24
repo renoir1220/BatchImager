@@ -21,6 +21,15 @@ describe("EssePreflightBroker", () => {
     await expect(pending).resolves.toEqual({ decision: "cancel", detail: "用户取消" });
   });
 
+  test("resolves modify responses with modified commands", async () => {
+    const broker = new EssePreflightBroker({ makeId: () => "request-1" });
+    const pending = broker.request({ send: vi.fn() }, createPayload());
+    const modifiedCommands = [{ ...createPayload().commands[0], prompt: "改成浅灰场景图" }];
+
+    expect(broker.respond({ decision: "modify", modifiedCommands, requestId: "request-1" })).toBe(true);
+    await expect(pending).resolves.toEqual({ decision: "modify", modifiedCommands });
+  });
+
   test("cancels pending preflight on timeout", async () => {
     let timeoutCallback: (() => void) | undefined;
     const broker = new EssePreflightBroker({

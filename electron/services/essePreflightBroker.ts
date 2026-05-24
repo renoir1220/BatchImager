@@ -58,7 +58,9 @@ export class EssePreflightBroker {
     const decision: EssePreflightDecision =
       response.decision === "execute"
         ? { decision: "execute" }
-        : { decision: "cancel", ...(response.detail ? { detail: response.detail } : {}) };
+        : response.decision === "modify"
+          ? { decision: "modify", modifiedCommands: response.modifiedCommands ?? [] }
+          : { decision: "cancel", ...(response.detail ? { detail: response.detail } : {}) };
     return this.resolve(response.requestId, decision);
   }
 

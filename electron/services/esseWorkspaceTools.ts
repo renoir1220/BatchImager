@@ -47,6 +47,7 @@ export type WorkspaceMutationResult =
 
 export type EssePreflightDecision =
   | { decision: "execute" }
+  | { decision: "modify"; modifiedCommands: EssePreflightCommand[] }
   | { decision: "cancel"; detail?: string };
 
 export type EsseWorkspacePermissionRequest = EssePermissionPayload;
@@ -551,15 +552,19 @@ function createPackageGeneratedImagesTool(runtime: EsseWorkspaceToolRuntime): Ba
         estimatedApiCalls: 0,
         tool: "package_generated_images"
       });
-      if (decision.decision === "cancel") {
-        return toolError(
-          "User canceled preflight",
-          decision.detail,
-          "Ask the user what to adjust before retrying; do NOT retry with the same parameters."
-        );
-      }
+  if (decision.decision === "cancel") {
+    return toolError(
+      "User canceled preflight",
+      decision.detail,
+      "Ask the user what to adjust before retrying; do NOT retry with the same parameters."
+    );
+  }
 
-      if (!runtime.executePackagePreflightTool) {
+  if (decision.decision === "modify") {
+    return toolError("package preflight cannot be modified", undefined, "Cancel and ask the user what package settings to use.");
+  }
+
+  if (!runtime.executePackagePreflightTool) {
         return toolError("package execution unavailable", undefined, "preflight was confirmed, but no package executor is configured.");
       }
 
@@ -1139,11 +1144,16 @@ async function executePreflightImageTool(
     );
   }
 
+  const commands = decision.decision === "modify" ? validateModifiedPreflightCommands(request.commands, decision.modifiedCommands) : request.commands;
+  if (!Array.isArray(commands)) {
+    return toolError(commands.reason, commands.detail, commands.suggestedNext);
+  }
+
   if (!runtime.executeImagePreflightTool) {
     return toolError("image execution unavailable", undefined, "preflight was confirmed, but no image executor is configured.");
   }
 
-  const result = await runtime.executeImagePreflightTool(request);
+  const result = await runtime.executeImagePreflightTool({ ...request, commands });
   if (!result.ok) {
     return toolError(result.reason, result.detail, result.suggestedNext);
   }
@@ -1151,6 +1161,60 @@ async function executePreflightImageTool(
   return toolOk(result.summary, {
     affectedSessionIds: result.affectedSessionIds
   });
+}
+
+function validateModifiedPreflightCommands(
+  originalCommands: EssePreflightCommand[],
+  modifiedCommands: EssePreflightCommand[]
+): EssePreflightCommand[] | Extract<WorkspaceMutationResult, { ok: false }> {
+  if (modifiedCommands.length !== originalCommands.length) {
+    return {
+      ok: false,
+      reason: "invalid modified preflight commands",
+      detail: "modified command count must match the original preflight command count.",
+      suggestedNext: "Cancel and ask the user to retry with the intended changes."
+    };
+  }
+
+  for (const [index, modifiedCommand] of modifiedCommands.entries()) {
+    const originalCommand = originalCommands[index];
+    if (!isSamePreflightTarget(originalCommand.target, modifiedCommand.target)) {
+      return {
+        ok: false,
+        reason: "invalid modified preflight commands",
+        detail: `modified command ${index + 1} changed its target.`,
+        suggestedNext: "Only prompt, mode, size, and referenceImageIds may be changed in preflight modify."
+      };
+    }
+
+    if (modifiedCommand.mode !== "edit" && modifiedCommand.mode !== "generate") {
+      return {
+        ok: false,
+        reason: "invalid modified preflight commands",
+        detail: `modified command ${index + 1} has invalid mode.`,
+        suggestedNext: "Choose edit or generate."
+      };
+    }
+
+    if (!readString(modifiedCommand.prompt)) {
+      return {
+        ok: false,
+        reason: "invalid modified preflight commands",
+        detail: `modified command ${index + 1} has empty prompt.`,
+        suggestedNext: "Provide a non-empty prompt."
+      };
+    }
+  }
+
+  return modifiedCommands.map((command, index) => ({
+    ...originalCommands[index],
+    ...command,
+    target: originalCommands[index].target
+  }));
+}
+
+function isSamePreflightTarget(left: EssePreflightCommand["target"], right: EssePreflightCommand["target"]): boolean {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
 function normalizeImagePreflightCommand(
