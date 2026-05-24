@@ -5,7 +5,7 @@ import { describe, expect, test } from "vitest";
 import type { ProjectSnapshot } from "../ipcTypes";
 import type { ProductImageResult } from "./tuziImageApi";
 import { EsseBatchTaskRegistry } from "./esseBatchTaskRegistry";
-import { createEsseImagePreflightExecutor } from "./esseImagePreflightExecutor";
+import { createEsseImagePreflightExecutor, retryEsseBatchTaskItem } from "./esseImagePreflightExecutor";
 import { ProjectMutationSink } from "./projectMutationSink";
 import { createProjectSnapshotWorkspaceRuntime } from "./esseWorkspaceRuntime";
 import type { UnifiedImageGenerationRequest } from "./imageGenerationService";
@@ -283,6 +283,92 @@ describe("esseImagePreflightExecutor", () => {
     expect(snapshot.sessions[0].generatedFilePath).toBeUndefined();
     expect(snapshot.sessions[0].errorMessage).toBe("已取消");
   });
+
+  test("retries a failed batch task item from the persisted card command", async () => {
+    let snapshot = createSnapshotWithBatchTask({
+      sessionStatus: "failed"
+    });
+    const registry = new EsseBatchTaskRegistry();
+    const generation = createDeferred<ProductImageResult>();
+    const generatedRequests: UnifiedImageGenerationRequest[] = [];
+    const runtime = createRuntime(snapshot, (nextSnapshot) => {
+      snapshot = nextSnapshot;
+    });
+
+    const result = await retryEsseBatchTaskItem(
+      { batchTaskId: "batch_1", sessionId: "sess_1" },
+      {
+        batchTaskRegistry: registry,
+        generateImage: async (request) => {
+          generatedRequests.push(request);
+          return await generation.promise;
+        },
+        projectDirectory: "/project"
+      },
+      runtime
+    );
+
+    expect(result).toEqual({ accepted: true, retryCount: 1, sessionId: "sess_1" });
+    await waitUntil(() => generatedRequests.length === 1 && snapshot.sessions[0].status === "generating");
+    expect(snapshot.sessions[0].errorMessage).toBeUndefined();
+    expect(generatedRequests[0]).toMatchObject({
+      imagePath: "/project/original/a.jpg",
+      mode: "edit",
+      prompt: "第一张换白底",
+      sessionId: "sess_1"
+    });
+    expect(registry.getSnapshot("batch_1")).toEqual({
+      activeSessionIds: ["sess_1"],
+      batchTaskId: "batch_1",
+      projectDirectory: "/project",
+      retryCounts: { sess_1: 1 }
+    });
+
+    generation.resolve({ outputPath: "/project/images/generated/retry.png", requestSize: "auto" });
+    await waitUntil(() => snapshot.sessions[0].status === "completed");
+    expect(snapshot.sessions[0].generatedFilePath).toBe("/project/images/generated/retry.png");
+    expect(registry.has("batch_1")).toBe(false);
+  });
+
+  test("rejects batch task retry for non-failed sessions or exhausted retry counts", async () => {
+    let snapshot = createSnapshotWithBatchTask({
+      sessionStatus: "completed"
+    });
+    const registry = new EsseBatchTaskRegistry();
+    const runtime = createRuntime(snapshot, (nextSnapshot) => {
+      snapshot = nextSnapshot;
+    });
+
+    await expect(retryEsseBatchTaskItem(
+      { batchTaskId: "batch_1", sessionId: "sess_1" },
+      {
+        batchTaskRegistry: registry,
+        generateImage: async () => ({ outputPath: "/unused.png", requestSize: "auto" }),
+        projectDirectory: "/project"
+      },
+      runtime
+    )).resolves.toEqual({ accepted: false, reason: "session is not in failed state" });
+
+    snapshot = createSnapshotWithBatchTask({
+      sessionStatus: "failed"
+    });
+    const retryRuntime = createRuntime(snapshot, (nextSnapshot) => {
+      snapshot = nextSnapshot;
+    });
+    registry.recordRetry("batch_1", "sess_1");
+    registry.recordRetry("batch_1", "sess_1");
+    registry.recordRetry("batch_1", "sess_1");
+
+    await expect(retryEsseBatchTaskItem(
+      { batchTaskId: "batch_1", sessionId: "sess_1" },
+      {
+        batchTaskRegistry: registry,
+        generateImage: async () => ({ outputPath: "/unused.png", requestSize: "auto" }),
+        projectDirectory: "/project"
+      },
+      retryRuntime
+    )).resolves.toEqual({ accepted: false, reason: "retry limit reached" });
+  });
 });
 
 function createRuntime(initialSnapshot: ProjectSnapshot, onPersist: (snapshot: ProjectSnapshot) => void) {
@@ -346,4 +432,50 @@ function createSnapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapsh
     ],
     ...overrides
   };
+}
+
+function createSnapshotWithBatchTask(options: { sessionStatus: ProjectSnapshot["sessions"][number]["status"] }): ProjectSnapshot {
+  return createSnapshot({
+    projectManagerState: {
+      conversation: {
+        id: "conv_1",
+        messages: [
+          {
+            batchTask: {
+              batchTaskId: "batch_1",
+              items: [
+                {
+                  command: {
+                    mode: "edit",
+                    prompt: "第一张换白底",
+                    target: { sessionId: "sess_1", type: "existing" }
+                  },
+                  displayLabel: "a.jpg",
+                  mode: "edit",
+                  promptSummary: "第一张换白底",
+                  sessionId: "sess_1"
+                }
+              ]
+            },
+            content: "",
+            contextType: "esse-batch-task",
+            id: "batch-message-1",
+            role: "context"
+          }
+        ]
+      },
+      plans: []
+    },
+    sessions: [
+      {
+        chatMessages: [],
+        chatStatus: "idle",
+        errorMessage: options.sessionStatus === "failed" ? "网络错误" : undefined,
+        fileName: "a.jpg",
+        filePath: "/project/original/a.jpg",
+        id: "sess_1",
+        status: options.sessionStatus
+      }
+    ]
+  });
 }

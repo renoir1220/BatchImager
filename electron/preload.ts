@@ -18,6 +18,10 @@ import type {
   ProjectListEntry,
   ProjectSnapshot,
   RenameProjectRequest,
+  RetryEsseBatchTaskFailedRequest,
+  RetryEsseBatchTaskFailedResponse,
+  RetryEsseBatchTaskItemRequest,
+  RetryEsseBatchTaskItemResponse,
   SaveReferenceImageRequest,
   SaveReferenceImageResponse,
   SaveProjectSnapshotRequest,
@@ -51,6 +55,10 @@ const api = {
     ipcRenderer.invoke("esse:batch-task-cancel-item", request),
   cancelEsseBatchTaskAll: async (request: CancelEsseBatchTaskAllRequest): Promise<CancelEsseBatchTaskAllResponse> =>
     ipcRenderer.invoke("esse:batch-task-cancel-all", request),
+  retryEsseBatchTaskItem: async (request: RetryEsseBatchTaskItemRequest): Promise<RetryEsseBatchTaskItemResponse> =>
+    ipcRenderer.invoke("esse:batch-task-retry-item", request),
+  retryEsseBatchTaskFailed: async (request: RetryEsseBatchTaskFailedRequest): Promise<RetryEsseBatchTaskFailedResponse> =>
+    ipcRenderer.invoke("esse:batch-task-retry-failed", request),
   createPlaceholderImage: async (request: CreatePlaceholderImageRequest): Promise<CreatePlaceholderImageResponse> =>
     ipcRenderer.invoke("images:create-placeholder", request),
   saveReferenceImage: async (request: SaveReferenceImageRequest): Promise<SaveReferenceImageResponse> =>

@@ -72,7 +72,7 @@ describe("EsseBatchTaskRegistry", () => {
     expect(registry.has("batch_1")).toBe(false);
   });
 
-  test("tracks retry counts up to a fixed maximum per item", () => {
+  test("tracks retry counts up to a fixed maximum after active items have completed", () => {
     const registry = new EsseBatchTaskRegistry();
 
     registry.register({
@@ -80,6 +80,8 @@ describe("EsseBatchTaskRegistry", () => {
       items: [{ controller: new AbortController(), sessionId: "sess_1" }],
       projectDirectory: "/project"
     });
+    registry.notifyItemComplete("batch_1", "sess_1");
+    expect(registry.has("batch_1")).toBe(false);
 
     expect(registry.recordRetry("batch_1", "sess_1")).toEqual({ ok: true, retryCount: 1 });
     expect(registry.recordRetry("batch_1", "sess_1")).toEqual({ ok: true, retryCount: 2 });
@@ -91,7 +93,34 @@ describe("EsseBatchTaskRegistry", () => {
     });
   });
 
-  test("keeps unknown task operations as no-ops", () => {
+  test("registers a retry item under a completed task and prevents duplicate active retries", () => {
+    const registry = new EsseBatchTaskRegistry();
+    const firstRetry = new AbortController();
+    const duplicateRetry = new AbortController();
+
+    expect(registry.recordRetry("batch_1", "sess_1")).toEqual({ ok: true, retryCount: 1 });
+    expect(registry.registerItem("batch_1", { controller: firstRetry, sessionId: "sess_1" }, "/project")).toEqual({
+      itemCount: 1,
+      ok: true
+    });
+    expect(registry.registerItem("batch_1", { controller: duplicateRetry, sessionId: "sess_1" }, "/project")).toEqual({
+      ok: false,
+      reason: "batch item already active"
+    });
+    expect(registry.recordRetry("batch_1", "sess_1")).toEqual({
+      ok: false,
+      reason: "batch item already active",
+      retryCount: 0
+    });
+    expect(registry.getSnapshot("batch_1")).toEqual({
+      activeSessionIds: ["sess_1"],
+      batchTaskId: "batch_1",
+      projectDirectory: "/project",
+      retryCounts: { sess_1: 1 }
+    });
+  });
+
+  test("keeps unknown cancel operations as no-ops while allowing retry bookkeeping", () => {
     const registry = new EsseBatchTaskRegistry();
 
     expect(registry.cancelItem("missing", "sess_1")).toEqual({
@@ -99,10 +128,6 @@ describe("EsseBatchTaskRegistry", () => {
       remainingItemCount: 0
     });
     expect(registry.cancelAll("missing")).toEqual({ canceledCount: 0 });
-    expect(registry.recordRetry("missing", "sess_1")).toEqual({
-      ok: false,
-      reason: "batch task not found",
-      retryCount: 0
-    });
+    expect(registry.recordRetry("missing", "sess_1")).toEqual({ ok: true, retryCount: 1 });
   });
 });

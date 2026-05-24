@@ -41,6 +41,8 @@ interface ProjectPlanPanelProps {
   onCancelBatchTaskAll: (batchTaskId: string) => void;
   onCancelBatchTaskItem: (batchTaskId: string, sessionId: string) => void;
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
+  onRetryBatchTaskFailed: (batchTaskId: string) => void;
+  onRetryBatchTaskItem: (batchTaskId: string, sessionId: string) => void;
   onResolvePreflight: (requestId: string, decision: EssePreflightResponse["decision"]) => void;
   onSendMessage: (content: string, outputSize?: string, referenceImagePaths?: string[], persona?: EssePersona) => void;
   onStopWork: () => void;
@@ -62,6 +64,8 @@ export function ProjectPlanPanel({
   onCancelBatchTaskAll,
   onCancelBatchTaskItem,
   onOpenImagePreview,
+  onRetryBatchTaskFailed,
+  onRetryBatchTaskItem,
   onResolvePreflight,
   onSendMessage,
   onStopWork
@@ -239,6 +243,8 @@ export function ProjectPlanPanel({
                       imageSessions={imageSessions}
                       onCancelAll={onCancelBatchTaskAll}
                       onCancelItem={onCancelBatchTaskItem}
+                      onRetryFailed={onRetryBatchTaskFailed}
+                      onRetryItem={onRetryBatchTaskItem}
                     />
                   ) : null}
                 </div>
@@ -390,15 +396,20 @@ function EsseBatchTaskCard({
   batchTask,
   imageSessions,
   onCancelAll,
-  onCancelItem
+  onCancelItem,
+  onRetryFailed,
+  onRetryItem
 }: {
   batchTask: NonNullable<ProjectManagerState["conversation"]["messages"][number]["batchTask"]>;
   imageSessions: ImageSession[];
   onCancelAll: (batchTaskId: string) => void;
   onCancelItem: (batchTaskId: string, sessionId: string) => void;
+  onRetryFailed: (batchTaskId: string) => void;
+  onRetryItem: (batchTaskId: string, sessionId: string) => void;
 }) {
   const sessionsById = new Map(imageSessions.map((session) => [session.id, session]));
   const activeItems = batchTask.items.filter((item) => isActiveBatchTaskStatus(sessionsById.get(item.sessionId)?.status));
+  const failedItems = batchTask.items.filter((item) => sessionsById.get(item.sessionId)?.status === "failed");
 
   return (
     <section className="esse-batch-task-card" aria-label="Esse 生成任务">
@@ -426,6 +437,14 @@ function EsseBatchTaskCard({
                 >
                   取消
                 </button>
+              ) : status === "failed" ? (
+                <button
+                  className="toolbar-button"
+                  type="button"
+                  onClick={() => onRetryItem(batchTask.batchTaskId, item.sessionId)}
+                >
+                  重试
+                </button>
               ) : null}
             </div>
           );
@@ -435,6 +454,17 @@ function EsseBatchTaskCard({
         <footer>
           <button className="toolbar-button" type="button" onClick={() => onCancelAll(batchTask.batchTaskId)}>
             全部取消
+          </button>
+          {failedItems.length > 0 ? (
+            <button className="toolbar-button" type="button" onClick={() => onRetryFailed(batchTask.batchTaskId)}>
+              重试失败项
+            </button>
+          ) : null}
+        </footer>
+      ) : failedItems.length > 0 ? (
+        <footer>
+          <button className="toolbar-button" type="button" onClick={() => onRetryFailed(batchTask.batchTaskId)}>
+            重试失败项
           </button>
         </footer>
       ) : null}

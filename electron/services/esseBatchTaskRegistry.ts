@@ -21,11 +21,11 @@ interface RegisteredBatchTask {
   batchTaskId: string;
   controllersBySessionId: Map<string, AbortController>;
   projectDirectory: string;
-  retryCountsBySessionId: Map<string, number>;
 }
 
 export class EsseBatchTaskRegistry {
   private readonly tasksById = new Map<string, RegisteredBatchTask>();
+  private readonly retryCountsByBatchId = new Map<string, Map<string, number>>();
 
   register(request: RegisterEsseBatchTaskRequest): { itemCount: number; ok: true } | { ok: false; reason: string } {
     if (this.tasksById.has(request.batchTaskId)) {
@@ -33,7 +33,7 @@ export class EsseBatchTaskRegistry {
     }
 
     const controllersBySessionId = new Map<string, AbortController>();
-    const retryCountsBySessionId = new Map<string, number>();
+    const retryCountsBySessionId = this.getRetryCountsForBatch(request.batchTaskId);
     for (const item of request.items) {
       if (controllersBySessionId.has(item.sessionId)) {
         return { ok: false, reason: "duplicate session id" };
@@ -47,8 +47,7 @@ export class EsseBatchTaskRegistry {
     this.tasksById.set(request.batchTaskId, {
       batchTaskId: request.batchTaskId,
       controllersBySessionId,
-      projectDirectory: request.projectDirectory,
-      retryCountsBySessionId
+      projectDirectory: request.projectDirectory
     });
 
     if (controllersBySessionId.size === 0) {
@@ -56,6 +55,32 @@ export class EsseBatchTaskRegistry {
     }
 
     return { itemCount: controllersBySessionId.size, ok: true };
+  }
+
+  registerItem(
+    batchTaskId: string,
+    item: EsseBatchTaskItem,
+    projectDirectory: string
+  ): { itemCount: number; ok: true } | { ok: false; reason: string } {
+    let task = this.tasksById.get(batchTaskId);
+    if (!task) {
+      task = {
+        batchTaskId,
+        controllersBySessionId: new Map(),
+        projectDirectory
+      };
+      this.tasksById.set(batchTaskId, task);
+    }
+
+    if (task.controllersBySessionId.has(item.sessionId)) {
+      return { ok: false, reason: "batch item already active" };
+    }
+
+    task.controllersBySessionId.set(item.sessionId, item.controller);
+    if (item.retryCount !== undefined) {
+      this.getRetryCountsForBatch(batchTaskId).set(item.sessionId, item.retryCount);
+    }
+    return { itemCount: task.controllersBySessionId.size, ok: true };
   }
 
   has(batchTaskId: string): boolean {
@@ -72,7 +97,7 @@ export class EsseBatchTaskRegistry {
       activeSessionIds: [...task.controllersBySessionId.keys()],
       batchTaskId: task.batchTaskId,
       projectDirectory: task.projectDirectory,
-      retryCounts: Object.fromEntries(task.retryCountsBySessionId)
+      retryCounts: Object.fromEntries(this.getRetryCountsForBatch(batchTaskId))
     };
   }
 
@@ -127,22 +152,28 @@ export class EsseBatchTaskRegistry {
     maxRetries = 3
   ): { ok: true; retryCount: number } | { ok: false; reason: string; retryCount: number } {
     const task = this.tasksById.get(batchTaskId);
-    if (!task) {
-      return { ok: false, reason: "batch task not found", retryCount: 0 };
+    if (task?.controllersBySessionId.has(sessionId)) {
+      return { ok: false, reason: "batch item already active", retryCount: 0 };
     }
 
-    if (!task.controllersBySessionId.has(sessionId)) {
-      return { ok: false, reason: "batch item not found", retryCount: 0 };
-    }
-
-    const retryCount = task.retryCountsBySessionId.get(sessionId) ?? 0;
+    const retryCounts = this.getRetryCountsForBatch(batchTaskId);
+    const retryCount = retryCounts.get(sessionId) ?? 0;
     if (retryCount >= maxRetries) {
       return { ok: false, reason: "retry limit reached", retryCount };
     }
 
     const nextRetryCount = retryCount + 1;
-    task.retryCountsBySessionId.set(sessionId, nextRetryCount);
+    retryCounts.set(sessionId, nextRetryCount);
     return { ok: true, retryCount: nextRetryCount };
+  }
+
+  private getRetryCountsForBatch(batchTaskId: string): Map<string, number> {
+    let retryCounts = this.retryCountsByBatchId.get(batchTaskId);
+    if (!retryCounts) {
+      retryCounts = new Map();
+      this.retryCountsByBatchId.set(batchTaskId, retryCounts);
+    }
+    return retryCounts;
   }
 
   private deleteTaskIfDrained(task: RegisteredBatchTask): void {

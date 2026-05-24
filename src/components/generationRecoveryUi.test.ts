@@ -50,8 +50,13 @@ describe("generation recovery UI", () => {
     expect(preload).toContain("esse:batch-task-cancel-item");
     expect(preload).toContain("cancelEsseBatchTaskAll");
     expect(preload).toContain("esse:batch-task-cancel-all");
+    expect(preload).toContain("retryEsseBatchTaskItem");
+    expect(preload).toContain("esse:batch-task-retry-item");
+    expect(preload).toContain("retryEsseBatchTaskFailed");
+    expect(preload).toContain("esse:batch-task-retry-failed");
     expect(main).toContain("esseBatchTaskRegistry.cancelItem");
     expect(main).toContain("esseBatchTaskRegistry.cancelAll");
+    expect(main).toContain("retryEsseBatchTaskItem");
   });
 
   test("macOS red close exits the app instead of leaving it running without windows", () => {

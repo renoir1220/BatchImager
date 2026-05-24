@@ -9,8 +9,8 @@ import type { EsseImagePreflightExecutionRequest, EsseWorkspaceToolRuntime, Work
 import { runSharedGenerateImageCore } from "./sharedGenerateImageCore";
 import type { EsseBatchTaskRegistry } from "./esseBatchTaskRegistry";
 
-interface CreateEsseImagePreflightExecutorOptions {
-  batchTaskRegistry?: Pick<EsseBatchTaskRegistry, "cancelAll" | "notifyItemComplete" | "register">;
+export interface CreateEsseImagePreflightExecutorOptions {
+  batchTaskRegistry?: Pick<EsseBatchTaskRegistry, "notifyItemComplete" | "recordRetry" | "register" | "registerItem">;
   createAbortController?: () => AbortController;
   createSeed?: (options: { outputDirectory: string; sessionId: string; size?: string }) => Promise<string>;
   generateImage: ImageGenerationExecutor;
@@ -24,6 +24,10 @@ interface EsseImagePreflightExecutionContext {
   applyMutation: EsseWorkspaceToolRuntime["applyMutation"];
   getState: () => ProjectSnapshot;
 }
+
+export type EsseBatchTaskRetryResult =
+  | { accepted: true; retryCount: number; sessionId: string }
+  | { accepted: false; reason: string };
 
 export function createEsseImagePreflightExecutor(options: CreateEsseImagePreflightExecutorOptions) {
   const createAbortController = options.createAbortController ?? (() => new AbortController());
@@ -93,6 +97,74 @@ export function createEsseImagePreflightExecutor(options: CreateEsseImagePreflig
       ok: true,
       summary: `已提交 ${affectedSessionIds.length} 个生成任务。完成后会自动出现在工作区。`
     };
+  };
+}
+
+export async function retryEsseBatchTaskItem(
+  request: { batchTaskId: string; sessionId: string },
+  options: CreateEsseImagePreflightExecutorOptions,
+  context: EsseImagePreflightExecutionContext
+): Promise<EsseBatchTaskRetryResult> {
+  const cardItem = findBatchTaskCardItem(context.getState(), request);
+  if (!cardItem) {
+    return { accepted: false, reason: "batch task item not found" };
+  }
+
+  const session = context.getState().sessions.find((current) => current.id === request.sessionId);
+  if (!session) {
+    return { accepted: false, reason: "session not found" };
+  }
+  if (session.status !== "failed") {
+    return { accepted: false, reason: "session is not in failed state" };
+  }
+
+  const retryResult = options.batchTaskRegistry?.recordRetry(request.batchTaskId, request.sessionId);
+  if (retryResult && !retryResult.ok) {
+    return { accepted: false, reason: retryResult.reason };
+  }
+
+  const command: EssePreflightCommand = {
+    ...cardItem.command,
+    mode: cardItem.mode,
+    target: { sessionId: request.sessionId, type: "existing" }
+  };
+  const prepared = await prepareCommand(command, context, {
+    createSeed: options.createSeed ?? createBlankGenerationSeed,
+    makeSessionId: options.makeSessionId ?? createSessionId,
+    projectDirectory: options.projectDirectory
+  });
+  if (!prepared.ok) {
+    return { accepted: false, reason: prepared.reason };
+  }
+
+  const controller = (options.createAbortController ?? (() => new AbortController()))();
+  const registerResult = options.batchTaskRegistry?.registerItem(request.batchTaskId, {
+    controller,
+    retryCount: retryResult?.retryCount,
+    sessionId: request.sessionId
+  }, options.projectDirectory);
+  if (registerResult && !registerResult.ok) {
+    return { accepted: false, reason: registerResult.reason };
+  }
+
+  const mutation = await context.applyMutation((state) => markSessionsQueued(state, [request.sessionId]));
+  if (!mutation.result.ok) {
+    return { accepted: false, reason: mutation.result.reason };
+  }
+
+  void runPreparedGeneration({
+    batchController: controller,
+    batchTaskId: request.batchTaskId,
+    command,
+    context,
+    options,
+    prepared
+  });
+
+  return {
+    accepted: true,
+    retryCount: retryResult?.retryCount ?? 1,
+    sessionId: request.sessionId
   };
 }
 
@@ -424,6 +496,24 @@ function selectReferenceImagePaths(referenceImageIds: string[] | undefined, stat
   }
 
   return [...new Set(referenceImageIds.map((id) => byId.get(id)).filter((filePath): filePath is string => Boolean(filePath)))];
+}
+
+function findBatchTaskCardItem(
+  state: ProjectSnapshot,
+  request: { batchTaskId: string; sessionId: string }
+) {
+  for (const message of state.projectManagerState?.conversation.messages ?? []) {
+    if (message.batchTask?.batchTaskId !== request.batchTaskId) {
+      continue;
+    }
+
+    const item = message.batchTask.items.find((current) => current.sessionId === request.sessionId);
+    if (item) {
+      return item;
+    }
+  }
+
+  return undefined;
 }
 
 function getCurrentImagePath(session: PersistedImageSession): string {

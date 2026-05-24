@@ -11,6 +11,8 @@ import type {
   GenerateImageRequest,
   ImportProjectImagesRequest,
   OpenProjectRequest,
+  RetryEsseBatchTaskFailedRequest,
+  RetryEsseBatchTaskItemRequest,
   RenameProjectRequest,
   SaveReferenceImageRequest,
   SaveProjectSnapshotRequest,
@@ -23,7 +25,7 @@ import { createAppLogger, type AppLogger } from "./services/appLogger";
 import { createBlankGenerationSeed } from "./services/blankGenerationSeed";
 import { runEsseAgentTurn } from "./services/esseAgent";
 import { EsseBatchTaskRegistry } from "./services/esseBatchTaskRegistry";
-import { createEsseImagePreflightExecutor } from "./services/esseImagePreflightExecutor";
+import { createEsseImagePreflightExecutor, retryEsseBatchTaskItem } from "./services/esseImagePreflightExecutor";
 import { createEssePackagePreflightExecutor } from "./services/essePackagePreflightExecutor";
 import { createProjectSnapshotWorkspaceRuntime } from "./services/esseWorkspaceRuntime";
 import { EssePreflightBroker } from "./services/essePreflightBroker";
@@ -481,7 +483,84 @@ function registerIpc(appLogger: AppLogger): void {
     return result;
   });
 
+  ipcMain.handle("esse:batch-task-retry-item", async (_event, request: RetryEsseBatchTaskItemRequest) => {
+    assertRetryEsseBatchTaskItemRequest(request);
+    const projectDirectory = requireActiveProjectDirectory();
+    const result = await retryEsseBatchTaskItem(
+      request,
+      {
+        batchTaskRegistry: esseBatchTaskRegistry,
+        generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger),
+        projectDirectory
+      },
+      await createRetryWorkspaceRuntime(projectDirectory)
+    );
+    if (result.accepted) {
+      appLogger.info("Esse batch task item retry accepted", {
+        context: `esse-batch:${request.batchTaskId}`,
+        data: { retryCount: result.retryCount, sessionId: request.sessionId },
+        publicMessage: "已重新提交这张图。"
+      });
+    }
+    return result;
+  });
+
+  ipcMain.handle("esse:batch-task-retry-failed", async (_event, request: RetryEsseBatchTaskFailedRequest) => {
+    assertRetryEsseBatchTaskFailedRequest(request);
+    const projectDirectory = requireActiveProjectDirectory();
+    const runtime = await createRetryWorkspaceRuntime(projectDirectory);
+    const snapshot = runtime.getState();
+    const failedSessionIds = findBatchTaskFailedSessionIds(snapshot, request.batchTaskId);
+    const rejected: Array<{ reason: string; sessionId: string }> = [];
+    let acceptedCount = 0;
+    for (const sessionId of failedSessionIds) {
+      const result = await retryEsseBatchTaskItem(
+        { batchTaskId: request.batchTaskId, sessionId },
+        {
+          batchTaskRegistry: esseBatchTaskRegistry,
+          generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger),
+          projectDirectory
+        },
+        runtime
+      );
+      if (result.accepted) {
+        acceptedCount += 1;
+      } else {
+        rejected.push({ reason: result.reason, sessionId });
+      }
+    }
+    if (acceptedCount > 0) {
+      appLogger.info("Esse batch task failed items retry accepted", {
+        context: `esse-batch:${request.batchTaskId}`,
+        data: { acceptedCount, rejectedCount: rejected.length },
+        publicMessage: `已重新提交 ${acceptedCount} 个失败任务。`
+      });
+    }
+    return { acceptedCount, rejected };
+  });
+
   ipcMain.handle("logs:list", () => appLogger.getEntries());
+}
+
+async function createRetryWorkspaceRuntime(projectDirectory: string) {
+  return createProjectSnapshotWorkspaceRuntime({
+    initialSnapshot: await openProject(projectDirectory),
+    sink: getProjectSnapshotSink(projectDirectory)
+  });
+}
+
+function findBatchTaskFailedSessionIds(snapshot: ProjectSnapshot, batchTaskId: string): string[] {
+  const sessionsById = new Map(snapshot.sessions.map((session) => [session.id, session]));
+  const batchTask = snapshot.projectManagerState?.conversation.messages.find(
+    (message) => message.batchTask?.batchTaskId === batchTaskId
+  )?.batchTask;
+  if (!batchTask) {
+    return [];
+  }
+
+  return batchTask.items
+    .filter((item) => sessionsById.get(item.sessionId)?.status === "failed")
+    .map((item) => item.sessionId);
 }
 
 function getProjectSnapshotSink(projectDirectory: string) {
@@ -763,6 +842,25 @@ function assertCancelEsseBatchTaskItemRequest(request: CancelEsseBatchTaskItemRe
 function assertCancelEsseBatchTaskAllRequest(request: CancelEsseBatchTaskAllRequest): void {
   if (typeof request !== "object" || request === null || typeof request.batchTaskId !== "string" || !request.batchTaskId.trim()) {
     throw new Error("Invalid Esse batch task cancel request");
+  }
+}
+
+function assertRetryEsseBatchTaskItemRequest(request: RetryEsseBatchTaskItemRequest): void {
+  if (
+    typeof request !== "object" ||
+    request === null ||
+    typeof request.batchTaskId !== "string" ||
+    !request.batchTaskId.trim() ||
+    typeof request.sessionId !== "string" ||
+    !request.sessionId.trim()
+  ) {
+    throw new Error("Invalid Esse batch task item retry request");
+  }
+}
+
+function assertRetryEsseBatchTaskFailedRequest(request: RetryEsseBatchTaskFailedRequest): void {
+  if (typeof request !== "object" || request === null || typeof request.batchTaskId !== "string" || !request.batchTaskId.trim()) {
+    throw new Error("Invalid Esse batch task retry request");
   }
 }
 

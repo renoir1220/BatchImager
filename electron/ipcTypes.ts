@@ -32,6 +32,27 @@ export interface CancelEsseBatchTaskAllResponse {
   canceledCount: number;
 }
 
+export interface RetryEsseBatchTaskItemRequest {
+  batchTaskId: string;
+  sessionId: string;
+}
+
+export interface RetryEsseBatchTaskItemResponse {
+  accepted: boolean;
+  reason?: string;
+  retryCount?: number;
+  sessionId?: string;
+}
+
+export interface RetryEsseBatchTaskFailedRequest {
+  batchTaskId: string;
+}
+
+export interface RetryEsseBatchTaskFailedResponse {
+  acceptedCount: number;
+  rejected: Array<{ reason: string; sessionId: string }>;
+}
+
 export interface CopyImageToClipboardRequest {
   imagePath: string;
 }

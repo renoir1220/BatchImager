@@ -36,6 +36,8 @@ function renderProjectPlanPanelWithState(
       onCopyImage={vi.fn()}
       onCancelBatchTaskAll={vi.fn()}
       onCancelBatchTaskItem={vi.fn()}
+      onRetryBatchTaskFailed={vi.fn()}
+      onRetryBatchTaskItem={vi.fn()}
       onExecutePlan={vi.fn()}
       onOpenImagePreview={vi.fn()}
       onResolvePreflight={vi.fn()}
@@ -181,6 +183,8 @@ describe("ProjectPlanPanel plan cards", () => {
           onCopyImage={vi.fn()}
           onCancelBatchTaskAll={vi.fn()}
           onCancelBatchTaskItem={vi.fn()}
+          onRetryBatchTaskFailed={vi.fn()}
+          onRetryBatchTaskItem={vi.fn()}
           onExecutePlan={vi.fn()}
           onOpenImagePreview={vi.fn()}
           onResolvePreflight={vi.fn()}
@@ -200,6 +204,8 @@ describe("ProjectPlanPanel plan cards", () => {
           onCopyImage={vi.fn()}
           onCancelBatchTaskAll={vi.fn()}
           onCancelBatchTaskItem={vi.fn()}
+          onRetryBatchTaskFailed={vi.fn()}
+          onRetryBatchTaskItem={vi.fn()}
           onExecutePlan={vi.fn()}
           onOpenImagePreview={vi.fn()}
           onResolvePreflight={vi.fn()}
@@ -262,6 +268,8 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
         onCopyImage={vi.fn()}
         onCancelBatchTaskAll={vi.fn()}
         onCancelBatchTaskItem={vi.fn()}
+        onRetryBatchTaskFailed={vi.fn()}
+        onRetryBatchTaskItem={vi.fn()}
         onExecutePlan={vi.fn()}
         onOpenImagePreview={vi.fn()}
         onResolvePreflight={onResolvePreflight}
@@ -319,6 +327,8 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
         onCopyImage={vi.fn()}
         onCancelBatchTaskAll={vi.fn()}
         onCancelBatchTaskItem={vi.fn()}
+        onRetryBatchTaskFailed={vi.fn()}
+        onRetryBatchTaskItem={vi.fn()}
         onExecutePlan={vi.fn()}
         onOpenImagePreview={vi.fn()}
         onResolvePreflight={vi.fn()}
@@ -338,6 +348,8 @@ describe("ProjectPlanPanel Esse batch task cards", () => {
     const user = userEvent.setup();
     const onCancelBatchTaskAll = vi.fn();
     const onCancelBatchTaskItem = vi.fn();
+    const onRetryBatchTaskFailed = vi.fn();
+    const onRetryBatchTaskItem = vi.fn();
 
     renderWithBatchImager(
       <ProjectPlanPanel
@@ -398,6 +410,8 @@ describe("ProjectPlanPanel Esse batch task cards", () => {
         onCopyImage={vi.fn()}
         onCancelBatchTaskAll={onCancelBatchTaskAll}
         onCancelBatchTaskItem={onCancelBatchTaskItem}
+        onRetryBatchTaskFailed={onRetryBatchTaskFailed}
+        onRetryBatchTaskItem={onRetryBatchTaskItem}
         onExecutePlan={vi.fn()}
         onOpenImagePreview={vi.fn()}
         onResolvePreflight={vi.fn()}
@@ -413,10 +427,14 @@ describe("ProjectPlanPanel Esse batch task cards", () => {
     expect(screen.getByText("已取消")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "取消" }));
+    await user.click(screen.getByRole("button", { name: "重试" }));
     await user.click(screen.getByRole("button", { name: "全部取消" }));
+    await user.click(screen.getByRole("button", { name: "重试失败项" }));
 
     expect(onCancelBatchTaskItem).toHaveBeenCalledWith("batch_1", "sess_1");
     expect(onCancelBatchTaskAll).toHaveBeenCalledWith("batch_1");
+    expect(onRetryBatchTaskItem).toHaveBeenCalledWith("batch_1", "sess_2");
+    expect(onRetryBatchTaskFailed).toHaveBeenCalledWith("batch_1");
   });
 });
 

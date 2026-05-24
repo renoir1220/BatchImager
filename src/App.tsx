@@ -724,6 +724,18 @@ export function App() {
     });
   }
 
+  function handleRetryEsseBatchTaskItem(batchTaskId: string, sessionId: string): void {
+    void window.batchImager?.retryEsseBatchTaskItem({ batchTaskId, sessionId }).catch((error) => {
+      console.error("[BatchImager UI] Esse batch item retry failed", error);
+    });
+  }
+
+  function handleRetryEsseBatchTaskFailed(batchTaskId: string): void {
+    void window.batchImager?.retryEsseBatchTaskFailed({ batchTaskId }).catch((error) => {
+      console.error("[BatchImager UI] Esse batch failed retry failed", error);
+    });
+  }
+
   async function executeProjectCommand(
     plan: BatchPlan,
     command: WorkerCommand,
@@ -1393,6 +1405,8 @@ export function App() {
               onCancelBatchTaskAll={handleCancelEsseBatchTaskAll}
               onCancelBatchTaskItem={handleCancelEsseBatchTaskItem}
               onOpenImagePreview={handleOpenChatImagePreview}
+              onRetryBatchTaskFailed={handleRetryEsseBatchTaskFailed}
+              onRetryBatchTaskItem={handleRetryEsseBatchTaskItem}
               onResolvePreflight={(requestId, decision) => {
                 void handleResolveEssePreflight(requestId, decision);
               }}
