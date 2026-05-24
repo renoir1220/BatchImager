@@ -1,13 +1,13 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-interface PackageGeneratedImagesOptions {
+export interface PackageGeneratedImagesOptions {
   desktopDirectory: string;
   fileName?: string;
   imagePaths: string[];
 }
 
-interface PackageGeneratedImagesResult {
+export interface PackageGeneratedImagesResult {
   outputPath: string;
 }
 

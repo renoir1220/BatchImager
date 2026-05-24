@@ -3,9 +3,9 @@ import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type {
+  CancelOperationRequest,
   CopyImageToClipboardRequest,
   CreatePlaceholderImageRequest,
-  CreateProjectManagerPlanRequest,
   GenerateImageRequest,
   ImportProjectImagesRequest,
   OpenProjectRequest,
@@ -13,11 +13,17 @@ import type {
   SaveReferenceImageRequest,
   SaveProjectSnapshotRequest,
   SendChatMessageRequest,
-  SendEsseMessageRequest
+  SendEsseMessageRequest,
+  EssePreflightResponse,
+  ProjectSnapshot
 } from "./ipcTypes";
 import { createAppLogger, type AppLogger } from "./services/appLogger";
 import { createBlankGenerationSeed } from "./services/blankGenerationSeed";
-import { runEsseAgentTurn, runEssePlanTurn } from "./services/esseAgent";
+import { runEsseAgentTurn } from "./services/esseAgent";
+import { createEsseImagePreflightExecutor } from "./services/esseImagePreflightExecutor";
+import { createEssePackagePreflightExecutor } from "./services/essePackagePreflightExecutor";
+import { createProjectSnapshotWorkspaceRuntime } from "./services/esseWorkspaceRuntime";
+import { EssePreflightBroker } from "./services/essePreflightBroker";
 import { createImageGenerationExecutor, type ImageGenerationExecutor } from "./services/imageGenerationService";
 import { packageGeneratedImages } from "./services/imagePackage";
 import { loadTuziConfig, loadTuziLlmConfig } from "./services/localConfig";
@@ -35,21 +41,27 @@ import {
 } from "./services/generationRecovery";
 import {
   createProject,
+  applyProjectSnapshotMutation,
   getProjectGeneratedDirectory,
   getProjectReferencesDirectory,
   importImagesToProject,
   openProject,
-  renameProject,
-  saveProjectSnapshot
+  renameProject
 } from "./services/projectStore";
+import { ProjectMutationSinkRegistry } from "./services/projectMutationSink";
 import { ensureProjectThumbnails } from "./services/projectThumbnails";
+import { normalizePathForComparison } from "./services/pathUtils";
 
 const IMAGE_PROTOCOL = "batchimager-file";
+const MACOS_TRAFFIC_LIGHT_POSITION = { x: 16, y: 16 };
+const activeOperationControllers = new Map<string, AbortController>();
 let logger: AppLogger | undefined;
 let activeProjectDirectory: string | undefined;
 let confirmedRunningWorkClose = false;
 let inFlightGenerationCount = 0;
 let rendererRunningWorkCount = 0;
+const projectSnapshotSinkRegistry = new ProjectMutationSinkRegistry<ProjectSnapshot>();
+const essePreflightBroker = new EssePreflightBroker();
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -60,6 +72,7 @@ function createWindow(): void {
     title: "BatchImager",
     backgroundColor: "#f4f4f2",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
+    trafficLightPosition: process.platform === "darwin" ? MACOS_TRAFFIC_LIGHT_POSITION : undefined,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -231,11 +244,33 @@ function registerIpc(appLogger: AppLogger): void {
 
   ipcMain.handle("project:save-snapshot", async (_event, request: SaveProjectSnapshotRequest) => {
     assertSaveProjectSnapshotRequest(request);
-    return saveProjectSnapshot(requireActiveProjectDirectory(), request);
+    return getProjectSnapshotSink(requireActiveProjectDirectory()).apply((snapshot) => ({
+      ...snapshot,
+      projectManagerState: request.projectManagerState,
+      selectedSessionId: request.selectedSessionId,
+      sessions: request.sessions
+    }));
   });
 
   ipcMain.on("app:set-running-work-count", (_event, count: number) => {
     rendererRunningWorkCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+  });
+
+  ipcMain.handle("app:cancel-operation", (_event, request: CancelOperationRequest) => {
+    assertCancelOperationRequest(request);
+    const controller = activeOperationControllers.get(request.operationId);
+
+    if (!controller) {
+      return { canceled: false };
+    }
+
+    controller.abort();
+    appLogger.info("Operation canceled", {
+      data: { operationId: request.operationId },
+      publicMessage: "已停止当前任务。"
+    });
+
+    return { canceled: true };
   });
 
   ipcMain.handle("generation:generate-image", async (_event, request: GenerateImageRequest) => {
@@ -248,8 +283,10 @@ function registerIpc(appLogger: AppLogger): void {
     });
 
     try {
-      const generateImage = createProjectImageGenerationExecutor(requireActiveProjectDirectory(), appLogger);
-      const result = await generateImage({ mode: "edit", ...request });
+      const result = await withCancelableOperation(request.operationId, async (signal) => {
+        const generateImage = createProjectImageGenerationExecutor(requireActiveProjectDirectory(), appLogger, signal);
+        return await generateImage({ mode: "edit", ...request });
+      });
 
       return {
         ...result,
@@ -260,34 +297,6 @@ function registerIpc(appLogger: AppLogger): void {
         context: `image:${request.sessionId}`,
         error,
         publicMessage: `图片生成失败：${toUserErrorMessage(error)}`
-      });
-      throw error;
-    }
-  });
-
-  ipcMain.handle("project-manager:create-plan", async (_event, request: CreateProjectManagerPlanRequest) => {
-    assertCreateProjectManagerPlanRequest(request);
-    const projectDirectory = requireActiveProjectDirectory();
-
-    appLogger.info("Project manager plan IPC received", {
-      context: "project-manager",
-      data: {
-        imageCount: request.sessions.length,
-        outputSize: request.outputSize,
-        referenceImageCount: request.referenceImagePaths?.length ?? 0
-      },
-      publicMessage: "正在生成批量方案..."
-    });
-
-    try {
-      const plan = await runEssePlanTurn(request, loadTuziLlmConfig(), projectDirectory, { logger: appLogger });
-
-      return { plan };
-    } catch (error) {
-      appLogger.error("Project manager plan request failed", {
-        context: "project-manager",
-        error,
-        publicMessage: `方案生成失败：${toUserErrorMessage(error)}`
       });
       throw error;
     }
@@ -348,21 +357,24 @@ function registerIpc(appLogger: AppLogger): void {
     });
 
     try {
-      const llmConfig = loadTuziLlmConfig();
-      const generateImage = createProjectImageGenerationExecutor(requireActiveProjectDirectory(), appLogger);
-      const result = await runImageSessionAgent(request, llmConfig, requireActiveProjectDirectory(), {
-        generateImage: (toolRequest) =>
-          request.generationMode === "generate"
-            ? generateImage({
-                imagePath: toolRequest.imagePath,
-                mode: "generate",
-                prompt: toolRequest.prompt,
-                ...(toolRequest.referenceImagePaths?.length ? { referenceImagePaths: toolRequest.referenceImagePaths } : {}),
-                sessionId: toolRequest.sessionId,
-                ...(toolRequest.size ? { size: toolRequest.size } : {})
-              })
-            : generateImage({ mode: "edit", ...toolRequest }),
-        logger: appLogger
+      const result = await withCancelableOperation(request.operationId, async (signal) => {
+        const llmConfig = loadTuziLlmConfig();
+        const generateImage = createProjectImageGenerationExecutor(requireActiveProjectDirectory(), appLogger, signal);
+        return await runImageSessionAgent(request, llmConfig, requireActiveProjectDirectory(), {
+          generateImage: (toolRequest) =>
+            toolRequest.mode === "generate"
+              ? generateImage({
+                  imagePath: toolRequest.imagePath,
+                  mode: "generate",
+                  prompt: toolRequest.prompt,
+                  ...(toolRequest.referenceImagePaths?.length ? { referenceImagePaths: toolRequest.referenceImagePaths } : {}),
+                  sessionId: toolRequest.sessionId,
+                  ...(toolRequest.size ? { size: toolRequest.size } : {})
+                })
+              : generateImage({ ...toolRequest, mode: "edit" }),
+          logger: appLogger,
+          signal
+        });
       });
 
       return {
@@ -381,7 +393,7 @@ function registerIpc(appLogger: AppLogger): void {
     }
   });
 
-  ipcMain.handle("esse:send-message", async (_event, request: SendEsseMessageRequest) => {
+  ipcMain.handle("esse:send-message", async (event, request: SendEsseMessageRequest) => {
     assertSendEsseMessageRequest(request);
     const projectDirectory = requireActiveProjectDirectory();
 
@@ -397,37 +409,30 @@ function registerIpc(appLogger: AppLogger): void {
     });
 
     try {
-      const result = await runEsseAgentTurn(request, loadTuziLlmConfig(), projectDirectory, { logger: appLogger });
-      const fileResults = [];
-
-      for (const fileTask of result.fileTasks ?? []) {
-        if (fileTask.type !== "package" || fileTask.source !== "generated-images" || fileTask.destination !== "desktop") {
-          continue;
-        }
-
-        const packaged = await packageGeneratedImages({
-          desktopDirectory: app.getPath("desktop"),
-          fileName: fileTask.fileName,
-          imagePaths: collectGeneratedImagePaths(request.sessions)
+      const result = await withCancelableOperation(request.operationId, async (signal) => {
+        const workspaceToolRuntime = createProjectSnapshotWorkspaceRuntime({
+          executeImagePreflightTool: createEsseImagePreflightExecutor({
+            generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger, signal),
+            projectDirectory
+          }),
+          executePackagePreflightTool: createEssePackagePreflightExecutor({
+            desktopDirectory: app.getPath("desktop"),
+            packageGeneratedImages
+          }),
+          initialSnapshot: await openProject(projectDirectory),
+          recordToolCalls: true,
+          requestPreflight: (payload) => essePreflightBroker.request(event.sender, payload, { signal }),
+          sink: getProjectSnapshotSink(projectDirectory)
         });
 
-        fileResults.push({
-          id: fileTask.id,
-          outputPath: packaged.outputPath,
-          type: "package" as const
+        return await runEsseAgentTurn(request, loadTuziLlmConfig(), projectDirectory, {
+          logger: appLogger,
+          signal,
+          workspaceToolRuntime
         });
-        appLogger.info("Esse file task completed", {
-          context: "esse-agent",
-          data: { outputPath: packaged.outputPath },
-          publicMessage: "Esse 已将生成图片打包到桌面。"
-        });
-      }
+      });
 
       return {
-        ...(fileResults.length ? { fileResults } : {}),
-        ...(result.fileTasks?.length ? { fileTasks: result.fileTasks } : {}),
-        ...(result.imageRequests?.length ? { imageRequests: result.imageRequests } : {}),
-        ...(result.plan ? { plan: result.plan } : {}),
         reply: result.reply
       };
     } catch (error) {
@@ -440,26 +445,71 @@ function registerIpc(appLogger: AppLogger): void {
     }
   });
 
+  ipcMain.handle("esse:preflight-response", (_event, response: EssePreflightResponse) => {
+    assertEssePreflightResponse(response);
+    return { accepted: essePreflightBroker.respond(response) };
+  });
+
   ipcMain.handle("logs:list", () => appLogger.getEntries());
 }
 
-function collectGeneratedImagePaths(sessions: SendEsseMessageRequest["sessions"]): string[] {
-  const paths = new Set<string>();
-
-  for (const session of sessions) {
-    for (const generatedFilePath of session.generatedFilePaths ?? []) {
-      paths.add(generatedFilePath);
-    }
-  }
-
-  return [...paths];
+function getProjectSnapshotSink(projectDirectory: string) {
+  return projectSnapshotSinkRegistry.getOrCreate(normalizePathForComparison(projectDirectory), {
+    applyTransaction: (mutator) =>
+      applyProjectSnapshotMutation(projectDirectory, (snapshot) => {
+        const next = mutator(snapshot);
+        return {
+          projectManagerState: next.projectManagerState,
+          selectedSessionId: next.selectedSessionId,
+          sessions: next.sessions
+        };
+      }),
+    broadcast: broadcastProjectSnapshot
+  });
 }
 
-function createProjectImageGenerationExecutor(projectDirectory: string, appLogger: AppLogger): ImageGenerationExecutor {
+function broadcastProjectSnapshot(snapshot: ProjectSnapshot): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send("project:snapshot-updated", snapshot);
+  }
+}
+
+async function withCancelableOperation<T>(
+  operationId: string | undefined,
+  run: (signal: AbortSignal | undefined) => Promise<T>
+): Promise<T> {
+  if (!operationId) {
+    return await run(undefined);
+  }
+
+  const controller = new AbortController();
+  activeOperationControllers.set(operationId, controller);
+
+  try {
+    return await run(controller.signal);
+  } finally {
+    if (activeOperationControllers.get(operationId) === controller) {
+      activeOperationControllers.delete(operationId);
+    }
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new Error("操作已停止");
+  }
+}
+
+function createProjectImageGenerationExecutor(
+  projectDirectory: string,
+  appLogger: AppLogger,
+  signal?: AbortSignal
+): ImageGenerationExecutor {
   const config = loadTuziConfig(getProjectGeneratedDirectory(projectDirectory));
   const generateImage = createImageGenerationExecutor(config, { logger: appLogger });
 
   return async (request) => {
+    throwIfAborted(signal);
     inFlightGenerationCount += 1;
     await startGenerationJob(projectDirectory, {
       imagePath: request.mode === "edit" ? request.imagePath : undefined,
@@ -471,10 +521,13 @@ function createProjectImageGenerationExecutor(projectDirectory: string, appLogge
     });
 
     try {
+      throwIfAborted(signal);
       const result = await generateImage({
         ...request,
+        ...(signal ? { signal } : {}),
         onRemoteImage: (event) => markGenerationJobRemoteReceived(projectDirectory, event)
       });
+      throwIfAborted(signal);
       await markGenerationJobCompleted(projectDirectory, {
         outputPath: result.outputPath,
         sessionId: request.sessionId
@@ -600,6 +653,7 @@ function assertGenerateImageRequest(request: GenerateImageRequest): void {
     typeof request !== "object" ||
     request === null ||
     typeof request.imagePath !== "string" ||
+    (request.operationId !== undefined && typeof request.operationId !== "string") ||
     typeof request.prompt !== "string" ||
     typeof request.sessionId !== "string" ||
     (request.referenceImagePaths !== undefined &&
@@ -608,6 +662,12 @@ function assertGenerateImageRequest(request: GenerateImageRequest): void {
     (request.size !== undefined && typeof request.size !== "string")
   ) {
     throw new Error("Invalid image generation request");
+  }
+}
+
+function assertCancelOperationRequest(request: CancelOperationRequest): void {
+  if (typeof request !== "object" || request === null || typeof request.operationId !== "string" || !request.operationId.trim()) {
+    throw new Error("Invalid cancel operation request");
   }
 }
 
@@ -656,6 +716,19 @@ function assertRenameProjectRequest(request: RenameProjectRequest): void {
   }
 }
 
+function assertEssePreflightResponse(response: EssePreflightResponse): void {
+  if (
+    typeof response !== "object" ||
+    response === null ||
+    typeof response.requestId !== "string" ||
+    !response.requestId.trim() ||
+    (response.decision !== "execute" && response.decision !== "cancel") ||
+    (response.detail !== undefined && typeof response.detail !== "string")
+  ) {
+    throw new Error("Invalid Esse preflight response");
+  }
+}
+
 function requireActiveProjectDirectory(): string {
   if (!activeProjectDirectory) {
     throw new Error("请先新建或打开项目");
@@ -688,6 +761,7 @@ function assertSendChatMessageRequest(request: SendChatMessageRequest): void {
     request === null ||
     typeof request.imagePath !== "string" ||
     typeof request.sessionId !== "string" ||
+    (request.operationId !== undefined && typeof request.operationId !== "string") ||
     (request.outputSize !== undefined && typeof request.outputSize !== "string") ||
     (request.generationMode !== undefined && request.generationMode !== "edit" && request.generationMode !== "generate") ||
     (request.context !== undefined &&
@@ -766,6 +840,7 @@ function assertSendEsseMessageRequest(request: SendEsseMessageRequest): void {
   if (
     typeof request !== "object" ||
     request === null ||
+    (request.operationId !== undefined && typeof request.operationId !== "string") ||
     (request.outputSize !== undefined && typeof request.outputSize !== "string") ||
     (request.persona !== undefined && !isValidEssePersona(request.persona)) ||
     (request.selectedSessionId !== undefined && request.selectedSessionId !== null && typeof request.selectedSessionId !== "string") ||
@@ -812,28 +887,6 @@ function assertCreatePlaceholderImageRequest(request: CreatePlaceholderImageRequ
   }
 }
 
-function assertCreateProjectManagerPlanRequest(request: CreateProjectManagerPlanRequest): void {
-  if (
-    typeof request !== "object" ||
-    request === null ||
-    typeof request.prompt !== "string" ||
-    (request.outputSize !== undefined && typeof request.outputSize !== "string") ||
-    (request.referenceImagePaths !== undefined &&
-      (!Array.isArray(request.referenceImagePaths) ||
-        !request.referenceImagePaths.every((referenceImagePath) => typeof referenceImagePath === "string"))) ||
-    !Array.isArray(request.sessions) ||
-    !request.sessions.every(
-      (session) =>
-        typeof session === "object" &&
-        session !== null &&
-        typeof session.id === "string" &&
-        typeof session.fileName === "string"
-    )
-  ) {
-    throw new Error("Invalid project manager plan request");
-  }
-}
-
 function toUserErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -848,7 +901,5 @@ app.on("before-quit", () => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
+  app.quit();
 });

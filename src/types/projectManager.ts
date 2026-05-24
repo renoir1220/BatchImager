@@ -1,3 +1,5 @@
+import type { EssePreflightRequest } from "../../electron/ipcTypes";
+
 export type ProjectManagerMessageRole = "user" | "assistant" | "error" | "context";
 export type BatchPlanStatus = "draft" | "running" | "completed" | "failed" | "paused";
 export type WorkerReportStatus = "completed" | "failed" | "skipped";
@@ -6,7 +8,10 @@ export interface ProjectManagerMessage {
   id: string;
   role: ProjectManagerMessageRole;
   content: string;
+  contextType?: "esse-tool-call";
   planId?: string;
+  preflightDecision?: "pending" | "execute" | "cancel";
+  preflightRequest?: EssePreflightRequest;
   referenceFilePaths?: string[];
 }
 
@@ -69,28 +74,6 @@ export interface EsseImageRequest {
   size?: string;
   sourceSessionId?: string;
   target: "existing" | "new";
-}
-
-export interface EsseFileTask {
-  destination: "desktop";
-  fileName?: string;
-  id: string;
-  source: "generated-images";
-  type: "package";
-}
-
-export interface EsseFileResult {
-  id: string;
-  outputPath: string;
-  type: "package";
-}
-
-export interface EsseAgentTurnResult {
-  fileResults?: EsseFileResult[];
-  fileTasks?: EsseFileTask[];
-  imageRequests?: EsseImageRequest[];
-  plan?: BatchPlan;
-  reply: string;
 }
 
 export type EssePersona = "old-ox" | "excellent-employee" | "question-girl" | "robot";

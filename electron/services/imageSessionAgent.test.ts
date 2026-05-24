@@ -41,6 +41,7 @@ describe("imageSessionAgent", () => {
               runtimePrompts.push(prompt);
               const generateTool = customTools.find((tool) => tool.name === "generate_image");
               const toolResult = await generateTool?.execute("call-1", {
+                mode: "edit",
                 prompt: "白底商品图，保留花朵形态",
                 referenceImageIds: ["ref-1"],
                 size: "3840x2160"
@@ -60,6 +61,7 @@ describe("imageSessionAgent", () => {
           generated.push(image);
           expect(request).toEqual({
             imagePath: "C:\\project\\images\\original\\img-1-flower.jpg",
+            mode: "edit",
             prompt: "白底商品图，保留花朵形态",
             referenceImagePaths: ["C:\\project\\references\\style.jpg"],
             sessionId: "img-1",
@@ -83,7 +85,7 @@ describe("imageSessionAgent", () => {
     });
   });
 
-  test("uses all provided prompt reference images when Pi omits referenceImageIds", async () => {
+  test("does not send prompt reference images when Pi omits referenceImageIds", async () => {
     const generatedRequests: unknown[] = [];
     const customTools: Array<{ name: string; execute: (id: string, params: Record<string, unknown>) => Promise<unknown> }> = [];
 
@@ -116,6 +118,7 @@ describe("imageSessionAgent", () => {
             prompt: async () => {
               const generateTool = customTools.find((tool) => tool.name === "generate_image");
               await generateTool?.execute("call-1", {
+                mode: "generate",
                 prompt: "生成咖啡馆内部结构图"
               });
             },
@@ -132,14 +135,14 @@ describe("imageSessionAgent", () => {
     expect(generatedRequests).toEqual([
       {
         imagePath: "C:\\project\\images\\generated\\placeholder.png",
+        mode: "generate",
         prompt: "生成咖啡馆内部结构图",
-        referenceImagePaths: ["C:\\project\\references\\sakura-cafe.jpg"],
         sessionId: "img-7"
       }
     ]);
   });
 
-  test("keeps prompt reference images when Pi sends an empty referenceImageIds array", async () => {
+  test("does not send prompt reference images when Pi sends an empty referenceImageIds array", async () => {
     const generatedRequests: unknown[] = [];
     const customTools: Array<{ name: string; execute: (id: string, params: Record<string, unknown>) => Promise<unknown> }> = [];
 
@@ -172,6 +175,7 @@ describe("imageSessionAgent", () => {
             prompt: async () => {
               const generateTool = customTools.find((tool) => tool.name === "generate_image");
               await generateTool?.execute("call-1", {
+                mode: "generate",
                 prompt: "生成咖啡馆内部结构图",
                 referenceImageIds: []
               });
@@ -189,8 +193,8 @@ describe("imageSessionAgent", () => {
     expect(generatedRequests).toEqual([
       {
         imagePath: "C:\\project\\images\\generated\\placeholder.png",
+        mode: "generate",
         prompt: "生成咖啡馆内部结构图",
-        referenceImagePaths: ["C:\\project\\references\\sakura-cafe.jpg"],
         sessionId: "img-7"
       }
     ]);
@@ -452,8 +456,8 @@ describe("imageSessionAgent", () => {
     );
 
     expect(factoryCalls).toBe(2);
-    expect(registry.has("image-session:c:\\project:img-a")).toBe(true);
-    expect(registry.has("image-session:c:\\project:img-b")).toBe(true);
+    expect(registry.has("image-session:c:/project:img-a")).toBe(true);
+    expect(registry.has("image-session:c:/project:img-b")).toBe(true);
   });
 
   test("rejects image paths that point outside the project directory", async () => {

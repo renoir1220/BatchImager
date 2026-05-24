@@ -24,7 +24,14 @@ describe("right sidebar chat surface", () => {
     expect(projectPanel).toContain("MessageActions");
     expect(actions).toContain("message-actions");
     expect(styles).toContain(".message-row:hover .message-actions");
-    expect(actions).toContain("复制");
+    expect(actions).toContain("CopyIcon");
+    expect(actions).toContain("DoneIcon");
+    expect(actions).toContain('aria-label={isCopied ? "复制完成" : "复制消息"}');
+    expect(actions).toContain("复制完成");
+    expect(styles).toContain(".message-action-button.copied");
+    expect(actions).not.toContain("点赞");
+    expect(actions).not.toContain("点踩");
+    expect(actions).not.toContain("aria-pressed");
   });
 
   test("right sidebar composer uses a multiline prompt surface", () => {
@@ -34,8 +41,20 @@ describe("right sidebar chat surface", () => {
 
     expect(sessionPanel).toContain("<textarea");
     expect(projectPanel).toContain("<textarea");
+    expect(sessionPanel).not.toContain('disabled={selectedSession.chatStatus === "sending"}');
+    expect(projectPanel).not.toContain("disabled={isCreatingPlan}");
     expect(styles).toContain(".session-composer textarea");
     expect(styles).toContain("border-radius: 22px");
+  });
+
+  test("active chat work turns the send button into a stop button", () => {
+    const sessionPanel = readProjectFile("src/components/SessionPanel.tsx");
+    const projectPanel = readProjectFile("src/components/ProjectPlanPanel.tsx");
+    const styles = readProjectFile("src/styles.css");
+
+    expect(sessionPanel).toContain('aria-label={isAgentWorking ? "停止" : "发送"}');
+    expect(projectPanel).toContain('aria-label={isAgentWorking ? "停止" : "发送"}');
+    expect(styles).toContain(".composer-stop-icon");
   });
 
   test("composer ratio controls do not repeat the active tab name", () => {
@@ -68,6 +87,27 @@ describe("right sidebar chat surface", () => {
     expect(sessionPanel).toContain("thread-image-title");
     expect(styles).toContain(".thread-image-card");
     expect(styles).toContain(".thread-image-title");
+  });
+
+  test("deleted generated records render a stable placeholder instead of a broken image", () => {
+    const sessionPanel = readProjectFile("src/components/SessionPanel.tsx");
+    const styles = readProjectFile("src/styles.css");
+
+    expect(sessionPanel).toContain("isDeletedGeneratedImageMessage");
+    expect(sessionPanel).toContain("生成记录已删除");
+    expect(sessionPanel).toContain("这条生成记录已从工作区删除");
+    expect(styles).toContain(".thread-image-card.deleted-generated-record");
+    expect(styles).toContain(".deleted-generated-placeholder");
+  });
+
+  test("image session chat does not pin the original image above the thread", () => {
+    const sessionPanel = readProjectFile("src/components/SessionPanel.tsx");
+    const styles = readProjectFile("src/styles.css");
+
+    expect(sessionPanel).not.toContain("session-preview-frame");
+    expect(sessionPanel).not.toContain("session-preview");
+    expect(styles).not.toContain(".session-preview-frame");
+    expect(styles).not.toContain(".session-preview");
   });
 
   test("session and Esse chat images can be opened and copied from the thread", () => {

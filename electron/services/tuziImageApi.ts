@@ -9,6 +9,7 @@ export interface ProductImageInput {
   prompt: string;
   referenceImagePaths?: string[];
   sessionId: string;
+  signal?: AbortSignal;
   size?: string;
 }
 
@@ -16,6 +17,7 @@ export interface PromptImageInput {
   onRemoteImage?: (event: RemoteImageEvent) => Promise<void> | void;
   prompt: string;
   sessionId: string;
+  signal?: AbortSignal;
   size?: string;
 }
 
@@ -52,6 +54,7 @@ interface TuziImageApiDeps {
   mkdir: typeof mkdir;
   prepareImage: typeof prepareImageForEditApi;
   readFile: typeof readFile;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   writeFile: typeof writeFile;
 }
 
@@ -61,8 +64,12 @@ const defaultDeps: TuziImageApiDeps = {
   mkdir,
   prepareImage: prepareImageForEditApi,
   readFile,
+  sleep: sleepMs,
   writeFile
 };
+
+const IMAGE_API_MAX_RETRIES = 3;
+const IMAGE_API_RETRY_DELAYS_MS = [500, 1000, 2000] as const;
 
 export function buildImageEditEndpoint(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/v1/images/edits`;
@@ -113,9 +120,11 @@ export async function generateImageFromPrompt(
     publicMessage: "正在请求生成新图片..."
   });
 
-  let response: Response;
-  try {
-    response = await deps.fetch(endpoint, {
+  const response = await fetchImageApiWithRetries({
+    context,
+    endpoint,
+    fetchImpl: deps.fetch,
+    init: {
       body: JSON.stringify({
         model: config.model,
         prompt,
@@ -127,31 +136,16 @@ export async function generateImageFromPrompt(
         Authorization: `Bearer ${config.apiKey}`,
         "Content-Type": "application/json"
       },
-      method: "POST"
-    });
-  } catch (error) {
-    logger?.error("Image generation request network failed", {
-      context,
-      data: {
-        endpoint,
-        model: config.model,
-        requestSize
-      },
-      error,
-      publicMessage: `生成请求发送失败：${toNetworkErrorMessage(error)}`
-    });
-    throw new Error(`Image generation request failed: ${toNetworkErrorMessage(error)}`, { cause: error });
-  }
-
-  if (!response.ok) {
-    const responseText = await response.text();
-    logger?.error("Image generation request failed", {
-      context,
-      data: { responseText, status: response.status },
-      publicMessage: `生成失败：接口返回 ${response.status}`
-    });
-    throw new Error(`Image generation failed: ${response.status} ${responseText}`);
-  }
+      method: "POST",
+      ...(input.signal ? { signal: input.signal } : {})
+    },
+    logLabel: "Image generation request",
+    logger,
+    model: config.model,
+    requestSize,
+    signal: input.signal,
+    sleep: deps.sleep
+  });
 
   logger?.info("Image generation response received", {
     context,
@@ -166,7 +160,7 @@ export async function generateImageFromPrompt(
   });
   const imageBytes = generated.base64Json
     ? Buffer.from(generated.base64Json, "base64")
-    : await downloadGeneratedImage(generated.url, deps.fetch, logger, context);
+    : await downloadGeneratedImage(generated.url, deps.fetch, logger, context, input.signal);
 
   await deps.mkdir(config.outputDirectory, { recursive: true });
 
@@ -273,39 +267,25 @@ export async function generateProductImage(
     },
     publicMessage: "已发送生成请求，等待模型返回..."
   });
-  let response: Response;
-
-  try {
-    response = await deps.fetch(endpoint, {
+  const response = await fetchImageApiWithRetries({
+    context,
+    endpoint,
+    fetchImpl: deps.fetch,
+    init: {
       body: requestBody,
       headers: {
         Authorization: `Bearer ${config.apiKey}`
       },
-      method: "POST"
-    });
-  } catch (error) {
-    logger?.error("Image edit request network failed", {
-      context,
-      data: {
-        endpoint,
-        model: config.model,
-        requestSize
-      },
-      error,
-      publicMessage: `生成请求发送失败：${toNetworkErrorMessage(error)}`
-    });
-    throw new Error(`Image generation request failed: ${toNetworkErrorMessage(error)}`, { cause: error });
-  }
-
-  if (!response.ok) {
-    const responseText = await response.text();
-    logger?.error("Image edit request failed", {
-      context,
-      data: { responseText, status: response.status },
-      publicMessage: `生成失败：接口返回 ${response.status}`
-    });
-    throw new Error(`Image generation failed: ${response.status} ${responseText}`);
-  }
+      method: "POST",
+      ...(input.signal ? { signal: input.signal } : {})
+    },
+    logLabel: "Image edit request",
+    logger,
+    model: config.model,
+    requestSize,
+    signal: input.signal,
+    sleep: deps.sleep
+  });
 
   logger?.info("Image edit response received", {
     context,
@@ -320,7 +300,7 @@ export async function generateProductImage(
   });
   const imageBytes = generated.base64Json
     ? Buffer.from(generated.base64Json, "base64")
-    : await downloadGeneratedImage(generated.url, deps.fetch, logger, context);
+    : await downloadGeneratedImage(generated.url, deps.fetch, logger, context, input.signal);
 
   await deps.mkdir(config.outputDirectory, { recursive: true });
 
@@ -349,20 +329,156 @@ async function downloadGeneratedImage(
   url: string | undefined,
   fetchImpl: typeof fetch,
   logger: AppLogger | undefined,
-  context: string
+  context: string,
+  signal?: AbortSignal
 ): Promise<Buffer> {
   if (!url) {
     throw new Error("Generated image url is missing");
   }
 
   logger?.debug("Downloading generated image", { context, data: { url } });
-  const response = await fetchImpl(url);
+  const response = await fetchImpl(url, signal ? { signal } : undefined);
 
   if (!response.ok) {
     throw new Error(`Generated image download failed: ${response.status}`);
   }
 
   return Buffer.from(await response.arrayBuffer());
+}
+
+interface FetchImageApiWithRetriesOptions {
+  context: string;
+  endpoint: string;
+  fetchImpl: typeof fetch;
+  init: RequestInit;
+  logLabel: "Image edit request" | "Image generation request";
+  logger?: AppLogger;
+  model: string;
+  requestSize: string;
+  signal?: AbortSignal;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+}
+
+async function fetchImageApiWithRetries(options: FetchImageApiWithRetriesOptions): Promise<Response> {
+  for (let attemptIndex = 0; attemptIndex <= IMAGE_API_MAX_RETRIES; attemptIndex += 1) {
+    const attemptNumber = attemptIndex + 1;
+
+    try {
+      const response = await options.fetchImpl(options.endpoint, options.init);
+
+      if (response.ok) {
+        if (attemptIndex > 0) {
+          options.logger?.info(`${options.logLabel} succeeded after retry`, {
+            context: options.context,
+            data: {
+              attempt: attemptNumber,
+              endpoint: options.endpoint,
+              model: options.model,
+              requestSize: options.requestSize,
+              status: response.status
+            }
+          });
+        }
+
+        return response;
+      }
+
+      const responseText = await response.text();
+      if (attemptIndex < IMAGE_API_MAX_RETRIES && isRetryableImageApiStatus(response.status)) {
+        await retryImageApiRequest(options, {
+          attemptNumber,
+          publicMessage: `接口暂时不可用，正在重试 ${attemptNumber}/${IMAGE_API_MAX_RETRIES}...`,
+          responseText,
+          status: response.status
+        });
+        continue;
+      }
+
+      options.logger?.error(`${options.logLabel} failed`, {
+        context: options.context,
+        data: {
+          attempt: attemptNumber,
+          maxRetries: IMAGE_API_MAX_RETRIES,
+          responseText,
+          status: response.status
+        },
+        publicMessage: `生成失败：接口返回 ${response.status}`
+      });
+      throw new Error(`Image generation failed: ${response.status} ${responseText}`);
+    } catch (error) {
+      if (isInternalImageApiError(error)) {
+        throw error;
+      }
+
+      if (attemptIndex < IMAGE_API_MAX_RETRIES && !isAbortError(error, options.signal)) {
+        await retryImageApiRequest(options, {
+          attemptNumber,
+          error,
+          publicMessage: `生成请求发送失败，正在重试 ${attemptNumber}/${IMAGE_API_MAX_RETRIES}...`
+        });
+        continue;
+      }
+
+      options.logger?.error(`${options.logLabel} network failed`, {
+        context: options.context,
+        data: {
+          attempt: attemptNumber,
+          endpoint: options.endpoint,
+          maxRetries: IMAGE_API_MAX_RETRIES,
+          model: options.model,
+          requestSize: options.requestSize
+        },
+        error,
+        publicMessage: `生成请求发送失败：${toNetworkErrorMessage(error)}`
+      });
+      throw new Error(`Image generation request failed: ${toNetworkErrorMessage(error)}`, { cause: error });
+    }
+  }
+
+  throw new Error("Image API retry loop exited unexpectedly");
+}
+
+interface RetryImageApiRequestOptions {
+  attemptNumber: number;
+  error?: unknown;
+  publicMessage: string;
+  responseText?: string;
+  status?: number;
+}
+
+async function retryImageApiRequest(
+  options: FetchImageApiWithRetriesOptions,
+  retryOptions: RetryImageApiRequestOptions
+): Promise<void> {
+  options.logger?.warn(`${options.logLabel} retry scheduled`, {
+    context: options.context,
+    data: {
+      attempt: retryOptions.attemptNumber,
+      endpoint: options.endpoint,
+      maxRetries: IMAGE_API_MAX_RETRIES,
+      model: options.model,
+      nextAttempt: retryOptions.attemptNumber + 1,
+      requestSize: options.requestSize,
+      responseText: retryOptions.responseText,
+      status: retryOptions.status
+    },
+    error: retryOptions.error,
+    publicMessage: retryOptions.publicMessage
+  });
+
+  await (options.sleep ?? sleepMs)(IMAGE_API_RETRY_DELAYS_MS[retryOptions.attemptNumber - 1] ?? 2000, options.signal);
+}
+
+function isRetryableImageApiStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function isInternalImageApiError(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("Image generation failed:");
+}
+
+function isAbortError(error: unknown, signal?: AbortSignal): boolean {
+  return Boolean(signal?.aborted) || (error instanceof Error && error.name === "AbortError");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -388,4 +504,30 @@ function toNetworkErrorMessage(error: unknown): string {
   }
 
   return error.message;
+}
+
+function sleepMs(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(createAbortError());
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function createAbortError(): Error {
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+
+  return error;
 }

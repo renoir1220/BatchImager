@@ -1,4 +1,5 @@
 import { access, copyFile, mkdir } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
@@ -18,6 +19,7 @@ interface CreateProjectOptions {
 
 interface ImportProjectImagesDeps {
   copyFile?: typeof copyFile;
+  makeSessionId?: () => string;
   makeNow?: () => Date;
 }
 
@@ -26,6 +28,8 @@ interface SaveProjectSnapshotInput {
   selectedSessionId?: string | null;
   sessions: PersistedImageSession[];
 }
+
+type ProjectSnapshotMutator = (snapshot: ProjectSnapshot) => SaveProjectSnapshotInput;
 
 interface ProjectRow {
   created_at: string;
@@ -65,6 +69,7 @@ interface PreviewSourceRow {
 }
 
 const PROJECT_DATABASE_NAME = "project.sqlite";
+const LEGACY_SESSION_ID_PATTERN = /^img-\d+$/;
 
 export async function createProject(options: CreateProjectOptions): Promise<ProjectSnapshot> {
   const now = toIso(options.makeNow?.() ?? new Date());
@@ -118,8 +123,10 @@ export async function importImagesToProject(
         .all()
         .map((row) => normalizeSourcePath(String((row as { original_source_path: string }).original_source_path)))
     );
-    let nextIndex = getNextImageIndex(db);
     let sortOrder = getNextSortOrder(db);
+    const usedSessionIds = new Set(
+      (db.prepare("select id from image_sessions").all() as Array<{ id: string }>).map((row) => row.id)
+    );
 
     for (const sourcePath of sourcePaths) {
       if (!isSupportedImagePath(sourcePath)) {
@@ -132,8 +139,7 @@ export async function importImagesToProject(
       }
 
       existingSourcePaths.add(normalizedSourcePath);
-      const sessionId = `img-${nextIndex}`;
-      nextIndex += 1;
+      const sessionId = createUniquePersistedSessionId(usedSessionIds, deps.makeSessionId);
       const fileName = path.basename(sourcePath);
       const projectFilePath = path.join(projectDirectory, "images", "original", `${sessionId}-${toSafeStem(fileName)}${getLowerExtension(fileName)}`);
 
@@ -169,80 +175,34 @@ export async function saveProjectSnapshot(
   const db = openProjectDatabase(projectDirectory);
   try {
     initializeSchema(db);
+    writeProjectSnapshotInTransaction(db, input, makeNow);
+    return readProjectSnapshot(db, projectDirectory);
+  } finally {
+    db.close();
+  }
+}
+
+export async function applyProjectSnapshotMutation(
+  projectDirectory: string,
+  mutator: ProjectSnapshotMutator,
+  makeNow: () => Date = () => new Date()
+): Promise<ProjectSnapshot> {
+  await createProjectDirectories(projectDirectory);
+
+  const db = openProjectDatabase(projectDirectory);
+  try {
+    initializeSchema(db);
     db.exec("begin immediate transaction");
     try {
-      db.prepare("delete from chat_messages").run();
-      db.prepare("delete from image_sessions").run();
-
-      input.sessions.forEach((session, index) => {
-        db.prepare(
-          `insert into image_sessions (
-            id,
-            file_path,
-            file_name,
-            original_source_path,
-            status,
-            chat_status,
-            generated_file_path,
-            generated_file_paths_json,
-            generation_mode,
-            last_prompt,
-            error_message,
-            show_original_in_list,
-            sort_order
-          ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(
-          session.id,
-          session.filePath,
-          session.fileName,
-          normalizeSourcePath(session.filePath),
-          session.status,
-          session.chatStatus,
-          session.generatedFilePath ?? null,
-          stringifyOptionalArray(session.generatedFilePaths),
-          session.generationMode ?? null,
-          session.lastPrompt ?? null,
-          session.errorMessage ?? null,
-          session.showOriginalInList ? 1 : 0,
-          index
-        );
-
-        session.chatMessages.forEach((message, messageIndex) => {
-          db.prepare(
-            `insert into chat_messages (
-              session_id,
-              id,
-              role,
-              content,
-              context_type,
-              generated_file_path,
-              reference_file_paths_json,
-              source_file_path,
-              sort_order
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).run(
-            session.id,
-            message.id,
-            message.role,
-            message.content,
-            message.contextType ?? null,
-            message.generatedFilePath ?? null,
-            stringifyOptionalArray(message.referenceFilePaths),
-            message.sourceFilePath ?? null,
-            messageIndex
-          );
-        });
-      });
-
-      setProjectState(db, "projectManagerState", input.projectManagerState ? JSON.stringify(input.projectManagerState) : null);
-      setProjectState(db, "selectedSessionId", input.selectedSessionId ?? null);
+      const currentSnapshot = readProjectSnapshot(db, projectDirectory);
+      const nextInput = mutator(currentSnapshot);
+      writeProjectSnapshotRowsWithinTransaction(db, nextInput);
       touchProject(db, makeNow());
       db.exec("commit");
     } catch (error) {
       db.exec("rollback");
       throw error;
     }
-
     return readProjectSnapshot(db, projectDirectory);
   } finally {
     db.close();
@@ -296,6 +256,90 @@ function openProjectDatabase(projectDirectory: string): DatabaseSync {
   return new DatabaseSync(path.join(projectDirectory, PROJECT_DATABASE_NAME));
 }
 
+function writeProjectSnapshotInTransaction(
+  db: DatabaseSync,
+  input: SaveProjectSnapshotInput,
+  makeNow: () => Date
+): void {
+  db.exec("begin immediate transaction");
+  try {
+    writeProjectSnapshotRowsWithinTransaction(db, input);
+    touchProject(db, makeNow());
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  }
+}
+
+function writeProjectSnapshotRowsWithinTransaction(db: DatabaseSync, input: SaveProjectSnapshotInput): void {
+  db.prepare("delete from chat_messages").run();
+  db.prepare("delete from image_sessions").run();
+
+  input.sessions.forEach((session, index) => {
+    db.prepare(
+      `insert into image_sessions (
+        id,
+        file_path,
+        file_name,
+        original_source_path,
+        status,
+        chat_status,
+        generated_file_path,
+        generated_file_paths_json,
+        generation_mode,
+        last_prompt,
+        error_message,
+        show_original_in_list,
+        sort_order
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      session.id,
+      session.filePath,
+      session.fileName,
+      normalizeSourcePath(session.filePath),
+      session.status,
+      session.chatStatus,
+      session.generatedFilePath ?? null,
+      stringifyOptionalArray(session.generatedFilePaths),
+      session.generationMode ?? null,
+      session.lastPrompt ?? null,
+      session.errorMessage ?? null,
+      session.showOriginalInList ? 1 : 0,
+      index
+    );
+
+    session.chatMessages.forEach((message, messageIndex) => {
+      db.prepare(
+        `insert into chat_messages (
+          session_id,
+          id,
+          role,
+          content,
+          context_type,
+          generated_file_path,
+          reference_file_paths_json,
+          source_file_path,
+          sort_order
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        session.id,
+        message.id,
+        message.role,
+        message.content,
+        message.contextType ?? null,
+        message.generatedFilePath ?? null,
+        stringifyOptionalArray(message.referenceFilePaths),
+        message.sourceFilePath ?? null,
+        messageIndex
+      );
+    });
+  });
+
+  setProjectState(db, "projectManagerState", input.projectManagerState ? JSON.stringify(input.projectManagerState) : null);
+  setProjectState(db, "selectedSessionId", input.selectedSessionId ?? null);
+}
+
 async function assertProjectDatabaseExists(projectDirectory: string): Promise<void> {
   await access(path.join(projectDirectory, PROJECT_DATABASE_NAME));
 }
@@ -347,6 +391,7 @@ function initializeSchema(db: DatabaseSync): void {
 
   ensureProjectsNameColumn(db);
   ensureImageSessionsGenerationModeColumn(db);
+  migrateLegacyImageSessionIds(db);
 
   const projectCount = db.prepare("select count(*) as count from projects").get() as { count: number };
   if (projectCount.count === 0) {
@@ -450,19 +495,134 @@ function mapMessageRow(row: ChatMessageRow): PersistedImageSessionChatMessage {
   });
 }
 
-function getNextImageIndex(db: DatabaseSync): number {
-  const row = db.prepare("select id from image_sessions").all() as Array<{ id: string }>;
-  const max = row.reduce((highest, current) => {
-    const match = /^img-(\d+)$/.exec(current.id);
-    return match ? Math.max(highest, Number(match[1])) : highest;
-  }, 0);
-
-  return max + 1;
-}
-
 function getNextSortOrder(db: DatabaseSync): number {
   const row = db.prepare("select coalesce(max(sort_order), -1) + 1 as next from image_sessions").get() as { next: number };
   return row.next;
+}
+
+function createPersistedImageSessionId(): string {
+  return `sess_${randomBytes(10).toString("hex")}`;
+}
+
+function createUniquePersistedSessionId(existingIds: Set<string>, makeSessionId: (() => string) | undefined): string {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const id = (makeSessionId?.() ?? createPersistedImageSessionId()).trim();
+
+    if (id && !existingIds.has(id)) {
+      existingIds.add(id);
+      return id;
+    }
+  }
+
+  let index = existingIds.size + 1;
+  let fallbackId = `sess_fallback_${index}`;
+  while (existingIds.has(fallbackId)) {
+    index += 1;
+    fallbackId = `sess_fallback_${index}`;
+  }
+
+  existingIds.add(fallbackId);
+  return fallbackId;
+}
+
+function migrateLegacyImageSessionIds(db: DatabaseSync): void {
+  const rows = db.prepare("select id from image_sessions order by sort_order asc").all() as Array<{ id: string }>;
+  const existingIds = new Set(rows.map((row) => row.id));
+  const idMap = new Map<string, string>();
+
+  for (const row of rows) {
+    if (!LEGACY_SESSION_ID_PATTERN.test(row.id)) {
+      continue;
+    }
+
+    const nextId = createUniquePersistedSessionId(existingIds, undefined);
+    idMap.set(row.id, nextId);
+  }
+
+  if (idMap.size === 0) {
+    return;
+  }
+
+  const foreignKeysEnabled = getForeignKeysEnabled(db);
+  if (foreignKeysEnabled) {
+    db.exec("pragma foreign_keys = off");
+  }
+
+  db.exec("begin immediate transaction");
+  try {
+    for (const [oldId, newId] of idMap) {
+      db.prepare("update image_sessions set id = ? where id = ?").run(newId, oldId);
+      db.prepare("update chat_messages set session_id = ? where session_id = ?").run(newId, oldId);
+    }
+
+    if (tableExists(db, "generation_jobs")) {
+      for (const [oldId, newId] of idMap) {
+        db.prepare("update generation_jobs set session_id = ? where session_id = ?").run(newId, oldId);
+      }
+    }
+
+    const selectedSessionId = getProjectState(db, "selectedSessionId");
+    if (selectedSessionId && idMap.has(selectedSessionId)) {
+      setProjectState(db, "selectedSessionId", idMap.get(selectedSessionId) ?? selectedSessionId);
+    }
+
+    const projectManagerStateJson = getProjectState(db, "projectManagerState");
+    const migratedProjectManagerState = migrateProjectManagerStateSessionIds(projectManagerStateJson, idMap);
+    if (migratedProjectManagerState) {
+      setProjectState(db, "projectManagerState", migratedProjectManagerState);
+    }
+
+    db.exec("commit");
+  } catch (error) {
+    db.exec("rollback");
+    throw error;
+  } finally {
+    if (foreignKeysEnabled) {
+      db.exec("pragma foreign_keys = on");
+    }
+  }
+}
+
+function tableExists(db: DatabaseSync, tableName: string): boolean {
+  const row = db.prepare("select name from sqlite_master where type = 'table' and name = ?").get(tableName) as { name: string } | undefined;
+  return Boolean(row);
+}
+
+function getForeignKeysEnabled(db: DatabaseSync): boolean {
+  const row = db.prepare("pragma foreign_keys").get() as { foreign_keys: number } | undefined;
+  return row?.foreign_keys === 1;
+}
+
+function migrateProjectManagerStateSessionIds(value: string | null, idMap: Map<string, string>): string | null {
+  if (!value) {
+    return null;
+  }
+
+  let parsed: ProjectManagerState;
+  try {
+    parsed = JSON.parse(value) as ProjectManagerState;
+  } catch {
+    return null;
+  }
+
+  const nextState: ProjectManagerState = {
+    ...parsed,
+    plans: (parsed.plans ?? []).map((plan) => ({
+      ...plan,
+      commands: (plan.commands ?? []).map((command) => ({
+        ...command,
+        ...(command.sourceSessionId ? { sourceSessionId: idMap.get(command.sourceSessionId) ?? command.sourceSessionId } : {}),
+        targetSessionId: idMap.get(command.targetSessionId) ?? command.targetSessionId
+      })),
+      reports: (plan.reports ?? []).map((report) => ({
+        ...report,
+        targetSessionId: idMap.get(report.targetSessionId) ?? report.targetSessionId
+      })),
+      targetSessionIds: (plan.targetSessionIds ?? []).map((sessionId) => idMap.get(sessionId) ?? sessionId)
+    }))
+  };
+
+  return JSON.stringify(nextState);
 }
 
 function getProjectState(db: DatabaseSync, key: string): string | null {

@@ -26,7 +26,7 @@ describe("startup workspace UI", () => {
 
   test("app closes the project list whenever a project snapshot becomes active", () => {
     const source = readProjectFile("src/App.tsx");
-    const applySnapshotBody = source.match(/function applyProjectSnapshot\(snapshot: ProjectSnapshot\): void \{(?<body>[\s\S]*?)\n  \}/)
+    const applySnapshotBody = source.match(/function applyProjectSnapshot\([^)]*snapshot: ProjectSnapshot[\s\S]*?\): void \{(?<body>[\s\S]*?)\n  \}/)
       ?.groups?.body;
 
     expect(applySnapshotBody).toContain("setIsProjectListOpen(false)");

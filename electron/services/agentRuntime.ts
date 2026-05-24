@@ -28,6 +28,7 @@ export interface CodingAgentSession {
   };
   getLastAssistantText?: () => string | undefined;
   messages?: unknown[];
+  abort?: () => Promise<void>;
   prompt: (text: string, options?: Record<string, unknown>) => Promise<void>;
   subscribe: (listener: (event: unknown) => void) => () => void;
 }
@@ -57,6 +58,7 @@ export interface AgentRuntime {
   descriptor: AgentSessionDescriptor;
   dispose: () => void;
   getLastAssistantText: () => string | undefined;
+  abort: () => Promise<void>;
   prompt: (text: string) => Promise<void>;
   subscribe: (listener: (event: unknown) => void) => () => void;
 }
@@ -221,6 +223,9 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       session.dispose?.();
     },
     getLastAssistantText: () => getLastAssistantText(session),
+    abort: async () => {
+      await session.abort?.();
+    },
     prompt: (text) => session.prompt(text),
     subscribe: (listener) => {
       const unsubscribe = session.subscribe(listener);

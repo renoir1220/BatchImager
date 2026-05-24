@@ -1,4 +1,3 @@
-import path from "node:path";
 import { normalizeGenerationSizeValue } from "../generationSizes";
 import type { TuziLlmApiConfig } from "./localConfig";
 import type { AppLogger } from "./appLogger";
@@ -12,6 +11,7 @@ import {
   MISSING_REFERENCE_IMAGE_REPLY,
   shouldReportMissingReferenceImage
 } from "./referenceAttachmentGuard";
+import { isPathInsideOrSame, normalizePathForComparison, resolvePathForComparison } from "./pathUtils";
 
 export type VisibleChatRole = "user" | "assistant";
 
@@ -48,6 +48,7 @@ export interface ImageToolChatInput {
 
 export interface ImageToolRequest {
   imagePath: string;
+  mode: "edit" | "generate";
   prompt: string;
   referenceImagePaths?: string[];
   sessionId: string;
@@ -64,6 +65,7 @@ interface ImageSessionAgentDeps {
   generateImage: (request: ImageToolRequest) => Promise<ProductImageResult>;
   logger?: AppLogger;
   registry?: AgentRuntimeRegistry;
+  signal?: AbortSignal;
 }
 
 // 工具调用是异步发生的，工具实例由首轮 factory 创建并被 SDK 内部持有。
@@ -75,6 +77,7 @@ interface TurnState {
   referenceImages: ReferenceImageCandidate[];
   selectedOutputSize: string | undefined;
   sessionId: string;
+  signal?: AbortSignal;
 }
 
 const turnStateByKey = new Map<string, TurnState>();
@@ -130,13 +133,16 @@ export async function runImageSessionAgent(
   // 当轮状态写入 turnState，工具在 execute 时通过 key 读到。
   turnStateByKey.set(registryKey, {
     generateImage: async (request) => {
+      throwIfAborted(deps.signal);
       generatedImage = await deps.generateImage(request);
+      throwIfAborted(deps.signal);
       return generatedImage;
     },
     imagePath: input.imagePath,
     referenceImages,
     selectedOutputSize,
-    sessionId: input.sessionId
+    sessionId: input.sessionId,
+    ...(deps.signal ? { signal: deps.signal } : {})
   });
 
   return await registry.use(
@@ -174,7 +180,7 @@ export async function runImageSessionAgent(
         ? buildFullPrompt(input, referenceImages, selectedOutputSize)
         : buildTurnPrompt(input, referenceImages, selectedOutputSize);
 
-      await runtime.prompt(promptText);
+      await promptWithAbort(runtime, promptText, deps.signal);
 
       const content = runtime.getLastAssistantText()?.trim();
       if (!content) {
@@ -200,7 +206,7 @@ export async function warmupImageSessionAgentDependencies(): Promise<void> {
 }
 
 function buildRegistryKey(projectDirectory: string, sessionId: string): string {
-  return `image-session:${path.resolve(projectDirectory).toLowerCase()}:${sessionId}`;
+  return `image-session:${normalizePathForComparison(projectDirectory)}:${sessionId}`;
 }
 
 function countUserMessages(messages: VisibleChatMessage[]): number {
@@ -211,6 +217,32 @@ function countUserMessages(messages: VisibleChatMessage[]): number {
     }
   }
   return count;
+}
+
+async function promptWithAbort(runtime: AgentRuntime, promptText: string, signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) {
+    await runtime.prompt(promptText);
+    return;
+  }
+
+  throwIfAborted(signal);
+  const handleAbort = () => {
+    void runtime.abort();
+  };
+  signal.addEventListener("abort", handleAbort, { once: true });
+
+  try {
+    await runtime.prompt(promptText);
+    throwIfAborted(signal);
+  } finally {
+    signal.removeEventListener("abort", handleAbort);
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new Error("操作已停止");
+  }
 }
 
 function createGenerateImageTool(options: {
@@ -226,11 +258,15 @@ function createGenerateImageTool(options: {
     promptSnippet: "Generate or edit the selected product image",
     promptGuidelines: [
       "When the user asks to create, regenerate, edit, restyle, remove background, or make a product image, call generate_image.",
+      "Always choose mode explicitly: use edit when the current image should be preserved or transformed; use generate only when creating a new image from scratch.",
       "Only pass size when the user selected or explicitly requested a size, orientation, 2K, 4K, or aspect ratio.",
-      "Use referenceImageIds only for the reference images the user clearly points to or truly needs."
+      "Pass referenceImageIds only for the reference images the user clearly points to or truly needs; omit or pass [] when no reference image should be sent."
     ],
     parameters: Type.Object(
       {
+        mode: Type.String({
+          description: "Use 'edit' to modify or preserve the current image. Use 'generate' to create a new image from scratch."
+        }),
         prompt: Type.String({ description: "Detailed prompt for the image generation model." }),
         referenceImageIds: Type.Optional(
           Type.Array(Type.String({ description: "Reference image id from the provided reference index." }))
@@ -239,7 +275,11 @@ function createGenerateImageTool(options: {
       },
       { additionalProperties: false }
     ),
-    async execute(_toolCallId: string, params: { prompt: string; referenceImageIds?: string[]; size?: string }) {
+    async execute(
+      _toolCallId: string,
+      params: { mode: string; prompt: string; referenceImageIds?: string[]; size?: string },
+      signal?: AbortSignal
+    ) {
       const state = turnStateByKey.get(options.registryKey);
       if (!state) {
         return {
@@ -256,15 +296,28 @@ function createGenerateImageTool(options: {
         };
       }
 
+      throwIfAborted(signal);
+      throwIfAborted(state.signal);
+      const mode = normalizeImageToolMode(params.mode);
+      if (!mode) {
+        return {
+          content: [{ type: "text", text: "generate_image mode must be either 'edit' or 'generate'." }],
+          isError: true
+        };
+      }
+
       const referenceImagePaths = selectReferenceImagePaths(params.referenceImageIds, state.referenceImages);
       const toolOutputSize = typeof params.size === "string" ? normalizeGenerationSizeValue(params.size) : undefined;
       await state.generateImage({
         imagePath: state.imagePath,
+        mode,
         prompt,
         ...(referenceImagePaths.length ? { referenceImagePaths } : {}),
         sessionId: state.sessionId,
         ...(state.selectedOutputSize ?? toolOutputSize ? { size: state.selectedOutputSize ?? toolOutputSize } : {})
       });
+      throwIfAborted(signal);
+      throwIfAborted(state.signal);
 
       return {
         content: [
@@ -311,9 +364,10 @@ function buildFullPrompt(
     "1) 需要生成或修改图片时必须调用 generate_image，不要假装已经生成。",
     "2) 不要在回复中展示本地路径、远端 URL 或下载链接。",
     "3) 不要展示隐藏推理链，只展示用户能理解的计划、进度和结果。",
-    "4) 当前图片会自动作为 generate_image 的 imagePath 输入，用户不需要重新上传。",
-    "5) 回复要自然：先简短说明你准备做什么；工具完成后总结结果；若只是讨论或澄清，不要强行生成。",
-    "6) 后续每轮我会在 [环境更新] 段告诉你最新的图片路径 / 选中分辨率 / 参考图索引；以最新一轮为准。",
+    "4) 调用 generate_image 时必须显式选择 mode：保留/改造当前图用 edit；从零创建新图才用 generate。",
+    "5) 当前图片会自动作为 edit 模式的 imagePath 输入，用户不需要重新上传。",
+    "6) 回复要自然：先简短说明你准备做什么；工具完成后总结结果；若只是讨论或澄清，不要强行生成。",
+    "7) 后续每轮我会在 [环境更新] 段告诉你最新的图片路径 / 选中分辨率 / 参考图索引；以最新一轮为准。",
     "上下文：",
     `- 当前图片路径：${input.imagePath}`
   ];
@@ -323,6 +377,11 @@ function buildFullPrompt(
   }
   if (input.context?.currentImageLabel) {
     sections.push(`- 当前编辑输入：${input.context.currentImageLabel}`);
+  }
+  if (input.generationMode === "generate") {
+    sections.push("- 本轮可能是新图占位任务：如果用户是在创建全新图片，调用 generate_image 时使用 mode:\"generate\"。");
+  } else if (input.generationMode === "edit") {
+    sections.push("- 本轮明确是编辑任务：调用 generate_image 时优先使用 mode:\"edit\"。");
   }
   if (input.context?.previousGenerationPrompt) {
     sections.push(`- 最近一次批量处理任务：${input.context.previousGenerationPrompt}`);
@@ -362,6 +421,11 @@ function buildTurnPrompt(
 
   if (input.context?.currentImageLabel) {
     sections.push(`- 当前编辑输入：${input.context.currentImageLabel}`);
+  }
+  if (input.generationMode === "generate") {
+    sections.push("- 本轮可能是新图占位任务：如果用户是在创建全新图片，调用 generate_image 时使用 mode:\"generate\"。");
+  } else if (input.generationMode === "edit") {
+    sections.push("- 本轮明确是编辑任务：调用 generate_image 时优先使用 mode:\"edit\"。");
   }
   if (selectedOutputSize) {
     sections.push(`- 本次用户已选择输出分辨率：${selectedOutputSize}；调用 generate_image 时必须使用这个 size。`);
@@ -412,7 +476,7 @@ function getReferenceImageCandidates(input: ImageToolChatInput): ReferenceImageC
 
 function selectReferenceImagePaths(value: unknown, referenceImages: ReferenceImageCandidate[]): string[] {
   if (!Array.isArray(value) || value.length === 0) {
-    return referenceImages.map((referenceImage) => referenceImage.filePath);
+    return [];
   }
 
   const byId = new Map(referenceImages.map((referenceImage) => [referenceImage.id, referenceImage.filePath]));
@@ -433,6 +497,10 @@ function selectReferenceImagePaths(value: unknown, referenceImages: ReferenceIma
   return [...selected];
 }
 
+function normalizeImageToolMode(value: unknown): "edit" | "generate" | undefined {
+  return value === "edit" || value === "generate" ? value : undefined;
+}
+
 function getLatestUserMessage(input: ImageToolChatInput): string {
   return (
     [...input.messages]
@@ -442,27 +510,14 @@ function getLatestUserMessage(input: ImageToolChatInput): string {
   );
 }
 
-const PATH_COMPARISON_IS_CASE_INSENSITIVE = process.platform === "win32" || process.platform === "darwin";
-
 function assertPathInsideProject(targetPath: string, projectDirectory: string, label: string): void {
   if (!targetPath) {
     throw new Error(`${label}为空。`);
   }
 
-  const normalizedTarget = normalizePathForCompare(path.resolve(targetPath));
-  const normalizedRoot = normalizePathForCompare(path.resolve(projectDirectory));
-
-  if (normalizedTarget === normalizedRoot) {
-    return;
-  }
-
-  if (!normalizedTarget.startsWith(`${normalizedRoot}${path.sep}`)) {
+  if (!isPathInsideOrSame(resolvePathForComparison(targetPath), resolvePathForComparison(projectDirectory))) {
     throw new Error(`${label}指向项目目录之外：${targetPath}`);
   }
-}
-
-function normalizePathForCompare(value: string): string {
-  return PATH_COMPARISON_IS_CASE_INSENSITIVE ? value.toLowerCase() : value;
 }
 
 function logPiEvent(event: unknown, context: string, logger: AppLogger | undefined): void {

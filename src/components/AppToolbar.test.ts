@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const toolbarSource = readFileSync(resolve(process.cwd(), "src/components/AppToolbar.tsx"), "utf8");
+const mainSource = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
 const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
 
 function declarationsFor(selector: string): string {
@@ -18,11 +19,14 @@ describe("AppToolbar layout", () => {
     expect(toolbarSource).toContain("MenuBarGroup");
     expect(toolbarSource).toContain("MenuBarItem");
     expect(toolbarSource).toContain("ProjectMenuButton");
-    expect(toolbarSource).toContain("ToolbarSegmentedControl");
+    expect(toolbarSource).toContain("ToolbarSliderControl");
     expect(toolbarSource).toContain("toolbar-main-actions");
     expect(toolbarSource).toContain("toolbar-view-actions");
     expect(toolbarSource).toContain("toolbar-status-actions");
-    expect(toolbarSource).toContain("toolbar-count");
+    expect(toolbarSource).toContain("toolbar-log-button");
+    expect(toolbarSource).not.toContain("toolbar-count");
+    expect(toolbarSource).not.toContain("张图片");
+    expect(toolbarSource).not.toContain("等待导入");
   });
 
   it("does not expose unavailable batch or overflow actions", () => {
@@ -59,5 +63,15 @@ describe("AppToolbar layout", () => {
 
     expect(declarations).toContain("width: 0");
     expect(declarations).not.toContain("width: 66px");
+  });
+
+  it("reserves titlebar control space on macOS through toolbar padding", () => {
+    expect(styles).toContain(':root[data-platform="darwin"]');
+    expect(declarationsFor(".app-toolbar")).toContain("var(--macos-titlebar-control-space)");
+  });
+
+  it("pins macOS traffic lights to the toolbar control axis", () => {
+    expect(mainSource).toContain("MACOS_TRAFFIC_LIGHT_POSITION");
+    expect(mainSource).toContain("trafficLightPosition");
   });
 });

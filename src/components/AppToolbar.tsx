@@ -1,9 +1,8 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { OsMenu, OsMenuItem } from "./os";
 
 interface AppToolbarProps {
   columns: number;
-  imageCount: number;
   logCount?: number;
   onColumnsChange: (columns: number) => void;
   onNewProject: () => void;
@@ -15,7 +14,6 @@ interface AppToolbarProps {
 
 export function AppToolbar({
   columns,
-  imageCount,
   logCount = 0,
   onColumnsChange,
   onNewProject,
@@ -47,7 +45,7 @@ export function AppToolbar({
         <MenuBarDivider />
 
         <MenuBarGroup className="toolbar-view-actions">
-          <ToolbarSegmentedControl label="列数" value={columns} values={[2, 3, 4, 5, 6]} onChange={onColumnsChange} />
+          <ToolbarSliderControl label="列数" value={columns} min={2} max={6} onChange={onColumnsChange} />
         </MenuBarGroup>
       </MenuBar>
 
@@ -56,12 +54,8 @@ export function AppToolbar({
       <MenuBar ariaLabel="状态操作">
         <MenuBarGroup className="toolbar-status-actions">
           {onOpenLogs ? (
-            <MenuBarItem onClick={onOpenLogs}>
-              日志{logCount > 0 ? ` ${logCount}` : ""}
-            </MenuBarItem>
+            <LogButton count={logCount} onClick={onOpenLogs} />
           ) : null}
-
-          <span className="toolbar-count">{imageCount > 0 ? `${imageCount} 张图片` : "等待导入"}</span>
         </MenuBarGroup>
       </MenuBar>
     </header>
@@ -100,11 +94,15 @@ interface ProjectMenuButtonProps {
 }
 
 function ProjectMenuButton({ onOpenProject, projectLabel }: ProjectMenuButtonProps) {
+  const label = projectLabel ?? "未打开项目";
+
   return (
     <OsMenu
-      triggerClassName="toolbar-button toolbar-project-label project-menu-button"
       trigger={
-        <span>{projectLabel ?? "未打开项目"}</span>
+        <button className="toolbar-button toolbar-project-trigger project-menu-button" type="button" title={label}>
+          <span className="toolbar-project-name">{label}</span>
+          <span className="toolbar-project-chevron" aria-hidden="true" />
+        </button>
       }
     >
       <OsMenuItem onSelect={onOpenProject}>打开项目</OsMenuItem>
@@ -127,30 +125,59 @@ function MenuBarItem({ children, disabled = false, onClick, variant = "default" 
   );
 }
 
-interface ToolbarSegmentedControlProps {
-  label: string;
-  onChange: (value: number) => void;
-  value: number;
-  values: number[];
+interface LogButtonProps {
+  count: number;
+  onClick: () => void;
 }
 
-function ToolbarSegmentedControl({ label, onChange, value, values }: ToolbarSegmentedControlProps) {
+function LogButton({ count, onClick }: LogButtonProps) {
   return (
-    <div className="toolbar-segmented-control" role="group" aria-label={label}>
-      <span>{label}</span>
-      <div className="toolbar-segmented-options">
-        {values.map((item) => (
-          <button
-            type="button"
-            className={item === value ? "selected" : ""}
-            key={item}
-            aria-pressed={item === value}
-            onClick={() => onChange(item)}
-          >
-            {item}
-          </button>
-        ))}
-      </div>
-    </div>
+    <button className="toolbar-button toolbar-log-button" type="button" aria-label={`打开日志，${count} 条`} title="打开日志" onClick={onClick}>
+      <LogIcon />
+      <span className="toolbar-log-count">{count}</span>
+    </button>
+  );
+}
+
+function LogIcon() {
+  return (
+    <svg className="toolbar-log-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M4.5 3.5h7" />
+      <path d="M4.5 6.5h7" />
+      <path d="M4.5 9.5h4" />
+      <rect x="2.75" y="1.75" width="10.5" height="12.5" rx="2" />
+    </svg>
+  );
+}
+
+interface ToolbarSliderControlProps {
+  label: string;
+  max: number;
+  min: number;
+  onChange: (value: number) => void;
+  value: number;
+}
+
+function ToolbarSliderControl({ label, max, min, onChange, value }: ToolbarSliderControlProps) {
+  const clampedValue = Math.min(max, Math.max(min, value));
+  const fillPercentage = ((clampedValue - min) / (max - min)) * 100;
+
+  return (
+    <label className="toolbar-slider-control">
+      <span className="toolbar-slider-label">{label}</span>
+      <input
+        className="toolbar-slider"
+        type="range"
+        min={min}
+        max={max}
+        step={1}
+        value={clampedValue}
+        aria-label={label}
+        aria-valuetext={`${clampedValue} 列`}
+        style={{ "--toolbar-slider-fill": `${fillPercentage}%` } as CSSProperties}
+        onChange={(event) => onChange(Number(event.currentTarget.value))}
+      />
+      <output className="toolbar-slider-value">{clampedValue}</output>
+    </label>
   );
 }

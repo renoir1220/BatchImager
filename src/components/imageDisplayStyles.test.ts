@@ -41,18 +41,9 @@ describe("image display styles", () => {
     expect(declarations).not.toContain("object-fit: cover");
   });
 
-  it("keeps the session preview at the image's original ratio", () => {
-    const frameDeclarations = declarationsFor(".session-preview-frame");
-    const declarations = declarationsFor(".session-preview");
-
-    expect(frameDeclarations).toContain("height: clamp(");
-    expect(frameDeclarations).toContain("overflow: hidden");
-    expect(declarations).toContain("object-fit: contain");
-    expect(declarations).toContain("max-height: 100%");
-    expect(declarations).toContain("width: 100%");
-    expect(declarations).toContain("height: 100%");
-    expect(declarations).not.toContain("aspect-ratio:");
-    expect(declarations).not.toContain("object-fit: cover");
+  it("does not reserve a pinned original preview above the image chat", () => {
+    expect(declarationsFor(".session-preview-frame")).toBe("");
+    expect(declarationsFor(".session-preview")).toBe("");
   });
 
   it("keeps chat image attachments transparent instead of painting a preview background", () => {

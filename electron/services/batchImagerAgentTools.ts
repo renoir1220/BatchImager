@@ -24,12 +24,16 @@ export interface AgentToolResult {
   isError?: boolean;
 }
 
+export type BatchImagerAgentToolRisk = "read" | "safe-write" | "destructive" | "external-write";
+
 export interface BatchImagerAgentTool {
   description: string;
   execute: (toolCallId: string, params: Record<string, unknown>) => Promise<AgentToolResult>;
   label: string;
   name: string;
   parameters: Record<string, unknown>;
+  requiresPreflight?: boolean;
+  risk?: BatchImagerAgentToolRisk;
 }
 
 interface CreateRunProjectCommandToolOptions {
@@ -51,6 +55,8 @@ export function createRunProjectCommandTool(options: CreateRunProjectCommandTool
   return {
     name: "run_project_command",
     label: "运行项目命令",
+    risk: "safe-write",
+    requiresPreflight: false,
     description:
       "Run a local command for the current BatchImager project. Broad project commands are allowed, but catastrophic system actions and protected image mutations are blocked.",
     parameters: {

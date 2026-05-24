@@ -21,8 +21,14 @@ import {
 } from "./imageSessions";
 
 describe("image sessions", () => {
+  it("creates opaque session ids by default", () => {
+    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG"]);
+
+    expect(sessions[0]?.id).toMatch(/^sess_[a-zA-Z0-9]+/);
+  });
+
   it("creates stable image sessions from file paths", () => {
-    const sessions = createImageSessions([
+    const sessions = createTestImageSessions([
       "C:/shots/IMG_0001.JPG",
       "C:/shots/nested/IMG_0002.png"
     ]);
@@ -48,13 +54,13 @@ describe("image sessions", () => {
   });
 
   it("selects the first session when there is no current selection", () => {
-    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG"]);
+    const sessions = createTestImageSessions(["C:/shots/IMG_0001.JPG"]);
 
     expect(getInitialSelectedSessionId(sessions, null)).toBe("img-1");
   });
 
   it("preserves an existing selected session when it still exists", () => {
-    const sessions = createImageSessions([
+    const sessions = createTestImageSessions([
       "C:/shots/IMG_0001.JPG",
       "C:/shots/IMG_0002.JPG"
     ]);
@@ -63,10 +69,10 @@ describe("image sessions", () => {
   });
 
   it("appends only new image paths and keeps existing session state", () => {
-    const existing = createImageSessions(["C:/shots/IMG_0001.JPG"]);
+    const existing = createTestImageSessions(["C:/shots/IMG_0001.JPG"]);
     existing[0].status = "completed";
 
-    const sessions = appendImageSessions(existing, [
+    const sessions = appendTestImageSessions(existing, [
       "c:/shots/img_0001.jpg",
       "C:/shots/IMG_0002.JPG"
     ]);
@@ -92,7 +98,7 @@ describe("image sessions", () => {
   });
 
   it("marks a session as generating without mutating other sessions", () => {
-    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG", "C:/shots/IMG_0002.JPG"]);
+    const sessions = createTestImageSessions(["C:/shots/IMG_0001.JPG", "C:/shots/IMG_0002.JPG"]);
 
     expect(markSessionGenerating(sessions, "img-2", "室内商品图")).toEqual([
       {
@@ -117,7 +123,7 @@ describe("image sessions", () => {
   });
 
   it("adds the batch prompt to each matching session context when generation starts", () => {
-    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG"]);
+    const sessions = createTestImageSessions(["C:/shots/IMG_0001.JPG"]);
 
     expect(markSessionGenerating(sessions, "img-1", "生成白底电商主图", "batch-1", ["C:/refs/room.png"], "C:/shots/IMG_0001.JPG")).toEqual([
       {
@@ -143,7 +149,7 @@ describe("image sessions", () => {
   });
 
   it("adds a project manager command context before worker generation starts", () => {
-    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG"]);
+    const sessions = createTestImageSessions(["C:/shots/IMG_0001.JPG"]);
 
     expect(
       markSessionProjectCommand(
@@ -180,7 +186,7 @@ describe("image sessions", () => {
   });
 
   it("freezes the batch input image snapshot even after a new result is generated", () => {
-    const sessions = applyGeneratedImageResult(createImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/first.png");
+    const sessions = applyGeneratedImageResult(createTestImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/first.png");
     const generating = markSessionGenerating(
       sessions,
       "img-1",
@@ -208,7 +214,7 @@ describe("image sessions", () => {
   });
 
   it("keeps Esse prompt reference images when dispatching a task", () => {
-    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG"]);
+    const sessions = createTestImageSessions(["C:/shots/IMG_0001.JPG"]);
     const result = markSessionEsseTask(
       sessions,
       "img-1",
@@ -229,7 +235,7 @@ describe("image sessions", () => {
   });
 
   it("applies generated output path to the matching session", () => {
-    const sessions = markSessionGenerating(createImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "室内商品图");
+    const sessions = markSessionGenerating(createTestImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "室内商品图");
 
     expect(applyGeneratedImageResult(sessions, "img-1", "C:/generated/out.png", "result-1")).toEqual([
       {
@@ -252,7 +258,7 @@ describe("image sessions", () => {
 
   it("keeps every generated output in history while using the newest image", () => {
     const sessions = applyGeneratedImageResult(
-      applyGeneratedImageResult(createImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/first.png"),
+      applyGeneratedImageResult(createTestImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/first.png"),
       "img-1",
       "C:/generated/second.png"
     );
@@ -263,7 +269,7 @@ describe("image sessions", () => {
 
   it("uses a chosen historical image as the next generation source", () => {
     const sessions = applyGeneratedImageResult(
-      applyGeneratedImageResult(createImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/first.png"),
+      applyGeneratedImageResult(createTestImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/first.png"),
       "img-1",
       "C:/generated/second.png"
     );
@@ -276,7 +282,7 @@ describe("image sessions", () => {
   });
 
   it("can return to the original image as the next generation source", () => {
-    const sessions = applyGeneratedImageResult(createImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/out.png");
+    const sessions = applyGeneratedImageResult(createTestImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/out.png");
 
     const chosen = applySessionImageChoice(sessions, "img-1", "C:/shots/IMG_0001.JPG");
 
@@ -286,7 +292,7 @@ describe("image sessions", () => {
   });
 
   it("toggles the workspace cell between original and current image without changing the generation source", () => {
-    const sessions = applyGeneratedImageResult(createImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/out.png");
+    const sessions = applyGeneratedImageResult(createTestImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/out.png");
 
     const showingOriginal = toggleSessionListImageSource(sessions, "img-1");
     const showingCurrentAgain = toggleSessionListImageSource(showingOriginal, "img-1");
@@ -298,7 +304,7 @@ describe("image sessions", () => {
 
   it("moves one image session before another without changing session state", () => {
     const sessions = applyGeneratedImageResult(
-      createImageSessions(["C:/shots/IMG_0001.JPG", "C:/shots/IMG_0002.JPG", "C:/shots/IMG_0003.JPG"]),
+      createTestImageSessions(["C:/shots/IMG_0001.JPG", "C:/shots/IMG_0002.JPG", "C:/shots/IMG_0003.JPG"]),
       "img-3",
       "C:/generated/out.png"
     );
@@ -315,7 +321,7 @@ describe("image sessions", () => {
   });
 
   it("moves a dragged image session to a later target position", () => {
-    const sessions = createImageSessions([
+    const sessions = createTestImageSessions([
       "C:/shots/IMG_0001.JPG",
       "C:/shots/IMG_0002.JPG",
       "C:/shots/IMG_0003.JPG"
@@ -327,7 +333,7 @@ describe("image sessions", () => {
   });
 
   it("returns the same order when image session move ids are not usable", () => {
-    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG", "C:/shots/IMG_0002.JPG"]);
+    const sessions = createTestImageSessions(["C:/shots/IMG_0001.JPG", "C:/shots/IMG_0002.JPG"]);
 
     expect(moveImageSession(sessions, "img-1", "img-1")).toBe(sessions);
     expect(moveImageSession(sessions, "img-404", "img-1")).toBe(sessions);
@@ -335,7 +341,7 @@ describe("image sessions", () => {
   });
 
   it("removes the selected image and selects the next image", () => {
-    const sessions = createImageSessions([
+    const sessions = createTestImageSessions([
       "C:/shots/IMG_0001.JPG",
       "C:/shots/IMG_0002.JPG",
       "C:/shots/IMG_0003.JPG"
@@ -365,7 +371,7 @@ describe("image sessions", () => {
   });
 
   it("selects the previous image when removing the last image", () => {
-    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG", "C:/shots/IMG_0002.JPG"]);
+    const sessions = createTestImageSessions(["C:/shots/IMG_0001.JPG", "C:/shots/IMG_0002.JPG"]);
 
     expect(removeImageSession(sessions, "img-2").selectedSessionId).toBe("img-1");
   });
@@ -375,7 +381,7 @@ describe("image sessions", () => {
   });
 
   it("keeps the original image visible when generation fails", () => {
-    const sessions = markSessionGenerating(createImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "室内商品图");
+    const sessions = markSessionGenerating(createTestImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "室内商品图");
 
     expect(applySessionGenerationError(sessions, "img-1", "网络错误")).toEqual([
       {
@@ -392,7 +398,7 @@ describe("image sessions", () => {
   });
 
   it("adds a user chat message and marks the session as sending", () => {
-    const sessions = createImageSessions(["C:/shots/IMG_0001.JPG"]);
+    const sessions = createTestImageSessions(["C:/shots/IMG_0001.JPG"]);
 
     expect(addSessionUserMessage(sessions, "img-1", "帮我生成白底图", "m-1")).toEqual([
       {
@@ -408,7 +414,7 @@ describe("image sessions", () => {
   });
 
   it("adds assistant chat output and applies generated image paths", () => {
-    const sessions = addSessionUserMessage(createImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "生成白底图", "m-1");
+    const sessions = addSessionUserMessage(createTestImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "生成白底图", "m-1");
 
     expect(
       applySessionChatSuccess(
@@ -439,8 +445,56 @@ describe("image sessions", () => {
     ]);
   });
 
+  it("promotes a completed new-image placeholder into the original image", () => {
+    const sessions = [
+      {
+        chatMessages: [],
+        chatStatus: "idle" as const,
+        fileName: "img-2-placeholder.png",
+        filePath: "C:/project/images/generated/img-2-placeholder.png",
+        generationMode: "generate" as const,
+        id: "img-2",
+        status: "queued" as const
+      }
+    ];
+
+    const completed = applySessionChatSuccess(
+      sessions,
+      "img-2",
+      {
+        content: "已生成新图。",
+        generatedFilePath: "C:/project/images/generated/img-2-2026.png"
+      },
+      "m-1"
+    );
+
+    expect(completed).toEqual([
+      {
+        chatMessages: [
+          {
+            id: "m-1",
+            role: "assistant",
+            content: "已生成新图。",
+            generatedFilePath: "C:/project/images/generated/img-2-2026.png"
+          }
+        ],
+        chatStatus: "idle",
+        errorMessage: undefined,
+        fileName: "img-2-2026.png",
+        filePath: "C:/project/images/generated/img-2-2026.png",
+        generatedFilePath: undefined,
+        generatedFilePaths: ["C:/project/images/generated/img-2-2026.png"],
+        generationMode: undefined,
+        id: "img-2",
+        showOriginalInList: false,
+        status: "completed"
+      }
+    ]);
+    expect(getSessionGenerationSourcePath(completed[0])).toBe("C:/project/images/generated/img-2-2026.png");
+  });
+
   it("adds chat errors without dropping existing messages", () => {
-    const sessions = addSessionUserMessage(createImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "生成白底图", "m-1");
+    const sessions = addSessionUserMessage(createTestImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "生成白底图", "m-1");
 
     expect(applySessionChatError(sessions, "img-1", "模型调用失败", "m-2")).toEqual([
       {
@@ -458,3 +512,13 @@ describe("image sessions", () => {
     ]);
   });
 });
+
+function createTestImageSessions(filePaths: string[]) {
+  let nextId = 1;
+  return createImageSessions(filePaths, () => `img-${nextId++}`);
+}
+
+function appendTestImageSessions(existing: ReturnType<typeof createImageSessions>, incomingPaths: string[]) {
+  let nextId = existing.length + 1;
+  return appendImageSessions(existing, incomingPaths, () => `img-${nextId++}`);
+}

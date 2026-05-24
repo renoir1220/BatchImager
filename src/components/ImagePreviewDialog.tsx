@@ -42,6 +42,7 @@ export function ImagePreviewDialog({
   const [dragPointerId, setDragPointerId] = useState<number | null>(null);
   const [imageDimensions, setImageDimensions] = useState<ImagePreviewDimensions | null>(null);
   const [stageSize, setStageSize] = useState<ImagePreviewDimensions | null>(null);
+  const [isImageReady, setIsImageReady] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const selectedImage = images.find((image) => image.path === selectedPath) ?? images[0];
@@ -60,6 +61,7 @@ export function ImagePreviewDialog({
     setTransform(INITIAL_PREVIEW_TRANSFORM);
     setDragPointerId(null);
     setImageDimensions(null);
+    setIsImageReady(false);
   }, [selectedPath]);
 
   useLayoutEffect(() => {
@@ -99,7 +101,7 @@ export function ImagePreviewDialog({
     };
   }, [isFullscreen]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!imageDimensions || !stageSize) {
       return;
     }
@@ -112,6 +114,7 @@ export function ImagePreviewDialog({
         stageWidth: stageSize.width
       })
     );
+    setIsImageReady(true);
   }, [imageDimensions, selectedPath, stageSize]);
 
   function handleWheel(event: WheelEvent<HTMLDivElement>): void {
@@ -165,15 +168,15 @@ export function ImagePreviewDialog({
 
       if (stageRect && stageRect.width > 0 && stageRect.height > 0) {
         const nextStageSize = { height: stageRect.height, width: stageRect.width };
+        const nextTransform = fitPreviewTransform({
+          imageHeight: nextDimensions.height,
+          imageWidth: nextDimensions.width,
+          stageHeight: nextStageSize.height,
+          stageWidth: nextStageSize.width
+        });
         setStageSize(nextStageSize);
-        setTransform(
-          fitPreviewTransform({
-            imageHeight: nextDimensions.height,
-            imageWidth: nextDimensions.width,
-            stageHeight: nextStageSize.height,
-            stageWidth: nextStageSize.width
-          })
-        );
+        setTransform(nextTransform);
+        setIsImageReady(true);
       }
     }
   }
@@ -267,6 +270,7 @@ export function ImagePreviewDialog({
         onWheel={handleWheel}
       >
         <img
+          className={isImageReady ? "ready" : "loading"}
           src={selectedUrl}
           alt={`${title} ${selectedImage.label}`}
           draggable={false}

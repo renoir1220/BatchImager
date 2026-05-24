@@ -1,9 +1,18 @@
 export interface GenerateImageRequest {
   imagePath: string;
+  operationId?: string;
   prompt: string;
   referenceImagePaths?: string[];
   sessionId: string;
   size?: string;
+}
+
+export interface CancelOperationRequest {
+  operationId: string;
+}
+
+export interface CancelOperationResponse {
+  canceled: boolean;
 }
 
 export interface CopyImageToClipboardRequest {
@@ -47,6 +56,7 @@ export interface SendChatMessageRequest {
   generationMode?: ImageGenerationMode;
   imagePath: string;
   messages: ChatHistoryMessage[];
+  operationId?: string;
   outputSize?: string;
   referenceImages?: ChatReferenceImage[];
   referenceImagePaths?: string[];
@@ -131,6 +141,7 @@ export interface ProjectManagerMessage {
   id: string;
   role: ProjectManagerMessageRole;
   content: string;
+  contextType?: "esse-tool-call";
   planId?: string;
   referenceFilePaths?: string[];
 }
@@ -194,32 +205,12 @@ export interface ProjectManagerPlanSession {
   id: string;
 }
 
-export interface CreateProjectManagerPlanRequest {
-  outputSize?: string;
-  prompt: string;
-  referenceImagePaths?: string[];
-  sessions: ProjectManagerPlanSession[];
-}
-
-export interface CreateProjectManagerPlanResponse {
-  plan: BatchPlan;
-}
-
 export interface EsseAgentHistoryMessage {
   role: "user" | "assistant";
   content: string;
 }
 
 export type EssePersona = "old-ox" | "excellent-employee" | "question-girl" | "robot";
-
-export interface EsseImageRequest {
-  id: string;
-  mode: "edit" | "generate";
-  prompt: string;
-  size?: string;
-  sourceSessionId?: string;
-  target: "existing" | "new";
-}
 
 export interface CreatePlaceholderImageRequest {
   sessionId: string;
@@ -230,23 +221,43 @@ export interface CreatePlaceholderImageResponse {
   filePath: string;
 }
 
-export interface EsseFileTask {
-  destination: "desktop";
-  fileName?: string;
-  id: string;
-  source: "generated-images";
-  type: "package";
+export type EssePreflightToolName = "generate_image" | "run_batch_generation" | "package_generated_images";
+
+export interface EssePreflightCommand {
+  displayLabel?: string;
+  mode?: "edit" | "generate";
+  prompt?: string;
+  referenceImageIds?: string[];
+  size?: string;
+  target?: { fileName?: string; sessionId?: string; type: "existing" | "new" };
 }
 
-export interface EsseFileResult {
-  id: string;
-  outputPath: string;
-  type: "package";
+export interface EssePreflightPayload {
+  commands: EssePreflightCommand[];
+  estimatedApiCalls: number;
+  estimatedDurationSeconds?: number;
+  tool: EssePreflightToolName;
+}
+
+export interface EssePreflightRequest {
+  payload: EssePreflightPayload;
+  requestId: string;
+}
+
+export interface EssePreflightResponse {
+  decision: "execute" | "cancel";
+  detail?: string;
+  requestId: string;
+}
+
+export interface EssePreflightResponseAck {
+  accepted: boolean;
 }
 
 export interface SendEsseMessageRequest {
   generationMode?: ImageGenerationMode;
   messages: EsseAgentHistoryMessage[];
+  operationId?: string;
   outputSize?: string;
   persona?: EssePersona;
   referenceImagePaths?: string[];
@@ -255,10 +266,6 @@ export interface SendEsseMessageRequest {
 }
 
 export interface SendEsseMessageResponse {
-  fileResults?: EsseFileResult[];
-  fileTasks?: EsseFileTask[];
-  imageRequests?: EsseImageRequest[];
-  plan?: BatchPlan;
   reply: string;
 }
 

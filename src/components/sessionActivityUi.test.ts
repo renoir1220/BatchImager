@@ -56,7 +56,7 @@ describe("session panel resizing UI", () => {
     expect(appSource).toContain("aria-label=\"调整会话栏宽度\"");
     expect(appSource).toContain("--session-panel-width");
     expect(styles).toContain(".session-resize-handle");
-    expect(styles).toContain("grid-template-columns: minmax(0, 1fr) 6px var(--session-panel-width");
+    expect(styles).toContain("grid-template-columns: minmax(0, 1fr) 1px var(--session-panel-width");
     expect(styles).toContain("grid-row: 1 / 3");
   });
 });

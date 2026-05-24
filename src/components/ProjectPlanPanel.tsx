@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { DragEvent, FormEvent, KeyboardEvent, MouseEvent } from "react";
-import type { AppLogEntry } from "../../electron/ipcTypes";
+import type { AppLogEntry, EssePreflightRequest, EssePreflightResponse } from "../../electron/ipcTypes";
 import type {
   BatchPlan,
   BatchPlanReferenceImage,
@@ -19,22 +19,29 @@ import { ComposerReferenceStrip } from "./ComposerReferenceStrip";
 import type { PreviewImage } from "./ImagePreviewDialog";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { MessageActions } from "./MessageActions";
+import { shouldSubmitComposerOnEnter } from "./composerKeyEvents";
 import { OsSelect, type OsSelectOption } from "./os";
+import { useAutoScrollToThreadEnd } from "./useAutoScrollToThreadEnd";
 import { usePastedReferenceImages } from "./usePastedReferenceImages";
 import { hasWorkspaceImageDrag, readWorkspaceImageDragPayload } from "./workspaceImageDrag";
 import {
   canRunPlanCommands,
   type ProjectPlanExecutionMode
 } from "../domain/projectPlanExecution";
+import { getSessionGenerationSourcePath } from "../domain/imageSessions";
+import type { ImageSession } from "../types/image";
 
 interface ProjectPlanPanelProps {
   activityLogs: AppLogEntry[];
+  imageSessions?: ImageSession[];
   isCreatingPlan: boolean;
   projectManagerState: ProjectManagerState;
   onExecutePlan: (planId: string, mode: ProjectPlanExecutionMode) => void;
   onCopyImage: (imagePath: string) => void;
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
+  onResolvePreflight: (requestId: string, decision: EssePreflightResponse["decision"]) => void;
   onSendMessage: (content: string, outputSize?: string, referenceImagePaths?: string[], persona?: EssePersona) => void;
+  onStopWork: () => void;
 }
 
 const ESSE_PERSONA_OPTIONS: OsSelectOption<EssePersona>[] = [
@@ -45,12 +52,15 @@ const ESSE_PERSONA_OPTIONS: OsSelectOption<EssePersona>[] = [
 ];
 export function ProjectPlanPanel({
   activityLogs,
+  imageSessions = [],
   isCreatingPlan,
   projectManagerState,
   onExecutePlan,
   onCopyImage,
   onOpenImagePreview,
-  onSendMessage
+  onResolvePreflight,
+  onSendMessage,
+  onStopWork
 }: ProjectPlanPanelProps) {
   const [expandedPlanIds, setExpandedPlanIds] = useState<Set<string>>(() => new Set());
   const [collapsedPlanIds, setCollapsedPlanIds] = useState<Set<string>>(() => new Set());
@@ -59,15 +69,26 @@ export function ProjectPlanPanel({
   const [customSize, setCustomSize] = useState("");
   const [selectedPersona, setSelectedPersona] = useState<EssePersona>("excellent-employee");
   const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
+  const threadRef = useRef<HTMLDivElement>(null);
   const pastedReferences = usePastedReferenceImages();
   const isAgentWorking = isCreatingPlan || projectManagerState.plans.some((plan) => plan.status === "running");
   const currentActivityLog = activityLogs.at(-1);
   const canSend = Boolean(
-    message.trim() && !isCreatingPlan && !pastedReferences.isSavingReference && isGenerationSizeSelectionValid(selectedSize, customSize)
+    message.trim() && !pastedReferences.isSavingReference && isGenerationSizeSelectionValid(selectedSize, customSize)
   );
+  const threadContentSignature = useMemo(
+    () => getProjectThreadContentSignature(projectManagerState, currentActivityLog?.message, isCreatingPlan),
+    [currentActivityLog?.message, isCreatingPlan, projectManagerState]
+  );
+  useAutoScrollToThreadEnd(threadRef, threadContentSignature);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
+
+    if (isAgentWorking) {
+      onStopWork();
+      return;
+    }
 
     if (!canSend) {
       return;
@@ -84,7 +105,7 @@ export function ProjectPlanPanel({
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (shouldSubmitComposerOnEnter(event)) {
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
     }
@@ -155,7 +176,7 @@ export function ProjectPlanPanel({
       onDragOver={handleReferenceDragOver}
       onDrop={handleReferenceDrop}
     >
-      <div className="project-manager-thread">
+      <div className="project-manager-thread" ref={threadRef}>
         {projectManagerState.conversation.messages.length === 0 ? (
           <div className="thread-line muted">说明整批图片想怎么做。这里可以先讨论方向，也可以生成新图或创建待确认的批处理方案。</div>
         ) : (
@@ -194,14 +215,22 @@ export function ProjectPlanPanel({
                   {plan ? (
                     <PlanCard
                       collapsed={collapsed}
+                      imageSessions={imageSessions}
                       plan={plan}
                       onOpenImagePreview={onOpenImagePreview}
                       onExecutePlan={onExecutePlan}
                       onToggleCollapse={() => togglePlanCollapse(plan.id, collapsed)}
                     />
                   ) : null}
+                  {message.preflightRequest ? (
+                    <EssePreflightCard
+                      decision={message.preflightDecision ?? "pending"}
+                      request={message.preflightRequest}
+                      onResolve={onResolvePreflight}
+                    />
+                  ) : null}
                 </div>
-                {hasMessageContent ? <MessageActions content={message.content} tone={message.role} /> : null}
+                {hasMessageContent ? <MessageActions content={message.content} /> : null}
               </div>
             );
           })
@@ -220,24 +249,22 @@ export function ProjectPlanPanel({
           <textarea
             value={message}
             placeholder="和 Esse 讨论、生成新图或安排批处理... 可直接粘贴参考图"
-            disabled={isCreatingPlan}
             onChange={(event) => setMessage(event.target.value)}
             onKeyDown={handleComposerKeyDown}
           />
           <div className="composer-toolbar">
             <GenerationSizeControl
               customValue={customSize}
-              disabled={isCreatingPlan}
               idPrefix="esse"
               label="生成比例："
               selectedValue={selectedSize}
               onCustomValueChange={setCustomSize}
               onSelectedValueChange={setSelectedSize}
             />
-            <EssePersonaSelect disabled={isCreatingPlan} value={selectedPersona} onChange={setSelectedPersona} />
+            <EssePersonaSelect value={selectedPersona} onChange={setSelectedPersona} />
           </div>
-          <button type="submit" disabled={!canSend} aria-label="发送">
-            ↑
+          <button type="submit" disabled={isAgentWorking ? false : !canSend} aria-label={isAgentWorking ? "停止" : "发送"}>
+            {isAgentWorking ? <span className="composer-stop-icon" aria-hidden="true" /> : "↑"}
           </button>
         </form>
       </div>
@@ -301,14 +328,82 @@ function EssePersonaIcon() {
   );
 }
 
+function EssePreflightCard({
+  decision,
+  onResolve,
+  request
+}: {
+  decision: NonNullable<ProjectManagerState["conversation"]["messages"][number]["preflightDecision"]>;
+  onResolve: (requestId: string, decision: EssePreflightResponse["decision"]) => void;
+  request: EssePreflightRequest;
+}) {
+  const commandLabel = formatPreflightToolLabel(request.payload.tool);
+  const isPending = decision === "pending";
+
+  return (
+    <section className={`esse-preflight-card ${decision}`} aria-label="Esse 生成确认">
+      <header>
+        <strong>{commandLabel}</strong>
+        <span>{request.payload.estimatedApiCalls} 次 API 调用</span>
+      </header>
+      <div className="esse-preflight-command-list">
+        {request.payload.commands.map((command, index) => (
+          <div className="esse-preflight-command" key={`${request.requestId}-${index}`}>
+            <span>{command.displayLabel ?? command.target?.fileName ?? `任务 ${index + 1}`}</span>
+            <strong>{formatPreflightCommandMode(command.mode)}</strong>
+            {command.size ? <em>{command.size}</em> : null}
+            <p>{command.prompt ?? "未填写提示词"}</p>
+          </div>
+        ))}
+      </div>
+      <footer>
+        {isPending ? (
+          <>
+            <button className="toolbar-button primary" type="button" onClick={() => onResolve(request.requestId, "execute")}>
+              执行
+            </button>
+            <button className="toolbar-button" type="button" onClick={() => onResolve(request.requestId, "cancel")}>
+              取消
+            </button>
+          </>
+        ) : (
+          <span>{decision === "execute" ? "已确认执行" : "已取消"}</span>
+        )}
+      </footer>
+    </section>
+  );
+}
+
+function formatPreflightToolLabel(tool: EssePreflightRequest["payload"]["tool"]): string {
+  if (tool === "run_batch_generation") {
+    return "批量生成";
+  }
+  if (tool === "package_generated_images") {
+    return "打包导出";
+  }
+  return "生成图片";
+}
+
+function formatPreflightCommandMode(mode: EssePreflightRequest["payload"]["commands"][number]["mode"]): string {
+  if (mode === "generate") {
+    return "生成";
+  }
+  if (mode === "edit") {
+    return "编辑";
+  }
+  return "文件";
+}
+
 function PlanCard({
   collapsed,
+  imageSessions,
   plan,
   onOpenImagePreview,
   onExecutePlan,
   onToggleCollapse
 }: {
   collapsed: boolean;
+  imageSessions: ImageSession[];
   plan: BatchPlan;
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
   onExecutePlan: (planId: string, mode: ProjectPlanExecutionMode) => void;
@@ -342,6 +437,7 @@ function PlanCard({
                 key={command.id}
                 referenceImages={getCommandReferencePreviews(plan, command)}
                 report={findReport(plan, command.id)}
+                sourceImagePreview={getCommandSourceImagePreview(command, imageSessions)}
                 onOpenImagePreview={onOpenImagePreview}
               />
             ))}
@@ -371,13 +467,33 @@ function CommandRow({
   command,
   referenceImages,
   report,
+  sourceImagePreview,
   onOpenImagePreview
 }: {
   command: WorkerCommand;
   referenceImages: BatchPlanReferenceImage[];
   report?: WorkerReport;
+  sourceImagePreview: CommandSourceImagePreview | null;
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
 }) {
+  function openSourceImagePreview(): void {
+    if (!sourceImagePreview) {
+      return;
+    }
+
+    onOpenImagePreview(
+      "正在编辑的图片",
+      [
+        {
+          key: sourceImagePreview.sessionId,
+          label: sourceImagePreview.label,
+          path: sourceImagePreview.filePath
+        }
+      ],
+      sourceImagePreview.filePath
+    );
+  }
+
   function openCommandReferencePreview(selectedPath: string): void {
     onOpenImagePreview(
       "方案参考图",
@@ -391,8 +507,22 @@ function CommandRow({
   }
 
   return (
-    <div className={`worker-command-row ${report?.status ?? "pending"}`}>
+    <div className={`worker-command-row ${report?.status ?? "pending"} ${sourceImagePreview ? "has-source-preview" : ""}`}>
       <span>{formatWorkerStatus(report)}</span>
+      {sourceImagePreview ? (
+        <button
+          className="command-source-preview"
+          type="button"
+          aria-label={`预览正在编辑的${sourceImagePreview.sessionId}`}
+          onClick={openSourceImagePreview}
+        >
+          <img
+            src={window.batchImager?.getImageUrl(sourceImagePreview.filePath) ?? sourceImagePreview.filePath}
+            alt={sourceImagePreview.label}
+            draggable={false}
+          />
+        </button>
+      ) : null}
       <div>
         <strong>{command.targetSessionId}</strong>
         <div className="command-prompt-preview">
@@ -420,6 +550,30 @@ function CommandRow({
       </div>
     </div>
   );
+}
+
+interface CommandSourceImagePreview {
+  filePath: string;
+  label: string;
+  sessionId: string;
+}
+
+function getCommandSourceImagePreview(command: WorkerCommand, imageSessions: ImageSession[]): CommandSourceImagePreview | null {
+  if (command.generationMode !== "edit") {
+    return null;
+  }
+
+  const sourceSessionId = command.sourceSessionId ?? command.targetSessionId;
+  const sourceSession = imageSessions.find((session) => session.id === sourceSessionId);
+  if (!sourceSession) {
+    return null;
+  }
+
+  return {
+    filePath: getSessionGenerationSourcePath(sourceSession),
+    label: `正在编辑 ${sourceSession.id}`,
+    sessionId: sourceSession.id
+  };
 }
 
 function getPlan(state: ProjectManagerState, planId: string): BatchPlan | null {
@@ -486,4 +640,36 @@ function formatWorkerStatus(report: WorkerReport | undefined): string {
   }
 
   return "-";
+}
+
+function getProjectThreadContentSignature(
+  state: ProjectManagerState,
+  activityMessage: string | undefined,
+  isCreatingPlan: boolean
+): string {
+  return [
+    state.conversation.id,
+    state.conversation.currentPlanId ?? "",
+    isCreatingPlan ? "creating" : "idle",
+    activityMessage ?? "",
+    ...state.conversation.messages.map((message) =>
+      [
+        message.id,
+        message.role,
+        message.content,
+        message.planId ?? "",
+        message.preflightRequest?.requestId ?? "",
+        message.preflightDecision ?? "",
+        message.referenceFilePaths?.join("|") ?? ""
+      ].join(":")
+    ),
+    ...state.plans.map((plan) =>
+      [
+        plan.id,
+        plan.status,
+        plan.commands.length,
+        plan.reports?.map((report) => `${report.commandId}:${report.status}:${report.generatedImagePath ?? ""}:${report.errorMessage ?? ""}`).join("|") ?? ""
+      ].join(":")
+    )
+  ].join("\n");
 }

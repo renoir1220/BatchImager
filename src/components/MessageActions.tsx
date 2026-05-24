@@ -1,47 +1,74 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface MessageActionsProps {
   content: string;
-  tone?: "assistant" | "user" | "context" | "error";
 }
 
-type Feedback = "up" | "down" | null;
+export function MessageActions({ content }: MessageActionsProps) {
+  const [isCopied, setIsCopied] = useState(false);
+  const copiedResetTimer = useRef<number | null>(null);
 
-export function MessageActions({ content, tone = "assistant" }: MessageActionsProps) {
-  const [feedback, setFeedback] = useState<Feedback>(null);
-  const canReact = tone === "assistant" || tone === "context";
+  useEffect(() => {
+    return () => {
+      if (copiedResetTimer.current !== null) {
+        window.clearTimeout(copiedResetTimer.current);
+      }
+    };
+  }, []);
 
-  function handleCopy(): void {
-    void navigator.clipboard?.writeText(content);
+  async function handleCopy(): Promise<void> {
+    if (!navigator.clipboard) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      return;
+    }
+
+    setIsCopied(true);
+
+    if (copiedResetTimer.current !== null) {
+      window.clearTimeout(copiedResetTimer.current);
+    }
+
+    copiedResetTimer.current = window.setTimeout(() => {
+      setIsCopied(false);
+      copiedResetTimer.current = null;
+    }, 1400);
   }
 
   return (
     <div className="message-actions" aria-label="消息操作">
-      <button type="button" onClick={handleCopy}>
-        复制
+      <button
+        className={`message-action-button ${isCopied ? "copied" : ""}`}
+        type="button"
+        aria-label={isCopied ? "复制完成" : "复制消息"}
+        title={isCopied ? "复制完成" : "复制消息"}
+        onClick={() => {
+          void handleCopy();
+        }}
+      >
+        {isCopied ? <DoneIcon /> : <CopyIcon />}
       </button>
-      {canReact ? (
-        <>
-          <button
-            className={feedback === "up" ? "selected" : ""}
-            type="button"
-            aria-label="点赞"
-            aria-pressed={feedback === "up"}
-            onClick={() => setFeedback(feedback === "up" ? null : "up")}
-          >
-            ↑
-          </button>
-          <button
-            className={feedback === "down" ? "selected" : ""}
-            type="button"
-            aria-label="点踩"
-            aria-pressed={feedback === "down"}
-            onClick={() => setFeedback(feedback === "down" ? null : "down")}
-          >
-            ↓
-          </button>
-        </>
-      ) : null}
     </div>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg className="message-action-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="6" y="5" width="7" height="8" rx="1.5" />
+      <path d="M3 10.5V4a1 1 0 0 1 1-1h5.5" />
+    </svg>
+  );
+}
+
+function DoneIcon() {
+  return (
+    <svg className="message-action-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M3.5 8.3 6.4 11 12.7 4.7" />
+    </svg>
   );
 }

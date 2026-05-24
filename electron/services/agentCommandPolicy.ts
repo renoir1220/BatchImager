@@ -118,6 +118,11 @@ function isRecursiveDeletionOfRootOrUserDirectory(command: string, projectDirect
     return true;
   }
 
+  const normalizedProject = normalizeForCommand(projectDirectory);
+  if (normalized.includes(`${normalizedProject}/`)) {
+    return false;
+  }
+
   const userRoot = getUserRoot(projectDirectory);
   if (userRoot && normalized.includes(normalizeForCommand(userRoot))) {
     return true;

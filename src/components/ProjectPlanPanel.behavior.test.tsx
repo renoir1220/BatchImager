@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 
-import { screen, within } from "@testing-library/react";
+import { fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 import type { BatchPlan, ProjectManagerState, WorkerReport } from "../types/projectManager";
+import type { ImageSession } from "../types/image";
 import { renderWithBatchImager } from "../test/renderWithBatchImager";
 import { ProjectPlanPanel } from "./ProjectPlanPanel";
 
@@ -23,17 +24,21 @@ function renderProjectPlanPanel(onSendMessage = vi.fn()): ReturnType<typeof vi.f
 
 function renderProjectPlanPanelWithState(
   projectManagerState: ProjectManagerState,
-  onSendMessage = vi.fn()
+  onSendMessage = vi.fn(),
+  imageSessions: ImageSession[] = []
 ): ReturnType<typeof vi.fn> {
   renderWithBatchImager(
     <ProjectPlanPanel
       activityLogs={[]}
+      imageSessions={imageSessions}
       isCreatingPlan={false}
       projectManagerState={projectManagerState}
       onCopyImage={vi.fn()}
       onExecutePlan={vi.fn()}
       onOpenImagePreview={vi.fn()}
+      onResolvePreflight={vi.fn()}
       onSendMessage={onSendMessage}
+      onStopWork={vi.fn()}
     />
   );
 
@@ -41,6 +46,20 @@ function renderProjectPlanPanelWithState(
 }
 
 describe("ProjectPlanPanel persona behavior", () => {
+  test("does not send the message when Enter confirms IME composition", () => {
+    const onSendMessage = renderProjectPlanPanel();
+    const composer = screen.getByRole("textbox");
+
+    fireEvent.change(composer, { target: { value: "english" } });
+    fireEvent.keyDown(composer, { code: "Enter", isComposing: true, key: "Enter" });
+
+    expect(onSendMessage).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(composer, { code: "Enter", key: "Enter" });
+
+    expect(onSendMessage).toHaveBeenCalledWith("english", undefined, [], "excellent-employee");
+  });
+
   test("opens an accessible persona list with short descriptions", async () => {
     const user = userEvent.setup();
     renderProjectPlanPanel();
@@ -117,6 +136,191 @@ describe("ProjectPlanPanel plan cards", () => {
     expect(screen.getByLabelText("任务执行中")).toBeInTheDocument();
     expect(screen.getByText("Esse完成了3个任务")).toBeInTheDocument();
   });
+
+  test("shows the edited source image thumbnail beside an edit task prompt preview", () => {
+    const plan = makePlan({
+      commands: [
+        {
+          ...makeCommand("plan-1", "cmd-1", "img-4"),
+          generationMode: "edit",
+          sourceSessionId: "img-4"
+        },
+        {
+          ...makeCommand("plan-1", "cmd-2", "new-1"),
+          generationMode: "generate"
+        }
+      ],
+      targetSessionIds: ["img-4", "new-1"]
+    });
+
+    renderProjectPlanPanelWithState(makeProjectManagerState(plan), vi.fn(), [
+      makeImageSession("img-4", "C:/shots/flower.jpg", "C:/generated/flower-current.png")
+    ]);
+
+    const sourcePreview = screen.getByRole("img", { name: "正在编辑 img-4" });
+
+    expect(sourcePreview).toHaveAttribute("src", "batchimager-test://C%3A%2Fgenerated%2Fflower-current.png");
+    expect(screen.getByRole("button", { name: "预览正在编辑的img-4" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "正在编辑 new-1" })).not.toBeInTheDocument();
+  });
+
+  test("scrolls the conversation to the latest agent task card", () => {
+    const scrollTo = vi.fn();
+    const originalScrollTo = HTMLElement.prototype.scrollTo;
+    HTMLElement.prototype.scrollTo = scrollTo;
+
+    try {
+      const { rerender } = renderWithBatchImager(
+        <ProjectPlanPanel
+          activityLogs={[]}
+          imageSessions={[]}
+          isCreatingPlan={false}
+          projectManagerState={EMPTY_PROJECT_MANAGER_STATE}
+          onCopyImage={vi.fn()}
+          onExecutePlan={vi.fn()}
+          onOpenImagePreview={vi.fn()}
+          onResolvePreflight={vi.fn()}
+          onSendMessage={vi.fn()}
+          onStopWork={vi.fn()}
+        />
+      );
+
+      scrollTo.mockClear();
+
+      rerender(
+        <ProjectPlanPanel
+          activityLogs={[]}
+          imageSessions={[]}
+          isCreatingPlan={false}
+          projectManagerState={makeProjectManagerState(makePlan())}
+          onCopyImage={vi.fn()}
+          onExecutePlan={vi.fn()}
+          onOpenImagePreview={vi.fn()}
+          onResolvePreflight={vi.fn()}
+          onSendMessage={vi.fn()}
+          onStopWork={vi.fn()}
+        />
+      );
+
+      expect(scrollTo).toHaveBeenCalledWith({ behavior: "auto", top: expect.any(Number) });
+      expect(
+        scrollTo.mock.contexts.some(
+          (context) => context instanceof HTMLElement && context.classList.contains("project-manager-thread")
+        )
+      ).toBe(true);
+    } finally {
+      HTMLElement.prototype.scrollTo = originalScrollTo;
+    }
+  });
+});
+
+describe("ProjectPlanPanel Esse preflight cards", () => {
+  test("shows a generation preflight card and emits execute/cancel decisions", async () => {
+    const user = userEvent.setup();
+    const onResolvePreflight = vi.fn();
+
+    renderWithBatchImager(
+      <ProjectPlanPanel
+        activityLogs={[]}
+        imageSessions={[]}
+        isCreatingPlan={false}
+        projectManagerState={{
+          conversation: {
+            id: "conversation-1",
+            messages: [
+              {
+                content: "",
+                id: "preflight-1",
+                preflightDecision: "pending",
+                preflightRequest: {
+                  payload: {
+                    commands: [
+                      {
+                        displayLabel: "img-1",
+                        mode: "edit",
+                        prompt: "保留主体，换成白底主图",
+                        target: { sessionId: "sess_1", type: "existing" }
+                      }
+                    ],
+                    estimatedApiCalls: 1,
+                    tool: "generate_image"
+                  },
+                  requestId: "request-1"
+                },
+                role: "context"
+              }
+            ]
+          },
+          plans: []
+        }}
+        onCopyImage={vi.fn()}
+        onExecutePlan={vi.fn()}
+        onOpenImagePreview={vi.fn()}
+        onResolvePreflight={onResolvePreflight}
+        onSendMessage={vi.fn()}
+        onStopWork={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("region", { name: "Esse 生成确认" })).toBeInTheDocument();
+    expect(screen.getByText("生成图片")).toBeInTheDocument();
+    expect(screen.getByText("1 次 API 调用")).toBeInTheDocument();
+    expect(screen.getByText("保留主体，换成白底主图")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "执行" }));
+    await user.click(screen.getByRole("button", { name: "取消" }));
+
+    expect(onResolvePreflight).toHaveBeenNthCalledWith(1, "request-1", "execute");
+    expect(onResolvePreflight).toHaveBeenNthCalledWith(2, "request-1", "cancel");
+  });
+
+  test("labels package preflight cards as file export instead of image generation", () => {
+    renderWithBatchImager(
+      <ProjectPlanPanel
+        activityLogs={[]}
+        imageSessions={[]}
+        isCreatingPlan={false}
+        projectManagerState={{
+          conversation: {
+            id: "conversation-1",
+            messages: [
+              {
+                content: "",
+                id: "preflight-package",
+                preflightDecision: "pending",
+                preflightRequest: {
+                  payload: {
+                    commands: [
+                      {
+                        displayLabel: "img-1",
+                        prompt: "1 张生成图",
+                        target: { sessionId: "sess_1", type: "existing" }
+                      }
+                    ],
+                    estimatedApiCalls: 0,
+                    tool: "package_generated_images"
+                  },
+                  requestId: "request-package"
+                },
+                role: "context"
+              }
+            ]
+          },
+          plans: []
+        }}
+        onCopyImage={vi.fn()}
+        onExecutePlan={vi.fn()}
+        onOpenImagePreview={vi.fn()}
+        onResolvePreflight={vi.fn()}
+        onSendMessage={vi.fn()}
+        onStopWork={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("打包导出")).toBeInTheDocument();
+    expect(screen.queryByText("生成图片")).not.toBeInTheDocument();
+    expect(screen.getByText("0 次 API 调用")).toBeInTheDocument();
+  });
 });
 
 function makeProjectManagerState(plan: BatchPlan): ProjectManagerState {
@@ -166,5 +370,17 @@ function makeReport(commandId: string, targetSessionId: string): WorkerReport {
     status: "completed",
     summary: "已完成",
     targetSessionId
+  };
+}
+
+function makeImageSession(id: string, filePath: string, generatedFilePath?: string): ImageSession {
+  return {
+    chatMessages: [],
+    chatStatus: "idle",
+    fileName: `${id}.jpg`,
+    filePath,
+    ...(generatedFilePath ? { generatedFilePath } : {}),
+    id,
+    status: "idle"
   };
 }

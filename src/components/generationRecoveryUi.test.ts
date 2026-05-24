@@ -29,4 +29,24 @@ describe("generation recovery UI", () => {
     expect(preload).toContain("app:set-running-work-count");
     expect(main).toContain("showRunningWorkCloseDialog");
   });
+
+  test("renderer can cancel active generation or agent operations", () => {
+    const app = readProjectFile("src/App.tsx");
+    const preload = readProjectFile("electron/preload.ts");
+    const main = readProjectFile("electron/main.ts");
+
+    expect(app).toContain("operationId");
+    expect(app).toContain("cancelOperation");
+    expect(preload).toContain("app:cancel-operation");
+    expect(main).toContain("activeOperationControllers");
+    expect(main).toContain("withCancelableOperation");
+  });
+
+  test("macOS red close exits the app instead of leaving it running without windows", () => {
+    const main = readProjectFile("electron/main.ts");
+    const windowAllClosedHandler = main.match(/app\.on\("window-all-closed", \(\) => \{(?<body>[\s\S]*?)\n\}\);/)?.groups?.body ?? "";
+
+    expect(windowAllClosedHandler).toContain("app.quit()");
+    expect(windowAllClosedHandler).not.toContain('process.platform !== "darwin"');
+  });
 });

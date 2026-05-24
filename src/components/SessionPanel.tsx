@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, MouseEvent, useState } from "react";
+import { FormEvent, KeyboardEvent, MouseEvent, useMemo, useRef, useState } from "react";
 import type { AppLogEntry } from "../../electron/ipcTypes";
 import type { ImageSession } from "../types/image";
 import {
@@ -11,6 +11,8 @@ import { ComposerReferenceStrip } from "./ComposerReferenceStrip";
 import type { PreviewImage } from "./ImagePreviewDialog";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { MessageActions } from "./MessageActions";
+import { shouldSubmitComposerOnEnter } from "./composerKeyEvents";
+import { useAutoScrollToThreadEnd } from "./useAutoScrollToThreadEnd";
 import { usePastedReferenceImages } from "./usePastedReferenceImages";
 
 interface SessionPanelProps {
@@ -19,19 +21,25 @@ interface SessionPanelProps {
   onCopyImage: (imagePath: string) => void;
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
   onSendMessage: (sessionId: string, content: string, outputSize?: string, referenceImagePaths?: string[]) => void;
+  onStopWork: (sessionId: string) => void;
 }
 
-export function SessionPanel({ activityLogs, selectedSession, onCopyImage, onOpenImagePreview, onSendMessage }: SessionPanelProps) {
+export function SessionPanel({
+  activityLogs,
+  selectedSession,
+  onCopyImage,
+  onOpenImagePreview,
+  onSendMessage,
+  onStopWork
+}: SessionPanelProps) {
   const [message, setMessage] = useState("");
   const [selectedSize, setSelectedSize] = useState("");
   const [customSize, setCustomSize] = useState("");
+  const threadRef = useRef<HTMLDivElement>(null);
   const pastedReferences = usePastedReferenceImages();
-  const displayPath = selectedSession?.filePath ?? null;
-  const imageUrl = displayPath ? window.batchImager?.getImageUrl(displayPath) ?? displayPath : null;
   const canSend = Boolean(
     selectedSession &&
       message.trim() &&
-      selectedSession.chatStatus !== "sending" &&
       !pastedReferences.isSavingReference &&
       isGenerationSizeSelectionValid(selectedSize, customSize)
   );
@@ -39,11 +47,25 @@ export function SessionPanel({ activityLogs, selectedSession, onCopyImage, onOpe
     selectedSession && (selectedSession.chatStatus === "sending" || selectedSession.status === "generating")
   );
   const currentActivityLog = activityLogs.at(-1);
+  const threadContentSignature = useMemo(
+    () => getSessionThreadContentSignature(selectedSession, currentActivityLog?.message),
+    [currentActivityLog?.message, selectedSession]
+  );
+  useAutoScrollToThreadEnd(threadRef, threadContentSignature);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
 
-    if (!selectedSession || !canSend) {
+    if (!selectedSession) {
+      return;
+    }
+
+    if (isAgentWorking) {
+      onStopWork(selectedSession.id);
+      return;
+    }
+
+    if (!canSend) {
       return;
     }
 
@@ -58,7 +80,7 @@ export function SessionPanel({ activityLogs, selectedSession, onCopyImage, onOpe
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (shouldSubmitComposerOnEnter(event)) {
       event.preventDefault();
       event.currentTarget.form?.requestSubmit();
     }
@@ -87,19 +109,9 @@ export function SessionPanel({ activityLogs, selectedSession, onCopyImage, onOpe
 
   return (
     <div className="session-tab-panel" aria-label="当前图片会话">
-      {selectedSession && imageUrl ? (
+      {selectedSession ? (
         <>
-          <div className="session-preview-frame">
-            <img
-              className="session-preview"
-              src={imageUrl}
-              alt={selectedSession.fileName}
-              draggable={false}
-              onContextMenu={(event) => handleImageContextMenu(event, selectedSession.filePath)}
-              onDoubleClick={() => openSingleImagePreview(selectedSession.fileName, "原图", selectedSession.filePath)}
-            />
-          </div>
-          <div className="session-thread">
+          <div className="session-thread" ref={threadRef}>
             {selectedSession.chatMessages.length === 0 ? (
               <div className="thread-line muted">图片已导入。直接描述你想要的修改，模型会在需要时调用图片生成工具。</div>
             ) : (
@@ -139,6 +151,14 @@ export function SessionPanel({ activityLogs, selectedSession, onCopyImage, onOpe
                         />
                         <span className="thread-result">已更新图片</span>
                       </div>
+                    ) : isDeletedGeneratedImageMessage(chatMessage) ? (
+                      <div className="thread-image-card deleted-generated-record" aria-label="生成记录已删除">
+                        <div className="thread-image-title">
+                          <span>生成图</span>
+                          <span>记录已删除</span>
+                        </div>
+                        <div className="deleted-generated-placeholder">这条生成记录已从工作区删除</div>
+                      </div>
                     ) : null}
                     {chatMessage.referenceFilePaths?.length ? (
                       <div className="thread-image-card">
@@ -161,7 +181,7 @@ export function SessionPanel({ activityLogs, selectedSession, onCopyImage, onOpe
                       </div>
                     ) : null}
                   </div>
-                  <MessageActions content={chatMessage.content} tone={chatMessage.role} />
+                  <MessageActions content={chatMessage.content} />
                 </div>
               ))
             )}
@@ -182,14 +202,12 @@ export function SessionPanel({ activityLogs, selectedSession, onCopyImage, onOpe
               <textarea
                 value={message}
                 placeholder="和模型说明你想怎样处理这张图... 可直接粘贴参考图"
-                disabled={selectedSession.chatStatus === "sending"}
                 onChange={(event) => setMessage(event.target.value)}
                 onKeyDown={handleComposerKeyDown}
               />
               <div className="composer-toolbar">
                 <GenerationSizeControl
                   customValue={customSize}
-                  disabled={selectedSession.chatStatus === "sending"}
                   idPrefix="session"
                   label="生成比例："
                   selectedValue={selectedSize}
@@ -197,8 +215,8 @@ export function SessionPanel({ activityLogs, selectedSession, onCopyImage, onOpe
                   onSelectedValueChange={setSelectedSize}
                 />
               </div>
-              <button type="submit" disabled={!canSend} aria-label="发送">
-                ↑
+              <button type="submit" disabled={isAgentWorking ? false : !canSend} aria-label={isAgentWorking ? "停止" : "发送"}>
+                {isAgentWorking ? <span className="composer-stop-icon" aria-hidden="true" /> : "↑"}
               </button>
             </form>
           </div>
@@ -213,4 +231,32 @@ export function SessionPanel({ activityLogs, selectedSession, onCopyImage, onOpe
 function getFileName(filePath: string): string {
   const lastSlash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
   return filePath.slice(lastSlash + 1);
+}
+
+function isDeletedGeneratedImageMessage(message: ImageSession["chatMessages"][number]): boolean {
+  return message.contextType === "generated-image" && !message.generatedFilePath;
+}
+
+function getSessionThreadContentSignature(session: ImageSession | null, activityMessage?: string): string {
+  if (!session) {
+    return "empty";
+  }
+
+  return [
+    session.id,
+    session.status,
+    session.chatStatus,
+    activityMessage ?? "",
+    ...session.chatMessages.map((message) =>
+      [
+        message.id,
+        message.role,
+        message.content,
+        message.contextType ?? "",
+        message.sourceFilePath ?? "",
+        message.generatedFilePath ?? "",
+        message.referenceFilePaths?.join("|") ?? ""
+      ].join(":")
+    )
+  ].join("\n");
 }

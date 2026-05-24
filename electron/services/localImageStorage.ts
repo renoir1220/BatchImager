@@ -1,5 +1,5 @@
 import { writeFile } from "node:fs/promises";
-import path from "node:path";
+import { joinPathPreservingRoot } from "./pathUtils";
 
 export interface SaveReferenceImageInput {
   data: ArrayBuffer;
@@ -32,7 +32,7 @@ export async function saveReferenceImage(
   }
 
   const fileName = input.fileName?.trim() || `reference.${extensionForMimeType(input.mimeType)}`;
-  const outputPath = path.join(
+  const outputPath = joinPathPreservingRoot(
     deps.outputDirectory,
     `reference-${toTimestamp(deps.makeNow())}-${toSafeName(fileName)}.${extensionForMimeType(input.mimeType)}`
   );

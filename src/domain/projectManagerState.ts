@@ -120,6 +120,20 @@ export function applyWorkerReport(
   };
 }
 
+export function pauseRunningProjectPlans(state: ProjectManagerState): ProjectManagerState {
+  return {
+    ...state,
+    plans: state.plans.map((plan) =>
+      plan.status === "running"
+        ? {
+            ...plan,
+            status: "paused"
+          }
+        : plan
+    )
+  };
+}
+
 function appendProjectManagerMessage(state: ProjectManagerState, message: ProjectManagerMessage): ProjectManagerState {
   return {
     ...state,

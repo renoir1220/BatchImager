@@ -1,12 +1,12 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppLogEntry,
+  CancelOperationRequest,
+  CancelOperationResponse,
   CopyImageToClipboardRequest,
   CopyImageToClipboardResponse,
   CreatePlaceholderImageRequest,
   CreatePlaceholderImageResponse,
-  CreateProjectManagerPlanRequest,
-  CreateProjectManagerPlanResponse,
   GenerateImageRequest,
   GenerateImageResponse,
   ImportProjectImagesRequest,
@@ -17,6 +17,9 @@ import type {
   SaveReferenceImageRequest,
   SaveReferenceImageResponse,
   SaveProjectSnapshotRequest,
+  EssePreflightRequest,
+  EssePreflightResponse,
+  EssePreflightResponseAck,
   SendChatMessageRequest,
   SendChatMessageResponse,
   SendEsseMessageRequest,
@@ -26,6 +29,7 @@ import type {
 const IMAGE_PROTOCOL = "batchimager-file";
 
 const api = {
+  platform: process.platform,
   createProject: async (): Promise<ProjectSnapshot> => ipcRenderer.invoke("project:create"),
   listProjects: async (): Promise<ProjectListEntry[]> => ipcRenderer.invoke("project:list"),
   openProject: async (request?: OpenProjectRequest): Promise<ProjectSnapshot | null> => ipcRenderer.invoke("project:open", request),
@@ -37,10 +41,10 @@ const api = {
     ipcRenderer.invoke("project:save-snapshot", request),
   generateImage: async (request: GenerateImageRequest): Promise<GenerateImageResponse> =>
     ipcRenderer.invoke("generation:generate-image", request),
+  cancelOperation: async (request: CancelOperationRequest): Promise<CancelOperationResponse> =>
+    ipcRenderer.invoke("app:cancel-operation", request),
   createPlaceholderImage: async (request: CreatePlaceholderImageRequest): Promise<CreatePlaceholderImageResponse> =>
     ipcRenderer.invoke("images:create-placeholder", request),
-  createProjectManagerPlan: async (request: CreateProjectManagerPlanRequest): Promise<CreateProjectManagerPlanResponse> =>
-    ipcRenderer.invoke("project-manager:create-plan", request),
   saveReferenceImage: async (request: SaveReferenceImageRequest): Promise<SaveReferenceImageResponse> =>
     ipcRenderer.invoke("images:save-reference", request),
   copyImageToClipboard: async (request: CopyImageToClipboardRequest): Promise<CopyImageToClipboardResponse> =>
@@ -49,6 +53,8 @@ const api = {
     ipcRenderer.invoke("chat:send-message", request),
   sendEsseMessage: async (request: SendEsseMessageRequest): Promise<SendEsseMessageResponse> =>
     ipcRenderer.invoke("esse:send-message", request),
+  respondEssePreflight: async (response: EssePreflightResponse): Promise<EssePreflightResponseAck> =>
+    ipcRenderer.invoke("esse:preflight-response", response),
   getLogs: async (): Promise<AppLogEntry[]> => ipcRenderer.invoke("logs:list"),
   setRunningWorkCount: (count: number): void => {
     ipcRenderer.send("app:set-running-work-count", count);
@@ -67,6 +73,22 @@ const api = {
 
     return () => {
       ipcRenderer.removeListener("project:thumbnails-updated", handler);
+    };
+  },
+  subscribeProjectSnapshotUpdates: (listener: (snapshot: ProjectSnapshot) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, snapshot: ProjectSnapshot) => listener(snapshot);
+    ipcRenderer.on("project:snapshot-updated", handler);
+
+    return () => {
+      ipcRenderer.removeListener("project:snapshot-updated", handler);
+    };
+  },
+  subscribeEssePreflightRequests: (listener: (request: EssePreflightRequest) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, request: EssePreflightRequest) => listener(request);
+    ipcRenderer.on("esse:preflight-request", handler);
+
+    return () => {
+      ipcRenderer.removeListener("esse:preflight-request", handler);
     };
   },
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),

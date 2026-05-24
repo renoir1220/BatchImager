@@ -1,26 +1,22 @@
-import type { ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 
 interface OsMenuProps {
   align?: "start" | "center" | "end";
   children: ReactNode;
   contentClassName?: string;
-  trigger: ReactNode;
-  triggerAriaLabel?: string;
-  triggerClassName: string;
+  trigger: ReactElement;
 }
 
 export function OsMenu({
   align = "start",
   children,
   contentClassName = "",
-  trigger,
-  triggerAriaLabel,
-  triggerClassName
+  trigger
 }: OsMenuProps) {
   return (
     <DropdownMenu.Root modal={false}>
-      <DropdownMenu.Trigger className={triggerClassName} aria-label={triggerAriaLabel}>
+      <DropdownMenu.Trigger asChild>
         {trigger}
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>

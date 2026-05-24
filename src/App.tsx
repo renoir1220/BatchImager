@@ -14,6 +14,7 @@ import {
   applySessionChatSuccess,
   applyGeneratedImageResult,
   applySessionGenerationError,
+  createImageSessionId,
   getInitialSelectedSessionId,
   getSessionGenerationSourcePath,
   markSessionEsseTask,
@@ -21,6 +22,7 @@ import {
   markSessionGenerating,
   moveImageSession,
   removeImageSession,
+  stopSessionWork,
   toggleSessionListImageSource
 } from "./domain/imageSessions";
 import {
@@ -29,12 +31,12 @@ import {
   createEmptyProjectManagerState,
   createProjectManagerUserMessage,
   markBatchPlanRunning,
+  pauseRunningProjectPlans,
   setProjectManagerDraftPlan
 } from "./domain/projectManagerState";
 import { getProjectManagerActivityLogs, getSessionActivityLogs } from "./domain/sessionActivity";
 import { selectRecentProjects } from "./domain/recentProjects";
 import { resolveProjectManagerReferenceImages } from "./domain/projectManagerReferences";
-import { createEsseImageRequestPlan } from "./domain/esseImageRequestPlan";
 import {
   selectPlanCommandsForExecution,
   type ProjectPlanExecutionMode
@@ -58,7 +60,8 @@ import type {
   AppLogEntry,
   ChatReferenceImage,
   EsseAgentHistoryMessage,
-  EsseFileResult,
+  EssePreflightRequest,
+  EssePreflightResponse,
   ProjectListEntry,
   ProjectMetadata,
   ProjectSnapshot
@@ -115,6 +118,9 @@ export function App() {
   const projectManagerStateRef = useRef(projectManagerState);
   const selectedSessionIdRef = useRef(selectedSessionId);
   const currentProjectRef = useRef(currentProject);
+  const activeSessionOperationIdsRef = useRef(new Map<string, string>());
+  const activeProjectOperationIdsRef = useRef(new Map<string, string>());
+  const activeEsseOperationIdRef = useRef<string | null>(null);
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
@@ -199,6 +205,33 @@ export function App() {
   }, [isProjectListOpen, sessions.length]);
 
   useEffect(() => {
+    const unsubscribe = window.batchImager?.subscribeProjectSnapshotUpdates((snapshot) => {
+      applyProjectSnapshot(snapshot, { closePreviews: false });
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.batchImager?.subscribeEssePreflightRequests((request) => {
+      const nextState = appendEssePreflightMessage(
+        projectManagerStateRef.current,
+        request,
+        createMessageId("esse-preflight")
+      );
+      projectManagerStateRef.current = nextState;
+      setProjectManagerState(nextState);
+      persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent): void {
       if (event.key !== "Delete" || !selectedSessionId || isEditableEventTarget(event.target)) {
         return;
@@ -215,7 +248,7 @@ export function App() {
     };
   }, [selectedSessionId, sessions]);
 
-  function applyProjectSnapshot(snapshot: ProjectSnapshot): void {
+  function applyProjectSnapshot(snapshot: ProjectSnapshot, options: { closePreviews?: boolean } = {}): void {
     const nextSessions = snapshot.sessions as ImageSession[];
     const nextSelectedSessionId = getInitialSelectedSessionId(nextSessions, snapshot.selectedSessionId ?? null);
 
@@ -227,8 +260,10 @@ export function App() {
     sessionsRef.current = nextSessions;
     projectManagerStateRef.current = snapshot.projectManagerState ?? createEmptyProjectManagerState();
     selectedSessionIdRef.current = nextSelectedSessionId;
-    setPreviewSessionId(null);
-    setChatImagePreview(null);
+    if (options.closePreviews ?? true) {
+      setPreviewSessionId(null);
+      setChatImagePreview(null);
+    }
     setIsProjectListOpen(false);
   }
 
@@ -267,6 +302,50 @@ export function App() {
       .catch((error) => {
         console.error("[BatchImager UI] Project snapshot save failed", error);
       });
+  }
+
+  function createOperationId(prefix: string): string {
+    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function cancelOperation(operationId: string | null | undefined): void {
+    if (!operationId) {
+      return;
+    }
+
+    void window.batchImager?.cancelOperation({ operationId }).catch((error) => {
+      console.error("[BatchImager UI] Operation cancel failed", error);
+    });
+  }
+
+  function registerSessionOperation(sessionId: string, operationId: string): void {
+    activeSessionOperationIdsRef.current.set(sessionId, operationId);
+  }
+
+  function isCurrentSessionOperation(sessionId: string, operationId: string): boolean {
+    return activeSessionOperationIdsRef.current.get(sessionId) === operationId;
+  }
+
+  function unregisterSessionOperation(sessionId: string, operationId: string): void {
+    if (isCurrentSessionOperation(sessionId, operationId)) {
+      activeSessionOperationIdsRef.current.delete(sessionId);
+    }
+  }
+
+  function registerProjectOperation(operationId: string, sessionId: string): void {
+    activeProjectOperationIdsRef.current.set(operationId, sessionId);
+  }
+
+  function isCurrentProjectOperation(operationId: string): boolean {
+    return activeProjectOperationIdsRef.current.has(operationId);
+  }
+
+  function unregisterProjectOperation(operationId: string): void {
+    activeProjectOperationIdsRef.current.delete(operationId);
+  }
+
+  function isCanceledError(error: unknown): boolean {
+    return error instanceof Error && /操作已停止|aborted|abort/i.test(error.message);
   }
 
   async function importImagePaths(paths: string[]): Promise<void> {
@@ -441,6 +520,47 @@ export function App() {
     );
   }
 
+  function handleStopSessionWork(sessionId: string): void {
+    cancelOperation(activeSessionOperationIdsRef.current.get(sessionId));
+    activeSessionOperationIdsRef.current.delete(sessionId);
+    for (const [operationId, projectSessionId] of activeProjectOperationIdsRef.current.entries()) {
+      if (projectSessionId === sessionId) {
+        cancelOperation(operationId);
+        activeProjectOperationIdsRef.current.delete(operationId);
+      }
+    }
+
+    setSessions((currentSessions) =>
+      updateAndPersistSessions(stopSessionWork(currentSessions, sessionId), selectedSessionIdRef.current)
+    );
+  }
+
+  function handleStopProjectWork(): void {
+    cancelOperation(activeEsseOperationIdRef.current);
+    activeEsseOperationIdRef.current = null;
+
+    const affectedSessionIds = new Set<string>();
+    for (const [operationId, sessionId] of activeProjectOperationIdsRef.current.entries()) {
+      cancelOperation(operationId);
+      affectedSessionIds.add(sessionId);
+    }
+    activeProjectOperationIdsRef.current.clear();
+
+    setIsCreatingProjectPlan(false);
+    const nextProjectManagerState = pauseRunningProjectPlans(projectManagerStateRef.current);
+    projectManagerStateRef.current = nextProjectManagerState;
+    setProjectManagerState(nextProjectManagerState);
+
+    let nextSessions = sessionsRef.current;
+    for (const sessionId of affectedSessionIds) {
+      nextSessions = stopSessionWork(nextSessions, sessionId);
+    }
+
+    sessionsRef.current = nextSessions;
+    setSessions(nextSessions);
+    persistProjectSnapshot(nextSessions, selectedSessionIdRef.current, nextProjectManagerState);
+  }
+
   async function handleSendEsseMessage(
     content: string,
     outputSize?: string,
@@ -477,6 +597,8 @@ export function App() {
     }
 
     setIsCreatingProjectPlan(true);
+    const operationId = createOperationId("esse");
+    activeEsseOperationIdRef.current = operationId;
 
     try {
       const history = [
@@ -486,6 +608,7 @@ export function App() {
       ];
       const result = await window.batchImager?.sendEsseMessage({
         messages: history,
+        operationId,
         ...(outputSize ? { outputSize } : {}),
         ...(persona ? { persona } : {}),
         ...(resolvedReferences.referenceImagePaths.length ? { referenceImagePaths: resolvedReferences.referenceImagePaths } : {}),
@@ -501,20 +624,15 @@ export function App() {
       if (!result) {
         throw new Error("当前运行环境不支持 Esse 智能体");
       }
+      if (activeEsseOperationIdRef.current !== operationId) {
+        return;
+      }
 
       let updatedState = appendProjectManagerAssistantMessage(
-        nextState,
-        appendEsseFileResultText(result.reply, result.fileResults ?? []),
+        projectManagerStateRef.current,
+        result.reply,
         createMessageId("esse-assistant")
       );
-      if (result.plan) {
-        updatedState = setProjectManagerDraftPlan(updatedState, result.plan, createMessageId("esse-plan"));
-      }
-
-      if (result.imageRequests?.length) {
-        const imageRequestPlan = createEsseImageRequestPlan(result.imageRequests, resolvedReferences.referenceImagePaths);
-        updatedState = setProjectManagerDraftPlan(updatedState, imageRequestPlan, createMessageId("esse-image-plan"));
-      }
 
       const nextSessions = sessionsRef.current;
       const nextSelectedSessionId = selectedSessionIdRef.current ?? nextSessions[0]?.id ?? null;
@@ -527,8 +645,11 @@ export function App() {
       selectedSessionIdRef.current = nextSelectedSessionId;
       persistProjectSnapshot(nextSessions, nextSelectedSessionId, updatedState);
     } catch (error) {
+      if (activeEsseOperationIdRef.current !== operationId || isCanceledError(error)) {
+        return;
+      }
       const errorState = appendProjectManagerError(
-        nextState,
+        projectManagerStateRef.current,
         error instanceof Error ? error.message : "Esse 处理失败",
         createMessageId("esse-error")
       );
@@ -536,7 +657,10 @@ export function App() {
       projectManagerStateRef.current = errorState;
       persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, errorState);
     } finally {
-      setIsCreatingProjectPlan(false);
+      if (activeEsseOperationIdRef.current === operationId) {
+        activeEsseOperationIdRef.current = null;
+        setIsCreatingProjectPlan(false);
+      }
     }
   }
 
@@ -576,6 +700,18 @@ export function App() {
     }
   }
 
+  async function handleResolveEssePreflight(requestId: string, decision: EssePreflightResponse["decision"]): Promise<void> {
+    const result = await window.batchImager?.respondEssePreflight({ requestId, decision });
+    if (!result?.accepted) {
+      return;
+    }
+
+    const nextState = markEssePreflightDecision(projectManagerStateRef.current, requestId, decision);
+    projectManagerStateRef.current = nextState;
+    setProjectManagerState(nextState);
+    persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
+  }
+
   async function executeProjectCommand(
     plan: BatchPlan,
     command: WorkerCommand,
@@ -596,6 +732,8 @@ export function App() {
     const sourcePath = getSessionGenerationSourcePath(session);
     const referenceImages = getCommandReferenceImages(plan, command);
     const referenceImagePaths = referenceImages.map((referenceImage) => referenceImage.filePath);
+    const operationId = createOperationId("project-command");
+    registerProjectOperation(operationId, command.targetSessionId);
 
     setSessions((currentSessions) =>
       updateAndPersistSessions(
@@ -622,7 +760,7 @@ export function App() {
           originalImageLabel: "初始导入图",
           ...(referenceImagePaths.length ? { referenceImageCount: referenceImagePaths.length } : {})
         },
-        ...(session.generationMode ? { generationMode: session.generationMode } : {}),
+        operationId,
         imagePath: sourcePath,
         messages: [{ role: "user", content: command.instruction }],
         ...(command.outputSize ? { outputSize: command.outputSize } : {}),
@@ -632,6 +770,9 @@ export function App() {
 
       if (!result) {
         throw new Error("当前运行环境不支持会话");
+      }
+      if (!isCurrentProjectOperation(operationId)) {
+        return;
       }
 
       setSessions((currentSessions) =>
@@ -654,6 +795,9 @@ export function App() {
         baseProjectManagerState
       );
     } catch (error) {
+      if (!isCurrentProjectOperation(operationId) || isCanceledError(error)) {
+        return;
+      }
       const errorMessage = error instanceof Error ? error.message : "未知错误";
       setSessions((currentSessions) =>
         updateAndPersistSessions(
@@ -662,6 +806,8 @@ export function App() {
         )
       );
       applyProjectCommandReport(plan.id, makeWorkerReport(command, "failed", undefined, errorMessage), baseProjectManagerState);
+    } finally {
+      unregisterProjectOperation(operationId);
     }
   }
 
@@ -733,6 +879,9 @@ export function App() {
             baseProjectManagerState
           );
         } catch (error) {
+          if (isCanceledError(error)) {
+            return;
+          }
           applyProjectCommandReport(
             plan.id,
             makeWorkerReport(command, "failed", undefined, error instanceof Error ? error.message : "未知错误"),
@@ -819,16 +968,14 @@ export function App() {
     return { dispatchTasks, nextSessions };
   }
 
-  async function dispatchEsseImageTask(task: EsseDispatchTask): Promise<void> {
-    await runEsseImageTask(task);
-  }
-
   async function runEsseImageTask(task: EsseDispatchTask): Promise<string | undefined> {
     const session = sessionsRef.current.find((currentSession) => currentSession.id === task.sessionId);
 
     if (!session) {
       throw new Error("图片不存在");
     }
+    const operationId = createOperationId("esse-image");
+    registerProjectOperation(operationId, task.sessionId);
 
     setSessions((currentSessions) =>
       updateAndPersistSessions(
@@ -856,6 +1003,7 @@ export function App() {
         generationMode: task.generationMode,
         imagePath: task.sourceImagePath,
         messages: [{ role: "user", content: task.instruction }],
+        operationId,
         ...(task.outputSize ? { outputSize: task.outputSize } : {}),
         ...(task.referenceImagePaths.length
           ? {
@@ -871,6 +1019,9 @@ export function App() {
 
       if (!result) {
         throw new Error("当前运行环境不支持会话");
+      }
+      if (!isCurrentProjectOperation(operationId)) {
+        throw new Error("操作已停止");
       }
 
       setSessions((currentSessions) =>
@@ -889,6 +1040,12 @@ export function App() {
       );
       return result.generatedImagePath;
     } catch (error) {
+      if (!isCurrentProjectOperation(operationId)) {
+        throw new Error("操作已停止");
+      }
+      if (isCanceledError(error)) {
+        throw error;
+      }
       setSessions((currentSessions) =>
         updateAndPersistSessions(
           applySessionChatError(
@@ -901,6 +1058,8 @@ export function App() {
         )
       );
       throw error;
+    } finally {
+      unregisterProjectOperation(operationId);
     }
   }
 
@@ -912,6 +1071,8 @@ export function App() {
     sourceImagePath?: string
   ): Promise<void> {
     const sourcePath = sourceImagePath ?? getSessionGenerationSourcePath(session);
+    const operationId = createOperationId("image");
+    registerSessionOperation(session.id, operationId);
     console.info("[BatchImager UI] Image generation requested", { fileName: session.fileName, sessionId: session.id });
 
     setSessions((currentSessions) =>
@@ -924,6 +1085,7 @@ export function App() {
     try {
       const result = await window.batchImager?.generateImage({
         imagePath: sourcePath,
+        operationId,
         prompt,
         ...(referenceImagePaths.length ? { referenceImagePaths } : {}),
         ...(outputSize ? { size: outputSize } : {}),
@@ -932,6 +1094,9 @@ export function App() {
 
       if (!result) {
         throw new Error("当前运行环境不支持图像生成");
+      }
+      if (!isCurrentSessionOperation(session.id, operationId)) {
+        return;
       }
 
       setSessions((currentSessions) =>
@@ -942,6 +1107,9 @@ export function App() {
       );
       console.info("[BatchImager UI] Image generation completed", { outputPath: result.outputPath, sessionId: session.id });
     } catch (error) {
+      if (!isCurrentSessionOperation(session.id, operationId) || isCanceledError(error)) {
+        return;
+      }
       console.error("[BatchImager UI] Image generation failed", error);
       setSessions((currentSessions) =>
         updateAndPersistSessions(
@@ -949,6 +1117,8 @@ export function App() {
           selectedSessionId
         )
       );
+    } finally {
+      unregisterSessionOperation(session.id, operationId);
     }
   }
 
@@ -969,6 +1139,8 @@ export function App() {
     ];
     const referenceImages = getSessionReferenceImages(session, pastedReferenceImagePaths);
     const referenceImagePaths = referenceImages.map((referenceImage) => referenceImage.filePath);
+    const operationId = createOperationId("chat");
+    registerSessionOperation(session.id, operationId);
 
     setSessions((currentSessions) =>
       updateAndPersistSessions(
@@ -987,9 +1159,9 @@ export function App() {
           ...(session.lastPrompt ? { previousGenerationPrompt: session.lastPrompt } : {}),
           ...(referenceImagePaths.length ? { referenceImageCount: referenceImagePaths.length } : {})
         },
-        ...(session.generationMode ? { generationMode: session.generationMode } : {}),
         imagePath: sourcePath,
         messages: history,
+        operationId,
         ...(outputSize ? { outputSize } : {}),
         ...(referenceImages.length ? { referenceImages } : {}),
         sessionId: session.id
@@ -997,6 +1169,9 @@ export function App() {
 
       if (!result) {
         throw new Error("当前运行环境不支持会话");
+      }
+      if (!isCurrentSessionOperation(session.id, operationId)) {
+        return;
       }
 
       setSessions((currentSessions) =>
@@ -1018,6 +1193,9 @@ export function App() {
         sessionId: result.sessionId
       });
     } catch (error) {
+      if (!isCurrentSessionOperation(session.id, operationId) || isCanceledError(error)) {
+        return;
+      }
       console.error("[BatchImager UI] Chat message failed", error);
       setSessions((currentSessions) =>
         updateAndPersistSessions(
@@ -1030,6 +1208,8 @@ export function App() {
           selectedSessionId
         )
       );
+    } finally {
+      unregisterSessionOperation(session.id, operationId);
     }
   }
 
@@ -1103,7 +1283,6 @@ export function App() {
     >
       <AppToolbar
         columns={columns}
-        imageCount={sessions.length}
         logCount={logs.length}
         onColumnsChange={setColumns}
         onImport={handleSelectImages}
@@ -1194,14 +1373,19 @@ export function App() {
           {activeSidebarTab === "project" ? (
             <ProjectPlanPanel
               activityLogs={projectManagerActivityLogs}
+              imageSessions={sessions}
               isCreatingPlan={isCreatingProjectPlan}
               projectManagerState={projectManagerState}
               onExecutePlan={handleExecuteProjectPlan}
               onCopyImage={copyImageToClipboard}
               onOpenImagePreview={handleOpenChatImagePreview}
+              onResolvePreflight={(requestId, decision) => {
+                void handleResolveEssePreflight(requestId, decision);
+              }}
               onSendMessage={(content, outputSize, referenceImagePaths, persona) => {
                 void handleSendEsseMessage(content, outputSize, referenceImagePaths, persona);
               }}
+              onStopWork={handleStopProjectWork}
             />
           ) : (
             <SessionPanel
@@ -1210,6 +1394,7 @@ export function App() {
               onCopyImage={copyImageToClipboard}
               onOpenImagePreview={handleOpenChatImagePreview}
               onSendMessage={handleSendChatMessage}
+              onStopWork={handleStopSessionWork}
             />
           )}
         </aside>
@@ -1307,7 +1492,9 @@ function getSessionReferenceImages(session: ImageSession, pastedReferenceImagePa
 }
 
 function buildSessionPreviewImages(session: ImageSession): PreviewImage[] {
-  const generatedPaths = session.generatedFilePaths ?? (session.generatedFilePath ? [session.generatedFilePath] : []);
+  const generatedPaths = (session.generatedFilePaths ?? (session.generatedFilePath ? [session.generatedFilePath] : [])).filter(
+    (path) => path !== session.filePath
+  );
 
   return [
     {
@@ -1373,23 +1560,69 @@ function appendProjectManagerError(state: ProjectManagerState, content: string, 
   };
 }
 
-function appendEsseFileResultText(reply: string, fileResults: EsseFileResult[]): string {
-  if (fileResults.length === 0) {
-    return reply;
-  }
-
-  return [reply, `已完成 ${fileResults.length} 个文件结果。`].join("\n");
+function appendEssePreflightMessage(
+  state: ProjectManagerState,
+  request: EssePreflightRequest,
+  messageId: string
+): ProjectManagerState {
+  return {
+    ...state,
+    conversation: {
+      ...state.conversation,
+      messages: [
+        ...state.conversation.messages,
+        {
+          content: "",
+          id: messageId,
+          preflightDecision: "pending",
+          preflightRequest: request,
+          role: "context"
+        }
+      ]
+    }
+  };
 }
+
+function markEssePreflightDecision(
+  state: ProjectManagerState,
+  requestId: string,
+  decision: Exclude<ProjectManagerMessage["preflightDecision"], "pending" | undefined>
+): ProjectManagerState {
+  return {
+    ...state,
+    conversation: {
+      ...state.conversation,
+      messages: state.conversation.messages.map((message) =>
+        message.preflightRequest?.requestId === requestId
+          ? {
+              ...message,
+              preflightDecision: decision
+            }
+          : message
+      )
+    }
+  };
+}
+
 
 function createNextImageSessionId(sessions: ImageSession[]): string {
   const used = new Set(sessions.map((session) => session.id));
-  let index = sessions.length + 1;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const id = createImageSessionId();
 
-  while (used.has(`img-${index}`)) {
-    index += 1;
+    if (!used.has(id)) {
+      return id;
+    }
   }
 
-  return `img-${index}`;
+  let index = sessions.length + 1;
+  let fallbackId = `sess_fallback_${index}`;
+  while (used.has(fallbackId)) {
+    index += 1;
+    fallbackId = `sess_fallback_${index}`;
+  }
+
+  return fallbackId;
 }
 
 function isEditableEventTarget(target: EventTarget | null): boolean {

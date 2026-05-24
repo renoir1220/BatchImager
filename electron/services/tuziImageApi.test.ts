@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import type { AppLogger, BackendLogOptions } from "./appLogger";
 import {
   buildImageEditEndpoint,
   buildImageGenerationEndpoint,
@@ -162,6 +163,73 @@ describe("tuziImageApi", () => {
     expect(readPaths).toEqual(["C:\\prepared\\flower.png", "C:\\prepared\\warm-room.png"]);
   });
 
+  test("retries transient image edit API failures up to three times before succeeding", async () => {
+    const editStatuses = [503, 503, 503, 200];
+    const editAttemptNumbers: number[] = [];
+    const sleepDelays: number[] = [];
+    const publicMessages: string[] = [];
+
+    const result = await generateProductImage(
+      {
+        imagePath: "C:\\images\\flower.png",
+        prompt: "生成明亮室内商品图",
+        sessionId: "img-1"
+      },
+      {
+        apiKey: "local-test-key",
+        baseUrl: "https://api.ourzhishi.top",
+        model: "gpt-image-2",
+        outputDirectory: "C:\\generated",
+        size: "auto"
+      },
+      {
+        fetch: async (url) => {
+          if (String(url).endsWith("/v1/images/edits")) {
+            const attemptNumber = editAttemptNumbers.length + 1;
+            editAttemptNumbers.push(attemptNumber);
+
+            const status = editStatuses[attemptNumber - 1] ?? 503;
+            if (status !== 200) {
+              return new Response(`temporary ${status}`, { status });
+            }
+
+            return new Response(JSON.stringify({ data: [{ url: "https://cdn.example.com/result.png" }] }), {
+              headers: { "content-type": "application/json" },
+              status: 200
+            });
+          }
+
+          return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+        },
+        makeNow: () => new Date("2026-05-21T13:00:00.000Z"),
+        mkdir: async () => undefined,
+        prepareImage: async () => ({
+          byteLength: 3072,
+          converted: true,
+          height: 1536,
+          imagePath: "C:\\prepared\\flower.png",
+          originalHeight: 3000,
+          originalWidth: 2000,
+          resized: true,
+          width: 1024
+        }),
+        readFile: async () => Buffer.from([9, 8, 7]),
+        sleep: async (ms) => {
+          sleepDelays.push(ms);
+        },
+        writeFile: async () => undefined
+      },
+      createPublicMessageLogger(publicMessages)
+    );
+
+    expect(editAttemptNumbers).toEqual([1, 2, 3, 4]);
+    expect(sleepDelays).toEqual([500, 1000, 2000]);
+    expect(publicMessages).toContain("接口暂时不可用，正在重试 1/3...");
+    expect(publicMessages).toContain("接口暂时不可用，正在重试 2/3...");
+    expect(publicMessages).toContain("接口暂时不可用，正在重试 3/3...");
+    expect(result.outputPath).toContain("img-1-2026-05-21T13-00-00-000Z.png");
+  });
+
   test("posts prompt-only image generation request and stores the generated image locally", async () => {
     const writtenFiles: Array<{ path: string; data: Uint8Array }> = [];
     const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
@@ -315,9 +383,27 @@ describe("tuziImageApi", () => {
             width: 1024
           }),
           readFile: async () => Buffer.from([9, 8, 7]),
+          sleep: async () => undefined,
           writeFile: async () => undefined
         }
       )
     ).rejects.toThrow("Image generation request failed: fetch failed（Client network socket disconnected before secure TLS connection was established）");
   });
 });
+
+function createPublicMessageLogger(publicMessages: string[]): AppLogger {
+  const capture = (_message: string, options?: BackendLogOptions) => {
+    if (options?.publicMessage) {
+      publicMessages.push(options.publicMessage);
+    }
+  };
+
+  return {
+    debug: capture,
+    error: capture,
+    getEntries: () => publicMessages.map((message) => ({ level: "info", message, timestamp: "" })),
+    info: capture,
+    subscribe: () => () => undefined,
+    warn: capture
+  };
+}

@@ -34,9 +34,9 @@ describe("project plan UI wiring", () => {
   });
 
   test("Esse IPC is exposed only through preload", () => {
-    expect(readProjectFile("electron/preload.ts")).toContain("createProjectManagerPlan");
     expect(readProjectFile("electron/preload.ts")).toContain("sendEsseMessage");
-    expect(readProjectFile("electron/main.ts")).toContain("project-manager:create-plan");
+    expect(readProjectFile("electron/preload.ts")).not.toContain("createProjectManagerPlan");
+    expect(readProjectFile("electron/main.ts")).not.toContain("project-manager:create-plan");
     expect(readProjectFile("electron/main.ts")).toContain("esse:send-message");
     expect(readProjectFile("electron/ipcTypes.ts")).toContain("persona?: EssePersona");
   });
@@ -68,6 +68,9 @@ describe("project plan UI wiring", () => {
     expect(planTitleRule).toContain("font-size: 13px");
     expect(planTitleRule).toContain("font-weight: 560");
     expect(planTitleRule).toContain("color: #4f524b");
+    expect(styles).toContain(".plan-title-row");
+    expect(styles).toContain("flex: 1 1 auto");
+    expect(styles).not.toContain(".batch-plan-card header div");
     expect(styles).not.toContain(".plan-eyebrow");
     expect(styles).not.toContain(".plan-summary-line");
   });
@@ -83,11 +86,15 @@ describe("project plan UI wiring", () => {
     expect(styles).toContain(".command-reference-strip");
   });
 
-  test("Esse image requests are converted into existing draft plan cards instead of immediate dispatch", () => {
+  test("Esse send-message replies no longer convert legacy imageRequests into draft plan cards", () => {
     const app = readProjectFile("src/App.tsx");
+    const main = readProjectFile("electron/main.ts");
 
-    expect(app).toContain("createEsseImageRequestPlan");
-    expect(app).toContain("setProjectManagerDraftPlan(updatedState, imageRequestPlan");
+    expect(main).toContain("createProjectSnapshotWorkspaceRuntime");
+    expect(main).not.toContain("shouldUseWorkspaceToolsForEsseRequest");
+    expect(main).not.toContain("result.fileTasks");
+    expect(app).not.toContain("createEsseImageRequestPlan");
+    expect(app).not.toContain("setProjectManagerDraftPlan(updatedState, imageRequestPlan");
     expect(app).toContain("executeNewImagePlanCommand");
   });
 
@@ -111,6 +118,17 @@ describe("project plan UI wiring", () => {
     expect(updateAndPersistBody.indexOf("sessionsRef.current = nextSessions")).toBeLessThan(
       updateAndPersistBody.indexOf("persistProjectSnapshot")
     );
+  });
+
+  test("Esse final replies append to the latest project-manager snapshot after workspace tool broadcasts", () => {
+    const app = readProjectFile("src/App.tsx");
+    const sendEsseBody = app.match(
+      /async function handleSendEsseMessage\([\s\S]*?\): Promise<void> \{(?<body>[\s\S]*?)\n  \}/
+    )?.groups?.body ?? "";
+
+    expect(sendEsseBody).toContain("appendProjectManagerAssistantMessage(\n        projectManagerStateRef.current");
+    expect(sendEsseBody).not.toContain("appendProjectManagerAssistantMessage(\n        nextState");
+    expect(sendEsseBody).toContain("appendProjectManagerError(\n        projectManagerStateRef.current");
   });
 
   test("Esse composer exposes a compact persona switch after generation ratio", () => {

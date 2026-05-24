@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { screen } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 import { renderWithBatchImager } from "../test/renderWithBatchImager";
@@ -81,5 +81,40 @@ describe("ImagePreviewDialog behavior", () => {
     expect(screen.getByRole("button", { name: "缩小" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "适应窗口" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "全屏查看" })).toBeInTheDocument();
+  });
+
+  test("does not reveal the preview image until it has a fitted transform", () => {
+    renderWithBatchImager(
+      <ImagePreviewDialog
+        images={[{ label: "样图", path: "C:/tmp/sample.png" }]}
+        title="图片预览"
+        onClose={vi.fn()}
+      />
+    );
+
+    const previewImage = screen.getByRole("img", { name: "图片预览 样图" });
+    const stage = document.querySelector(".preview-stage");
+    expect(previewImage).toHaveClass("loading");
+
+    Object.defineProperty(previewImage, "naturalWidth", { configurable: true, value: 1600 });
+    Object.defineProperty(previewImage, "naturalHeight", { configurable: true, value: 1200 });
+    stage!.getBoundingClientRect = vi.fn(() => ({
+      bottom: 640,
+      height: 600,
+      left: 0,
+      right: 800,
+      top: 40,
+      width: 800,
+      x: 0,
+      y: 40,
+      toJSON: () => ({})
+    }));
+
+    fireEvent.load(previewImage);
+
+    expect(previewImage).toHaveClass("ready");
+    expect(previewImage).toHaveStyle({
+      transform: "translate(-50%, -50%) translate(0px, 0px) scale(0.447)"
+    });
   });
 });

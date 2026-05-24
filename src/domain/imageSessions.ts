@@ -1,9 +1,29 @@
 import type { ImageSession } from "../types/image";
 import { isSupportedImagePath } from "./imageFiles";
 
-export function createImageSessions(filePaths: string[]): ImageSession[] {
+type CreateSessionId = () => string;
+
+export function createImageSessionId(): string {
+  const crypto = globalThis.crypto;
+
+  if (typeof crypto?.randomUUID === "function") {
+    return `sess_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
+  }
+
+  if (typeof crypto?.getRandomValues === "function") {
+    const bytes = new Uint8Array(10);
+    crypto.getRandomValues(bytes);
+    return `sess_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  return `sess_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
+export function createImageSessions(filePaths: string[], makeSessionId: CreateSessionId = createImageSessionId): ImageSession[] {
+  const usedSessionIds = new Set<string>();
+
   return filePaths.map((filePath, index) => ({
-    id: `img-${index + 1}`,
+    id: createUniqueSessionId(usedSessionIds, makeSessionId, index),
     filePath,
     fileName: getFileName(filePath),
     chatMessages: [],
@@ -23,9 +43,15 @@ export function getInitialSelectedSessionId(
   return sessions[0]?.id ?? null;
 }
 
-export function appendImageSessions(existing: ImageSession[], incomingPaths: string[]): ImageSession[] {
+export function appendImageSessions(
+  existing: ImageSession[],
+  incomingPaths: string[],
+  makeSessionId: CreateSessionId = createImageSessionId
+): ImageSession[] {
   const existingPaths = new Set(existing.map((session) => session.filePath.toLowerCase()));
   const nextSessions = [...existing];
+  const usedSessionIds = new Set(existing.map((session) => session.id));
+  let fallbackIndex = nextSessions.length;
 
   for (const filePath of incomingPaths) {
     const normalized = filePath.toLowerCase();
@@ -35,8 +61,9 @@ export function appendImageSessions(existing: ImageSession[], incomingPaths: str
     }
 
     existingPaths.add(normalized);
+    fallbackIndex += 1;
     nextSessions.push({
-      id: `img-${nextSessions.length + 1}`,
+      id: createUniqueSessionId(usedSessionIds, makeSessionId, fallbackIndex),
       filePath,
       fileName: getFileName(filePath),
       chatMessages: [],
@@ -285,6 +312,18 @@ export function applySessionGenerationError(
   );
 }
 
+export function stopSessionWork(sessions: ImageSession[], sessionId: string): ImageSession[] {
+  return sessions.map((session) =>
+    session.id === sessionId
+      ? {
+          ...session,
+          chatStatus: "idle",
+          status: session.status === "generating" || session.status === "queued" ? "idle" : session.status
+        }
+      : session
+  );
+}
+
 export function addSessionUserMessage(
   sessions: ImageSession[],
   sessionId: string,
@@ -320,28 +359,7 @@ export function applySessionChatSuccess(
 ): ImageSession[] {
   return sessions.map((session) =>
     session.id === sessionId
-      ? {
-          ...session,
-          chatMessages: [
-            ...session.chatMessages,
-            {
-              id: messageId,
-              role: "assistant",
-              content: result.content,
-              ...(result.generatedFilePath ? { generatedFilePath: result.generatedFilePath } : {})
-            }
-          ],
-          chatStatus: "idle",
-          errorMessage: undefined,
-          ...(result.generatedFilePath
-            ? {
-                generatedFilePath: result.generatedFilePath,
-                generatedFilePaths: appendGeneratedFilePath(session.generatedFilePaths, result.generatedFilePath),
-                showOriginalInList: false,
-                status: "completed" as const
-              }
-            : {})
-        }
+      ? applyChatResultToSession(session, result, messageId)
       : session
   );
 }
@@ -368,6 +386,85 @@ export function applySessionChatError(
 function getFileName(filePath: string): string {
   const lastSlash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
   return filePath.slice(lastSlash + 1);
+}
+
+function createUniqueSessionId(usedSessionIds: Set<string>, makeSessionId: CreateSessionId, fallbackIndex: number): string {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const id = makeSessionId().trim();
+
+    if (id && !usedSessionIds.has(id)) {
+      usedSessionIds.add(id);
+      return id;
+    }
+  }
+
+  let index = fallbackIndex + 1;
+  let fallbackId = `sess_fallback_${index}`;
+  while (usedSessionIds.has(fallbackId)) {
+    index += 1;
+    fallbackId = `sess_fallback_${index}`;
+  }
+
+  usedSessionIds.add(fallbackId);
+  return fallbackId;
+}
+
+function applyChatResultToSession(
+  session: ImageSession,
+  result: { content: string; generatedFilePath?: string },
+  messageId: string
+): ImageSession {
+  const chatMessages = [
+    ...session.chatMessages,
+    {
+      id: messageId,
+      role: "assistant" as const,
+      content: result.content,
+      ...(result.generatedFilePath ? { generatedFilePath: result.generatedFilePath } : {})
+    }
+  ];
+
+  if (!result.generatedFilePath) {
+    return {
+      ...session,
+      chatMessages,
+      chatStatus: "idle",
+      errorMessage: undefined
+    };
+  }
+
+  const generatedFilePaths = appendGeneratedFilePath(session.generatedFilePaths, result.generatedFilePath);
+
+  if (isPendingNewImageSession(session)) {
+    return {
+      ...session,
+      chatMessages,
+      chatStatus: "idle",
+      errorMessage: undefined,
+      fileName: getFileName(result.generatedFilePath),
+      filePath: result.generatedFilePath,
+      generatedFilePath: undefined,
+      generatedFilePaths,
+      generationMode: undefined,
+      showOriginalInList: false,
+      status: "completed"
+    };
+  }
+
+  return {
+    ...session,
+    chatMessages,
+    chatStatus: "idle",
+    errorMessage: undefined,
+    generatedFilePath: result.generatedFilePath,
+    generatedFilePaths,
+    showOriginalInList: false,
+    status: "completed"
+  };
+}
+
+function isPendingNewImageSession(session: ImageSession): boolean {
+  return Boolean(session.generationMode && !session.generatedFilePath);
 }
 
 function appendGeneratedFilePath(existing: string[] | undefined, generatedFilePath: string): string[] {
