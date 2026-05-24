@@ -712,6 +712,18 @@ export function App() {
     persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
   }
 
+  function handleCancelEsseBatchTaskItem(batchTaskId: string, sessionId: string): void {
+    void window.batchImager?.cancelEsseBatchTaskItem({ batchTaskId, sessionId }).catch((error) => {
+      console.error("[BatchImager UI] Esse batch item cancel failed", error);
+    });
+  }
+
+  function handleCancelEsseBatchTaskAll(batchTaskId: string): void {
+    void window.batchImager?.cancelEsseBatchTaskAll({ batchTaskId }).catch((error) => {
+      console.error("[BatchImager UI] Esse batch cancel failed", error);
+    });
+  }
+
   async function executeProjectCommand(
     plan: BatchPlan,
     command: WorkerCommand,
@@ -1378,6 +1390,8 @@ export function App() {
               projectManagerState={projectManagerState}
               onExecutePlan={handleExecuteProjectPlan}
               onCopyImage={copyImageToClipboard}
+              onCancelBatchTaskAll={handleCancelEsseBatchTaskAll}
+              onCancelBatchTaskItem={handleCancelEsseBatchTaskItem}
               onOpenImagePreview={handleOpenChatImagePreview}
               onResolvePreflight={(requestId, decision) => {
                 void handleResolveEssePreflight(requestId, decision);

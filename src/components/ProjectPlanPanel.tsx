@@ -38,6 +38,8 @@ interface ProjectPlanPanelProps {
   projectManagerState: ProjectManagerState;
   onExecutePlan: (planId: string, mode: ProjectPlanExecutionMode) => void;
   onCopyImage: (imagePath: string) => void;
+  onCancelBatchTaskAll: (batchTaskId: string) => void;
+  onCancelBatchTaskItem: (batchTaskId: string, sessionId: string) => void;
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
   onResolvePreflight: (requestId: string, decision: EssePreflightResponse["decision"]) => void;
   onSendMessage: (content: string, outputSize?: string, referenceImagePaths?: string[], persona?: EssePersona) => void;
@@ -57,6 +59,8 @@ export function ProjectPlanPanel({
   projectManagerState,
   onExecutePlan,
   onCopyImage,
+  onCancelBatchTaskAll,
+  onCancelBatchTaskItem,
   onOpenImagePreview,
   onResolvePreflight,
   onSendMessage,
@@ -229,6 +233,14 @@ export function ProjectPlanPanel({
                       onResolve={onResolvePreflight}
                     />
                   ) : null}
+                  {message.batchTask ? (
+                    <EsseBatchTaskCard
+                      batchTask={message.batchTask}
+                      imageSessions={imageSessions}
+                      onCancelAll={onCancelBatchTaskAll}
+                      onCancelItem={onCancelBatchTaskItem}
+                    />
+                  ) : null}
                 </div>
                 {hasMessageContent ? <MessageActions content={message.content} /> : null}
               </div>
@@ -372,6 +384,82 @@ function EssePreflightCard({
       </footer>
     </section>
   );
+}
+
+function EsseBatchTaskCard({
+  batchTask,
+  imageSessions,
+  onCancelAll,
+  onCancelItem
+}: {
+  batchTask: NonNullable<ProjectManagerState["conversation"]["messages"][number]["batchTask"]>;
+  imageSessions: ImageSession[];
+  onCancelAll: (batchTaskId: string) => void;
+  onCancelItem: (batchTaskId: string, sessionId: string) => void;
+}) {
+  const sessionsById = new Map(imageSessions.map((session) => [session.id, session]));
+  const activeItems = batchTask.items.filter((item) => isActiveBatchTaskStatus(sessionsById.get(item.sessionId)?.status));
+
+  return (
+    <section className="esse-batch-task-card" aria-label="Esse 生成任务">
+      <header>
+        <strong>已提交 {batchTask.items.length} 个生成任务</strong>
+        <span>{activeItems.length > 0 ? `${activeItems.length} 个进行中` : "已结束"}</span>
+      </header>
+      <div className="esse-batch-task-list">
+        {batchTask.items.map((item) => {
+          const session = sessionsById.get(item.sessionId);
+          const status = session?.status ?? "idle";
+          const canCancel = isActiveBatchTaskStatus(status);
+
+          return (
+            <div className={`esse-batch-task-item ${status}`} key={`${batchTask.batchTaskId}-${item.sessionId}`}>
+              <span className="esse-batch-task-name">{item.displayLabel}</span>
+              <strong>{formatPreflightCommandMode(item.mode)}</strong>
+              <em>{formatBatchTaskStatus(status, session?.errorMessage)}</em>
+              <p>{item.promptSummary || "未填写提示词"}</p>
+              {canCancel ? (
+                <button
+                  className="toolbar-button"
+                  type="button"
+                  onClick={() => onCancelItem(batchTask.batchTaskId, item.sessionId)}
+                >
+                  取消
+                </button>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+      {activeItems.length > 0 ? (
+        <footer>
+          <button className="toolbar-button" type="button" onClick={() => onCancelAll(batchTask.batchTaskId)}>
+            全部取消
+          </button>
+        </footer>
+      ) : null}
+    </section>
+  );
+}
+
+function isActiveBatchTaskStatus(status: ImageSession["status"] | undefined): boolean {
+  return status === "queued" || status === "generating";
+}
+
+function formatBatchTaskStatus(status: ImageSession["status"], errorMessage?: string): string {
+  if (status === "queued") {
+    return "排队中";
+  }
+  if (status === "generating") {
+    return "生成中";
+  }
+  if (status === "completed") {
+    return "已完成";
+  }
+  if (status === "failed") {
+    return errorMessage === "已取消" ? "已取消" : "失败";
+  }
+  return "待处理";
 }
 
 function formatPreflightToolLabel(tool: EssePreflightRequest["payload"]["tool"]): string {

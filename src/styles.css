@@ -1264,8 +1264,20 @@ textarea {
   background: color-mix(in oklch, var(--green), white 94%);
 }
 
+.esse-batch-task-card {
+  display: grid;
+  gap: 7px;
+  margin-top: 7px;
+  border: 1px solid color-mix(in oklch, var(--green), white 68%);
+  border-radius: 8px;
+  padding: 8px 9px;
+  background: color-mix(in oklch, var(--green), white 96%);
+}
+
 .esse-preflight-card header,
-.esse-preflight-card footer {
+.esse-preflight-card footer,
+.esse-batch-task-card header,
+.esse-batch-task-card footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1273,7 +1285,8 @@ textarea {
 }
 
 .esse-preflight-card header span,
-.esse-preflight-card footer span {
+.esse-preflight-card footer span,
+.esse-batch-task-card header span {
   color: #66665f;
   font-size: 12px;
 }
@@ -1309,6 +1322,53 @@ textarea {
 }
 
 .esse-preflight-command p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #44443f;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.esse-batch-task-list {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.esse-batch-task-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 6px;
+  border-top: 1px solid color-mix(in oklch, var(--green), white 82%);
+  padding-top: 6px;
+}
+
+.esse-batch-task-item.failed {
+  border-top-color: color-mix(in oklch, var(--red), white 78%);
+}
+
+.esse-batch-task-name,
+.esse-batch-task-item strong,
+.esse-batch-task-item em {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.esse-batch-task-item em {
+  color: #66665f;
+  font-style: normal;
+}
+
+.esse-batch-task-item.failed em {
+  color: color-mix(in oklch, var(--red), black 8%);
+}
+
+.esse-batch-task-item p {
   grid-column: 1 / -1;
   margin: 0;
   color: #44443f;

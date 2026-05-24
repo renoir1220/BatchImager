@@ -140,6 +140,13 @@ describe("esseImagePreflightExecutor", () => {
 
   test("registers batch item controllers and cleans them as each item finishes", async () => {
     let snapshot = createSnapshot({
+      projectManagerState: {
+        conversation: {
+          id: "conv_1",
+          messages: []
+        },
+        plans: []
+      },
       sessions: [
         ...createSnapshot().sessions,
         {
@@ -208,6 +215,27 @@ describe("esseImagePreflightExecutor", () => {
       }
     ]);
     expect(generatedRequests.map((request) => request.signal?.aborted)).toEqual([false, false]);
+    expect(snapshot.projectManagerState?.conversation.messages.at(-1)).toMatchObject({
+      batchTask: {
+        batchTaskId: "batch_1",
+        items: [
+          {
+            displayLabel: "a.jpg",
+            mode: "edit",
+            promptSummary: "第一张换白底",
+            sessionId: "sess_1"
+          },
+          {
+            displayLabel: "b.jpg",
+            mode: "edit",
+            promptSummary: "第二张换白底",
+            sessionId: "sess_2"
+          }
+        ]
+      },
+      contextType: "esse-batch-task",
+      role: "context"
+    });
     expect(registry.has("batch_1")).toBe(true);
 
     generations.get("sess_1")?.resolve({ outputPath: "/project/images/generated/sess_1.png", requestSize: "auto" });

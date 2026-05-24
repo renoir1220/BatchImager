@@ -34,6 +34,8 @@ function renderProjectPlanPanelWithState(
       isCreatingPlan={false}
       projectManagerState={projectManagerState}
       onCopyImage={vi.fn()}
+      onCancelBatchTaskAll={vi.fn()}
+      onCancelBatchTaskItem={vi.fn()}
       onExecutePlan={vi.fn()}
       onOpenImagePreview={vi.fn()}
       onResolvePreflight={vi.fn()}
@@ -177,6 +179,8 @@ describe("ProjectPlanPanel plan cards", () => {
           isCreatingPlan={false}
           projectManagerState={EMPTY_PROJECT_MANAGER_STATE}
           onCopyImage={vi.fn()}
+          onCancelBatchTaskAll={vi.fn()}
+          onCancelBatchTaskItem={vi.fn()}
           onExecutePlan={vi.fn()}
           onOpenImagePreview={vi.fn()}
           onResolvePreflight={vi.fn()}
@@ -194,6 +198,8 @@ describe("ProjectPlanPanel plan cards", () => {
           isCreatingPlan={false}
           projectManagerState={makeProjectManagerState(makePlan())}
           onCopyImage={vi.fn()}
+          onCancelBatchTaskAll={vi.fn()}
+          onCancelBatchTaskItem={vi.fn()}
           onExecutePlan={vi.fn()}
           onOpenImagePreview={vi.fn()}
           onResolvePreflight={vi.fn()}
@@ -254,6 +260,8 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
           plans: []
         }}
         onCopyImage={vi.fn()}
+        onCancelBatchTaskAll={vi.fn()}
+        onCancelBatchTaskItem={vi.fn()}
         onExecutePlan={vi.fn()}
         onOpenImagePreview={vi.fn()}
         onResolvePreflight={onResolvePreflight}
@@ -309,6 +317,8 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
           plans: []
         }}
         onCopyImage={vi.fn()}
+        onCancelBatchTaskAll={vi.fn()}
+        onCancelBatchTaskItem={vi.fn()}
         onExecutePlan={vi.fn()}
         onOpenImagePreview={vi.fn()}
         onResolvePreflight={vi.fn()}
@@ -320,6 +330,93 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
     expect(screen.getByText("打包导出")).toBeInTheDocument();
     expect(screen.queryByText("生成图片")).not.toBeInTheDocument();
     expect(screen.getByText("0 次 API 调用")).toBeInTheDocument();
+  });
+});
+
+describe("ProjectPlanPanel Esse batch task cards", () => {
+  test("shows task status and emits item/all cancel actions", async () => {
+    const user = userEvent.setup();
+    const onCancelBatchTaskAll = vi.fn();
+    const onCancelBatchTaskItem = vi.fn();
+
+    renderWithBatchImager(
+      <ProjectPlanPanel
+        activityLogs={[]}
+        imageSessions={[
+          {
+            chatMessages: [],
+            chatStatus: "idle",
+            fileName: "a.jpg",
+            filePath: "/project/a.jpg",
+            id: "sess_1",
+            status: "generating"
+          },
+          {
+            chatMessages: [],
+            chatStatus: "idle",
+            errorMessage: "已取消",
+            fileName: "b.jpg",
+            filePath: "/project/b.jpg",
+            id: "sess_2",
+            status: "failed"
+          }
+        ]}
+        isCreatingPlan={false}
+        projectManagerState={{
+          conversation: {
+            id: "conversation-1",
+            messages: [
+              {
+                batchTask: {
+                  batchTaskId: "batch_1",
+                  items: [
+                    {
+                      command: { mode: "edit", prompt: "第一张换白底", target: { sessionId: "sess_1", type: "existing" } },
+                      displayLabel: "a.jpg",
+                      mode: "edit",
+                      promptSummary: "第一张换白底",
+                      sessionId: "sess_1"
+                    },
+                    {
+                      command: { mode: "edit", prompt: "第二张换白底", target: { sessionId: "sess_2", type: "existing" } },
+                      displayLabel: "b.jpg",
+                      mode: "edit",
+                      promptSummary: "第二张换白底",
+                      sessionId: "sess_2"
+                    }
+                  ]
+                },
+                content: "",
+                contextType: "esse-batch-task",
+                id: "batch-message-1",
+                role: "context"
+              }
+            ]
+          },
+          plans: []
+        }}
+        onCopyImage={vi.fn()}
+        onCancelBatchTaskAll={onCancelBatchTaskAll}
+        onCancelBatchTaskItem={onCancelBatchTaskItem}
+        onExecutePlan={vi.fn()}
+        onOpenImagePreview={vi.fn()}
+        onResolvePreflight={vi.fn()}
+        onSendMessage={vi.fn()}
+        onStopWork={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("region", { name: "Esse 生成任务" })).toBeInTheDocument();
+    expect(screen.getByText("已提交 2 个生成任务")).toBeInTheDocument();
+    expect(screen.getByText("1 个进行中")).toBeInTheDocument();
+    expect(screen.getByText("生成中")).toBeInTheDocument();
+    expect(screen.getByText("已取消")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    await user.click(screen.getByRole("button", { name: "全部取消" }));
+
+    expect(onCancelBatchTaskItem).toHaveBeenCalledWith("batch_1", "sess_1");
+    expect(onCancelBatchTaskAll).toHaveBeenCalledWith("batch_1");
   });
 });
 

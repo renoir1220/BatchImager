@@ -155,11 +155,25 @@ export type ProjectManagerMessageRole = "user" | "assistant" | "error" | "contex
 export type BatchPlanStatus = "draft" | "running" | "completed" | "failed" | "paused";
 export type WorkerReportStatus = "completed" | "failed" | "skipped";
 
+export interface EsseBatchTaskCardItem {
+  command: EssePreflightCommand;
+  displayLabel: string;
+  mode: "edit" | "generate";
+  promptSummary: string;
+  sessionId: string;
+}
+
+export interface EsseBatchTaskCardData {
+  batchTaskId: string;
+  items: EsseBatchTaskCardItem[];
+}
+
 export interface ProjectManagerMessage {
   id: string;
   role: ProjectManagerMessageRole;
   content: string;
-  contextType?: "esse-tool-call";
+  batchTask?: EsseBatchTaskCardData;
+  contextType?: "esse-batch-task" | "esse-tool-call";
   planId?: string;
   referenceFilePaths?: string[];
 }

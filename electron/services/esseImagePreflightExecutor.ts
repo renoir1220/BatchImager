@@ -66,7 +66,12 @@ export function createEsseImagePreflightExecutor(options: CreateEsseImagePreflig
     }
 
     const affectedSessionIds = preparedCommands.map(({ prepared }) => prepared.sessionId);
-    const queuedMutation = await context.applyMutation((state) => markSessionsQueued(state, affectedSessionIds));
+    const queuedMutation = await context.applyMutation((state) =>
+      appendBatchTaskCardMessage(markSessionsQueued(state, affectedSessionIds).state, {
+        batchTaskId,
+        preparedCommands
+      })
+    );
     if (!queuedMutation.result.ok) {
       return queuedMutation.result;
     }
@@ -306,6 +311,64 @@ function markSessionsQueued(
   };
 }
 
+function appendBatchTaskCardMessage(
+  state: ProjectSnapshot,
+  params: { batchTaskId: string; preparedCommands: PreparedCommand[] }
+): { result: WorkspaceMutationResult; state: ProjectSnapshot } {
+  if (!state.projectManagerState) {
+    return {
+      result: {
+        affectedSessionIds: params.preparedCommands.map(({ prepared }) => prepared.sessionId),
+        ok: true,
+        summary: "已提交生成任务。"
+      },
+      state
+    };
+  }
+
+  const sessionsById = new Map(state.sessions.map((session) => [session.id, session]));
+  const items = params.preparedCommands.map(({ command, prepared }) => {
+    const session = sessionsById.get(prepared.sessionId);
+    return {
+      command,
+      displayLabel: command.displayLabel || command.target?.fileName || session?.fileName || prepared.sessionId,
+      mode: command.mode ?? "generate",
+      promptSummary: summarizePrompt(command.prompt ?? ""),
+      sessionId: prepared.sessionId
+    };
+  });
+
+  return {
+    result: {
+      affectedSessionIds: params.preparedCommands.map(({ prepared }) => prepared.sessionId),
+      ok: true,
+      summary: "已提交生成任务。"
+    },
+    state: {
+      ...state,
+      projectManagerState: {
+        ...state.projectManagerState,
+        conversation: {
+          ...state.projectManagerState.conversation,
+          messages: [
+            ...state.projectManagerState.conversation.messages,
+            {
+              batchTask: {
+                batchTaskId: params.batchTaskId,
+                items
+              },
+              content: "",
+              contextType: "esse-batch-task",
+              id: createMessageId("esse-batch-task"),
+              role: "context"
+            }
+          ]
+        }
+      }
+    }
+  };
+}
+
 function markSessionGenerating(
   state: ProjectSnapshot,
   sessionId: string
@@ -422,6 +485,11 @@ function linkAbortSignal(parentSignal: AbortSignal | undefined, childController:
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function summarizePrompt(prompt: string): string {
+  const normalized = prompt.replace(/\s+/g, " ").trim();
+  return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized;
 }
 
 async function unlinkBlankSeedSafely(filePath: string): Promise<void> {
