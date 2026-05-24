@@ -267,6 +267,133 @@ describe("esseWorkspaceRuntime", () => {
     expect(stripUndoLog(persisted)).toEqual(initialWorkspace);
   });
 
+  test("splits generated records into a new session and undo restores the source", async () => {
+    let persisted = createSnapshot({
+      sessions: [
+        createSession("sess_1", {
+          chatMessages: [
+            { content: "记录 2", generatedFilePath: "/project/generated/a-2.png", id: "msg_1", role: "assistant" }
+          ],
+          generatedFilePath: "/project/generated/a-2.png",
+          generatedFilePaths: ["/project/generated/a-1.png", "/project/generated/a-2.png", "/project/generated/a-3.png"]
+        })
+      ]
+    });
+    const initialWorkspace = stripUndoLog(persisted);
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const runtime = createProjectSnapshotWorkspaceRuntime({ initialSnapshot: persisted, sink });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    const splitResult = await tools.get("split_session")?.execute("split", {
+      fileName: "拆分记录.jpg",
+      recordIndexes: [2, 3],
+      sessionId: "sess_1"
+    });
+
+    expect(splitResult?.isError).toBeUndefined();
+    expect(persisted.sessions).toHaveLength(2);
+    expect(persisted.sessions[0]).toMatchObject({
+      generatedFilePath: "/project/generated/a-1.png",
+      generatedFilePaths: ["/project/generated/a-1.png"]
+    });
+    expect(persisted.sessions[0]?.chatMessages[0]?.generatedFilePath).toBeUndefined();
+    expect(persisted.sessions[1]).toMatchObject({
+      fileName: "拆分记录.jpg",
+      filePath: "/project/generated/a-2.png",
+      generatedFilePath: "/project/generated/a-2.png",
+      generatedFilePaths: ["/project/generated/a-2.png", "/project/generated/a-3.png"],
+      originatedFromGeneration: true,
+      status: "completed"
+    });
+
+    await tools.get("undo_last_actions")?.execute("undo-split", {});
+    expect(stripUndoLog(persisted)).toEqual(initialWorkspace);
+  });
+
+  test("rejects invalid split record indexes and splitting all records", async () => {
+    let persisted = createSnapshot({
+      sessions: [
+        createSession("sess_1", {
+          generatedFilePaths: ["/project/generated/a-1.png", "/project/generated/a-2.png"]
+        })
+      ]
+    });
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const tools = toolsByName(createEsseWorkspaceTools(createProjectSnapshotWorkspaceRuntime({ initialSnapshot: persisted, sink })));
+
+    const outOfRange = await tools.get("split_session")?.execute("split-bad-index", {
+      recordIndexes: [3],
+      sessionId: "sess_1"
+    });
+    const allRecords = await tools.get("split_session")?.execute("split-all", {
+      recordIndexes: [1, 2],
+      sessionId: "sess_1"
+    });
+
+    expect(outOfRange?.isError).toBe(true);
+    expect(outOfRange?.content[0]?.text).toContain("recordIndex out of range");
+    expect(allRecords?.isError).toBe(true);
+    expect(allRecords?.content[0]?.text).toContain("cannot split all records");
+    expect(persisted.sessions).toHaveLength(1);
+  });
+
+  test("duplicates sessions without copying chat history and undo removes the duplicate", async () => {
+    let persisted = createSnapshot({
+      sessions: [
+        createSession("sess_1", {
+          chatMessages: [{ content: "原会话", id: "msg_1", role: "assistant" }],
+          generatedFilePath: "/project/generated/a-2.png",
+          generatedFilePaths: ["/project/generated/a-1.png", "/project/generated/a-2.png"],
+          lastPrompt: "白底图",
+          originatedFromGeneration: true,
+          showOriginalInList: false
+        })
+      ]
+    });
+    const initialWorkspace = stripUndoLog(persisted);
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const tools = toolsByName(createEsseWorkspaceTools(createProjectSnapshotWorkspaceRuntime({ initialSnapshot: persisted, sink })));
+
+    const duplicateResult = await tools.get("duplicate_session")?.execute("duplicate", {
+      fileName: "对比副本.jpg",
+      sessionId: "sess_1"
+    });
+
+    expect(duplicateResult?.isError).toBeUndefined();
+    expect(persisted.sessions).toHaveLength(2);
+    const duplicate = persisted.sessions[1];
+    expect(duplicate?.id).not.toBe("sess_1");
+    expect(duplicate).toMatchObject({
+      chatMessages: [],
+      fileName: "对比副本.jpg",
+      filePath: "/project/original/sess_1.jpg",
+      generatedFilePath: "/project/generated/a-2.png",
+      generatedFilePaths: ["/project/generated/a-1.png", "/project/generated/a-2.png"],
+      lastPrompt: "白底图",
+      originatedFromGeneration: true,
+      status: "completed"
+    });
+    expect(persisted.selectedSessionId).toBe(duplicate?.id);
+
+    await tools.get("undo_last_actions")?.execute("undo-duplicate", {});
+    expect(stripUndoLog(persisted)).toEqual(initialWorkspace);
+  });
+
   test("keeps only the latest fifty undo entries", async () => {
     let persisted = createSnapshot();
     const sink = new ProjectMutationSink<ProjectSnapshot>({

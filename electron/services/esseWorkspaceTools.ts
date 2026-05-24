@@ -120,7 +120,9 @@ export function createEsseWorkspaceTools(runtime: EsseWorkspaceToolRuntime): Bat
     createPackageGeneratedImagesTool(runtime),
     createDeleteSessionRecordTool(runtime),
     createDeleteSessionTool(runtime),
-    createMergeSessionsTool(runtime)
+    createMergeSessionsTool(runtime),
+    createSplitSessionTool(runtime),
+    createDuplicateSessionTool(runtime)
   ];
 
   const budgetedTools = runtime.getTurnBudget ? tools.map((tool) => withTurnBudget(runtime, tool)) : tools;
@@ -942,6 +944,40 @@ function createMergeSessionsTool(runtime: EsseWorkspaceToolRuntime): BatchImager
   });
 }
 
+function createSplitSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
+  return reversibleMutationTool({
+    description:
+      "Split selected generated records from one session into a new independent session. Call list_sessions and get_session_records first. recordIndexes are 1-based and must leave the source session with at least one record.",
+    label: "拆分图片",
+    name: "split_session",
+    parameters: splitSessionParameters(),
+    risk: "destructive",
+    mutate: (state, params) =>
+      splitSession(state, {
+        fileName: readString(params.fileName),
+        recordIndexes: readIntegerArray(params.recordIndexes),
+        sessionId: readString(params.sessionId)
+      }),
+    runtime
+  });
+}
+
+function createDuplicateSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
+  return reversibleMutationTool({
+    description:
+      "Duplicate one image session including its current image and generated record references. The image files are not copied. Use when the user wants a parallel copy to compare or experiment without affecting the original.",
+    label: "复制图片",
+    name: "duplicate_session",
+    parameters: objectParameters({ fileName: "Optional display fileName for the duplicate.", sessionId: "Stable source session id." }, ["sessionId"]),
+    mutate: (state, params) =>
+      duplicateSession(state, {
+        fileName: readString(params.fileName),
+        sessionId: readString(params.sessionId)
+      }),
+    runtime
+  });
+}
+
 async function requestWorkspaceToolPermission(
   runtime: EsseWorkspaceToolRuntime,
   tool: { label: string; name: string; requiresPreflight: boolean; risk: BatchImagerAgentToolRisk },
@@ -1526,6 +1562,118 @@ function mergeSessions(state: EsseWorkspaceState, params: { sourceSessionIds: st
   );
 }
 
+function splitSession(state: EsseWorkspaceState, params: { fileName?: string; recordIndexes: number[]; sessionId: string }) {
+  const sourceIndex = state.sessions.findIndex((session) => session.id === params.sessionId);
+  const source = state.sessions[sourceIndex];
+  if (!source) {
+    return fail(state, "session not found", `no session with id ${params.sessionId}`, "call list_sessions to list current ids.");
+  }
+
+  const records = source.generatedFilePaths ?? [];
+  const recordIndexes = [...new Set(params.recordIndexes)];
+  if (!recordIndexes.length) {
+    return fail(state, "recordIndexes are required", undefined, "provide at least one 1-based record index.");
+  }
+
+  const invalidIndex = recordIndexes.find((recordIndex) => !Number.isInteger(recordIndex) || recordIndex < 1 || recordIndex > records.length);
+  if (invalidIndex !== undefined) {
+    return fail(
+      state,
+      "recordIndex out of range",
+      `${params.sessionId} has ${records.length} records, requested ${invalidIndex}.`,
+      "call get_session_records to verify."
+    );
+  }
+
+  if (recordIndexes.length >= records.length) {
+    return fail(state, "cannot split all records", undefined, "use delete_session or duplicate_session instead of splitting every record.");
+  }
+
+  const movedIndexes = new Set(recordIndexes.map((recordIndex) => recordIndex - 1));
+  const movedRecords = recordIndexes.map((recordIndex) => records[recordIndex - 1]);
+  const remainingRecords = records.filter((_record, index) => !movedIndexes.has(index));
+  const currentRecordIndex = source.generatedFilePath ? records.indexOf(source.generatedFilePath) + 1 : 0;
+  const fallback = currentRecordIndex > 0 && movedIndexes.has(currentRecordIndex - 1)
+    ? chooseFallback(source, currentRecordIndex, remainingRecords)
+    : source.generatedFilePath && remainingRecords.includes(source.generatedFilePath)
+      ? source.generatedFilePath
+      : remainingRecords.at(-1);
+  const newSessionId = createUniqueWorkspaceSessionId(state);
+  const newFileName = params.fileName || basenameFromPath(movedRecords[0]);
+  const newSession: PersistedImageSession = {
+    chatMessages: [],
+    chatStatus: "idle",
+    fileName: newFileName,
+    filePath: movedRecords[0],
+    generatedFilePath: movedRecords[0],
+    generatedFilePaths: movedRecords,
+    id: newSessionId,
+    originatedFromGeneration: true,
+    showOriginalInList: false,
+    status: "completed"
+  };
+
+  return ok(
+    {
+      ...state,
+      project: { ...state.project, imageCount: state.sessions.length + 1 },
+      selectedSessionId: newSessionId,
+      sessions: state.sessions.flatMap((session, index) => {
+        if (session.id !== params.sessionId) {
+          return [session];
+        }
+        const updatedSource: PersistedImageSession = {
+          ...session,
+          chatMessages: session.chatMessages.map((message) =>
+            message.generatedFilePath && movedRecords.includes(message.generatedFilePath) ? { ...message, generatedFilePath: undefined } : message
+          ),
+          generatedFilePath: fallback,
+          generatedFilePaths: remainingRecords,
+          showOriginalInList: !fallback
+        };
+        return index === sourceIndex ? [updatedSource, newSession] : [updatedSource];
+      })
+    },
+    [params.sessionId, newSessionId],
+    `已拆分 ${movedRecords.length} 条记录为 ${newFileName}。`
+  );
+}
+
+function duplicateSession(state: EsseWorkspaceState, params: { fileName?: string; sessionId: string }) {
+  const sourceIndex = state.sessions.findIndex((session) => session.id === params.sessionId);
+  const source = state.sessions[sourceIndex];
+  if (!source) {
+    return fail(state, "session not found", `no session with id ${params.sessionId}`, "call list_sessions to list current ids.");
+  }
+
+  const newSessionId = createUniqueWorkspaceSessionId(state);
+  const duplicate: PersistedImageSession = {
+    chatMessages: [],
+    chatStatus: "idle",
+    fileName: params.fileName || `副本-${source.fileName}`,
+    filePath: source.filePath,
+    id: newSessionId,
+    status: "completed",
+    ...(source.generatedFilePath ? { generatedFilePath: source.generatedFilePath } : {}),
+    ...(source.generatedFilePaths?.length ? { generatedFilePaths: [...source.generatedFilePaths] } : {}),
+    ...(source.generationMode ? { generationMode: source.generationMode } : {}),
+    ...(source.lastPrompt ? { lastPrompt: source.lastPrompt } : {}),
+    ...(source.originatedFromGeneration ? { originatedFromGeneration: true } : {}),
+    showOriginalInList: source.showOriginalInList
+  };
+
+  return ok(
+    {
+      ...state,
+      project: { ...state.project, imageCount: state.sessions.length + 1 },
+      selectedSessionId: newSessionId,
+      sessions: state.sessions.flatMap((session, index) => (index === sourceIndex ? [session, duplicate] : [session]))
+    },
+    [params.sessionId, newSessionId],
+    `已复制 ${source.fileName}。`
+  );
+}
+
 function resolveRecord(
   state: EsseWorkspaceState,
   sessionId: string,
@@ -1674,6 +1822,19 @@ function batchGenerationParameters(): Record<string, unknown> {
   };
 }
 
+function splitSessionParameters(): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      fileName: { type: "string", description: "Optional fileName for the new session." },
+      recordIndexes: { type: "array", items: { type: "integer" }, description: "1-based record indexes to move into the new session." },
+      sessionId: { type: "string", description: "Stable source session id." }
+    },
+    required: ["sessionId", "recordIndexes"],
+    additionalProperties: false
+  };
+}
+
 function readString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -1685,6 +1846,13 @@ function readMemoryCategory(value: unknown): EsseMemoryCategory | undefined {
 
 function readStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function readIntegerArray(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map(readInteger).filter((item) => Number.isInteger(item));
 }
 
 function readInteger(value: unknown): number {
@@ -1701,4 +1869,15 @@ function readInteger(value: unknown): number {
 
 function uniquePaths(paths: string[]): string[] {
   return [...new Set(paths)];
+}
+
+function createUniqueWorkspaceSessionId(state: EsseWorkspaceState): string {
+  const existingIds = new Set(state.sessions.map((session) => session.id));
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    if (!existingIds.has(candidate)) {
+      return candidate;
+    }
+  }
+  return `sess_${existingIds.size + 1}_${Math.random().toString(36).slice(2, 8)}`;
 }

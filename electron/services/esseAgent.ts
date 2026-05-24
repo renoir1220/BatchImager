@@ -423,7 +423,7 @@ function buildWorkspaceToolPromptSections(): string[] {
     "当前你可以通过工具读取和修改左侧工作区。所有工作区副作用必须通过工具执行，不要用 JSON 字段表达工作区操作。",
     "如果用户请求可以由当前工具完成的动作，必须先调用对应工具；不要只回复“我会处理/可以处理”。",
     "可用读工具：get_project_overview / list_sessions / get_session_records / read_image_metadata / list_reference_images / list_remembered_preferences / scan_unreferenced_files。",
-    "可用写工具：restore_session_record / restore_original / rename_session / reorder_sessions / set_session_prompt / add_blank_session / add_reference_image / remove_reference_image / remember_user_preference / forget_user_preference / undo_last_actions / delete_session_record / delete_session / merge_sessions / delete_unreferenced_files。",
+    "可用写工具：restore_session_record / restore_original / rename_session / reorder_sessions / set_session_prompt / add_blank_session / add_reference_image / remove_reference_image / remember_user_preference / forget_user_preference / undo_last_actions / split_session / duplicate_session / delete_session_record / delete_session / merge_sessions / delete_unreferenced_files。",
     "生成与文件工具：generate_image / run_batch_generation / package_generated_images。它们每次都会先弹 preflight 卡片让用户确认；生成类确认后会提交后台生成任务，打包类确认后才写桌面 zip。",
     "preflight 卡片只能由这些工具触发；不要先用文字说“请确认后我就执行”。用户已经要求执行时，直接调用工具，让工具产生确认卡片。",
     "工作流要求：",
@@ -436,11 +436,11 @@ function buildWorkspaceToolPromptSections(): string[] {
     "7) 物理删除未引用生成文件必须先 scan_unreferenced_files，再把返回的 candidateId 传给 delete_unreferenced_files；不要传 filePath。",
     "8) 管理项目参考图时必须用 list_reference_images / add_reference_image / remove_reference_image。add_reference_image 只能使用本轮参考图路径列表里的 filePath；用户只是粘贴了图但没有要求登记为项目参考图时，不要自动添加。生成时如需引用项目参考图，先 list_reference_images，再把返回的 id 放进 referenceImageIds。",
     "9) 用户明确说“记住/保存/以后都按这个”这类跨项目长期偏好时，用 remember_user_preference；用户问记住了什么或要求忘记时，用 list_remembered_preferences / forget_user_preference。不要把“这个项目是某客户的”这类项目专属信息写入全局记忆。",
-    "10) 用户要求撤销、回退刚才操作、恢复上一步时，用 undo_last_actions；默认 count=1，用户说撤销最近 N 步时传 count=N。生成、打包、物理删除不可逆，工具会只撤销可逆工作区操作。",
-    "11) 生成/编辑图片必须用 generate_image 或 run_batch_generation；删除背景、去水印、换白底、改风格都属于图片编辑，不要只口头答应。编辑现有工作区图片时先 list_sessions；用户要全新生成 N 张图（如“生成 4 张鲜花图”）时直接用 run_batch_generation，N 条 target.type='new' command，除非引用了现有图片才先 list_sessions。单张用 generate_image；多张、全部、这批、批量处理同一类任务用 run_batch_generation，一张图一条 command。每条命令必须显式 mode='edit' 或 mode='generate'。只有用户明确要求尺寸、比例、横版、竖版、方图、2K/4K 时才传 size。",
-    "12) 打包/导出/放桌面必须用 package_generated_images；需要限定范围时先 list_sessions，只传稳定 sessionId；不要输出或猜测文件路径，也不要用文字替代 preflight。",
-    "13) 用户取消 preflight 后，不要原样重试，先问用户要调整什么。",
-    "14) 生成工具是 fire-and-forget：工具返回后只能说“已提交 N 个任务/生成会在后台完成”，不要说“已经生成完成”，也不要承诺完成后主动通知。其他工具完成后直接用一句中文总结；不要返回 JSON。"
+    "11) 用户要求把某些生成记录单独拆出来时，先 list_sessions 和 get_session_records，再用 split_session；用户要求复制一份用于对比或试改时，先 list_sessions，再用 duplicate_session。",
+    "12) 生成/编辑图片必须用 generate_image 或 run_batch_generation；删除背景、去水印、换白底、改风格都属于图片编辑，不要只口头答应。编辑现有工作区图片时先 list_sessions；用户要全新生成 N 张图（如“生成 4 张鲜花图”）时直接用 run_batch_generation，N 条 target.type='new' command，除非引用了现有图片才先 list_sessions。单张用 generate_image；多张、全部、这批、批量处理同一类任务用 run_batch_generation，一张图一条 command。每条命令必须显式 mode='edit' 或 mode='generate'。只有用户明确要求尺寸、比例、横版、竖版、方图、2K/4K 时才传 size。",
+    "13) 打包/导出/放桌面必须用 package_generated_images；需要限定范围时先 list_sessions，只传稳定 sessionId；不要输出或猜测文件路径，也不要用文字替代 preflight。",
+    "14) 用户取消 preflight 后，不要原样重试，先问用户要调整什么。",
+    "15) 生成工具是 fire-and-forget：工具返回后只能说“已提交 N 个任务/生成会在后台完成”，不要说“已经生成完成”，也不要承诺完成后主动通知。其他工具完成后直接用一句中文总结；不要返回 JSON。"
   ];
 }
 

@@ -64,6 +64,27 @@ describe("projectUnreferencedFiles", () => {
     await expect(readFile(stableOrphanPath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(laterReferencedPath, "utf8")).resolves.toBe("later");
   });
+
+  test("keeps shared generated files referenced after deleting one duplicate session", async () => {
+    const { generatedDirectory, snapshot } = await createProjectFixture();
+    const sharedPath = path.join(generatedDirectory, "shared.png");
+    await writeFile(sharedPath, "shared");
+    snapshot.sessions = [
+      {
+        chatMessages: [],
+        chatStatus: "idle",
+        fileName: "duplicate.jpg",
+        filePath: sharedPath,
+        generatedFilePath: sharedPath,
+        generatedFilePaths: [sharedPath],
+        id: "sess_duplicate",
+        originatedFromGeneration: true,
+        status: "completed"
+      }
+    ];
+
+    await expect(scanProjectUnreferencedFiles(snapshot)).resolves.toEqual([]);
+  });
 });
 
 async function createProjectFixture(): Promise<{ generatedDirectory: string; projectDirectory: string; snapshot: ProjectSnapshot }> {

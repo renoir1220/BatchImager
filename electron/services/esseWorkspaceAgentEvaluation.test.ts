@@ -142,6 +142,57 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
       userTask: "撤销刚才那步"
     },
     {
+      assert: ({ persisted, result, trace }) => {
+        expect(result.reply).toBe("已把 img-2 的记录 3、4 拆成一张新图。");
+        expect(trace).toEqual(["list_sessions", "get_session_records", "split_session"]);
+        expect(persisted.sessions).toHaveLength(3);
+        expect(persisted.sessions[1]?.generatedFilePaths).toEqual(["/project/generated/b-1.png", "/project/generated/b-2.png"]);
+        expect(persisted.sessions[2]?.generatedFilePaths).toEqual(["/project/generated/b-3.png", "/project/generated/b-4.png"]);
+      },
+      id: "split-generated-records-into-new-session",
+      initialSnapshot: createSnapshot({
+        sessions: [
+          createSession("sess_1"),
+          createSession("sess_2", {
+            generatedFilePaths: [
+              "/project/generated/b-1.png",
+              "/project/generated/b-2.png",
+              "/project/generated/b-3.png",
+              "/project/generated/b-4.png"
+            ]
+          })
+        ]
+      }),
+      reply: "已把 img-2 的记录 3、4 拆成一张新图。",
+      script: [
+        { tool: "list_sessions", params: {} },
+        { tool: "get_session_records", params: { sessionId: "sess_2" } },
+        { tool: "split_session", params: { fileName: "img-2-records-3-4.jpg", recordIndexes: [3, 4], sessionId: "sess_2" } }
+      ],
+      userTask: "把 img-2 的记录 3、4 拆成一张新图"
+    },
+    {
+      assert: ({ persisted, result, trace }) => {
+        expect(result.reply).toBe("已复制 img-1，新的副本已选中，方便你对比着改。");
+        expect(trace).toEqual(["list_sessions", "duplicate_session"]);
+        expect(persisted.sessions).toHaveLength(2);
+        expect(persisted.sessions[1]?.id).not.toBe("sess_1");
+        expect(persisted.sessions[1]).toMatchObject({
+          chatMessages: [],
+          filePath: "/project/images/original/sess_1.jpg"
+        });
+        expect(persisted.selectedSessionId).toBe(persisted.sessions[1]?.id);
+      },
+      id: "duplicate-session-for-comparison",
+      initialSnapshot: createSnapshot({ sessions: [createSession("sess_1")] }),
+      reply: "已复制 img-1，新的副本已选中，方便你对比着改。",
+      script: [
+        { tool: "list_sessions", params: {} },
+        { tool: "duplicate_session", params: { fileName: "img-1-copy.jpg", sessionId: "sess_1" } }
+      ],
+      userTask: "复制一份 img-1，我想对比着改"
+    },
+    {
       assert: ({ persisted, prompt, trace }) => {
         expect(trace).toEqual(["list_reference_images", "add_reference_image"]);
         expect(prompt).toContain("/tmp/esse-uploaded-style.png");
