@@ -15,6 +15,23 @@ export interface CancelOperationResponse {
   canceled: boolean;
 }
 
+export interface CancelEsseBatchTaskItemRequest {
+  batchTaskId: string;
+  sessionId: string;
+}
+
+export interface CancelEsseBatchTaskItemResponse {
+  canceled: boolean;
+}
+
+export interface CancelEsseBatchTaskAllRequest {
+  batchTaskId: string;
+}
+
+export interface CancelEsseBatchTaskAllResponse {
+  canceledCount: number;
+}
+
 export interface CopyImageToClipboardRequest {
   imagePath: string;
 }

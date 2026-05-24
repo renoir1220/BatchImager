@@ -42,6 +42,18 @@ describe("generation recovery UI", () => {
     expect(main).toContain("withCancelableOperation");
   });
 
+  test("renderer can cancel Esse batch task items through main-process registry IPC", () => {
+    const preload = readProjectFile("electron/preload.ts");
+    const main = readProjectFile("electron/main.ts");
+
+    expect(preload).toContain("cancelEsseBatchTaskItem");
+    expect(preload).toContain("esse:batch-task-cancel-item");
+    expect(preload).toContain("cancelEsseBatchTaskAll");
+    expect(preload).toContain("esse:batch-task-cancel-all");
+    expect(main).toContain("esseBatchTaskRegistry.cancelItem");
+    expect(main).toContain("esseBatchTaskRegistry.cancelAll");
+  });
+
   test("macOS red close exits the app instead of leaving it running without windows", () => {
     const main = readProjectFile("electron/main.ts");
     const windowAllClosedHandler = main.match(/app\.on\("window-all-closed", \(\) => \{(?<body>[\s\S]*?)\n\}\);/)?.groups?.body ?? "";

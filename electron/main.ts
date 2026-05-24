@@ -4,6 +4,8 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type {
   CancelOperationRequest,
+  CancelEsseBatchTaskAllRequest,
+  CancelEsseBatchTaskItemRequest,
   CopyImageToClipboardRequest,
   CreatePlaceholderImageRequest,
   GenerateImageRequest,
@@ -453,6 +455,32 @@ function registerIpc(appLogger: AppLogger): void {
     return { accepted: essePreflightBroker.respond(response) };
   });
 
+  ipcMain.handle("esse:batch-task-cancel-item", (_event, request: CancelEsseBatchTaskItemRequest) => {
+    assertCancelEsseBatchTaskItemRequest(request);
+    const result = esseBatchTaskRegistry.cancelItem(request.batchTaskId, request.sessionId);
+    if (result.canceled) {
+      appLogger.info("Esse batch task item canceled", {
+        context: `esse-batch:${request.batchTaskId}`,
+        data: { sessionId: request.sessionId },
+        publicMessage: "已取消这张图的生成。"
+      });
+    }
+    return { canceled: result.canceled };
+  });
+
+  ipcMain.handle("esse:batch-task-cancel-all", (_event, request: CancelEsseBatchTaskAllRequest) => {
+    assertCancelEsseBatchTaskAllRequest(request);
+    const result = esseBatchTaskRegistry.cancelAll(request.batchTaskId);
+    if (result.canceledCount > 0) {
+      appLogger.info("Esse batch task canceled", {
+        context: `esse-batch:${request.batchTaskId}`,
+        data: { canceledCount: result.canceledCount },
+        publicMessage: `已取消 ${result.canceledCount} 个生成任务。`
+      });
+    }
+    return result;
+  });
+
   ipcMain.handle("logs:list", () => appLogger.getEntries());
 }
 
@@ -716,6 +744,25 @@ function assertGenerateImageRequest(request: GenerateImageRequest): void {
 function assertCancelOperationRequest(request: CancelOperationRequest): void {
   if (typeof request !== "object" || request === null || typeof request.operationId !== "string" || !request.operationId.trim()) {
     throw new Error("Invalid cancel operation request");
+  }
+}
+
+function assertCancelEsseBatchTaskItemRequest(request: CancelEsseBatchTaskItemRequest): void {
+  if (
+    typeof request !== "object" ||
+    request === null ||
+    typeof request.batchTaskId !== "string" ||
+    !request.batchTaskId.trim() ||
+    typeof request.sessionId !== "string" ||
+    !request.sessionId.trim()
+  ) {
+    throw new Error("Invalid Esse batch task item cancel request");
+  }
+}
+
+function assertCancelEsseBatchTaskAllRequest(request: CancelEsseBatchTaskAllRequest): void {
+  if (typeof request !== "object" || request === null || typeof request.batchTaskId !== "string" || !request.batchTaskId.trim()) {
+    throw new Error("Invalid Esse batch task cancel request");
   }
 }
 

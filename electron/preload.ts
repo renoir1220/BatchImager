@@ -1,6 +1,10 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppLogEntry,
+  CancelEsseBatchTaskAllRequest,
+  CancelEsseBatchTaskAllResponse,
+  CancelEsseBatchTaskItemRequest,
+  CancelEsseBatchTaskItemResponse,
   CancelOperationRequest,
   CancelOperationResponse,
   CopyImageToClipboardRequest,
@@ -43,6 +47,10 @@ const api = {
     ipcRenderer.invoke("generation:generate-image", request),
   cancelOperation: async (request: CancelOperationRequest): Promise<CancelOperationResponse> =>
     ipcRenderer.invoke("app:cancel-operation", request),
+  cancelEsseBatchTaskItem: async (request: CancelEsseBatchTaskItemRequest): Promise<CancelEsseBatchTaskItemResponse> =>
+    ipcRenderer.invoke("esse:batch-task-cancel-item", request),
+  cancelEsseBatchTaskAll: async (request: CancelEsseBatchTaskAllRequest): Promise<CancelEsseBatchTaskAllResponse> =>
+    ipcRenderer.invoke("esse:batch-task-cancel-all", request),
   createPlaceholderImage: async (request: CreatePlaceholderImageRequest): Promise<CreatePlaceholderImageResponse> =>
     ipcRenderer.invoke("images:create-placeholder", request),
   saveReferenceImage: async (request: SaveReferenceImageRequest): Promise<SaveReferenceImageResponse> =>
