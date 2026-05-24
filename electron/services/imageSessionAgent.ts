@@ -12,6 +12,7 @@ import {
   shouldReportMissingReferenceImage
 } from "./referenceAttachmentGuard";
 import { isPathInsideOrSame, normalizePathForComparison, resolvePathForComparison } from "./pathUtils";
+import { runSharedGenerateImageCore } from "./sharedGenerateImageCore";
 
 export type VisibleChatRole = "user" | "assistant";
 
@@ -306,15 +307,16 @@ function createGenerateImageTool(options: {
         };
       }
 
-      const referenceImagePaths = selectReferenceImagePaths(params.referenceImageIds, state.referenceImages);
-      const toolOutputSize = typeof params.size === "string" ? normalizeGenerationSizeValue(params.size) : undefined;
-      await state.generateImage({
+      await runSharedGenerateImageCore({
+        generateImage: state.generateImage,
         imagePath: state.imagePath,
         mode,
         prompt,
-        ...(referenceImagePaths.length ? { referenceImagePaths } : {}),
+        referenceImagePaths: selectReferenceImagePaths(params.referenceImageIds, state.referenceImages),
         sessionId: state.sessionId,
-        ...(state.selectedOutputSize ?? toolOutputSize ? { size: state.selectedOutputSize ?? toolOutputSize } : {})
+        ...(state.signal ? { signal: state.signal } : {}),
+        selectedOutputSize: state.selectedOutputSize,
+        toolRequestedSize: params.size
       });
       throwIfAborted(signal);
       throwIfAborted(state.signal);

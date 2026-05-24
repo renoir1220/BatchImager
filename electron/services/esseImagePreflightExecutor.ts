@@ -5,6 +5,7 @@ import { createBlankGenerationSeed } from "./blankGenerationSeed";
 import type { ImageGenerationExecutor } from "./imageGenerationService";
 import { getProjectGeneratedDirectory } from "./projectStore";
 import type { EsseImagePreflightExecutionRequest, EsseWorkspaceToolRuntime, WorkspaceMutationResult } from "./esseWorkspaceTools";
+import { runSharedGenerateImageCore } from "./sharedGenerateImageCore";
 
 interface CreateEsseImagePreflightExecutorOptions {
   createSeed?: (options: { outputDirectory: string; sessionId: string; size?: string }) => Promise<string>;
@@ -38,13 +39,14 @@ export function createEsseImagePreflightExecutor(options: CreateEsseImagePreflig
         return prepared;
       }
 
-      const result = await options.generateImage({
+      const result = await runSharedGenerateImageCore({
+        generateImage: options.generateImage,
         imagePath: prepared.imagePath,
         mode: command.mode ?? "generate",
         prompt: command.prompt ?? "",
-        ...(prepared.referenceImagePaths.length ? { referenceImagePaths: prepared.referenceImagePaths } : {}),
+        referenceImagePaths: prepared.referenceImagePaths,
         sessionId: prepared.sessionId,
-        ...(command.size ? { size: command.size } : {})
+        toolRequestedSize: command.size
       });
 
       const mutation = await context.applyMutation((state) => appendGeneratedResult(state, {
