@@ -5,6 +5,7 @@ import type { BatchImagerAgentTool } from "./batchImagerAgentTools";
 import { runEsseAgentTurn } from "./esseAgent";
 import { createProjectSnapshotWorkspaceRuntime } from "./esseWorkspaceRuntime";
 import type { EssePreflightPayload, ProjectSnapshot } from "../ipcTypes";
+import type { EsseMemoryEntry, EsseMemoryStore } from "./esseMemoryStore";
 import { ProjectMutationSink } from "./projectMutationSink";
 
 interface ToolScriptStep {
@@ -16,6 +17,7 @@ interface WorkspaceAgentEvalScenario {
   assert: (context: WorkspaceAgentEvalContext) => void;
   id: string;
   initialSnapshot: ProjectSnapshot;
+  memoryEntries?: EsseMemoryEntry[];
   referenceImagePaths?: string[];
   reply: string;
   script: ToolScriptStep[];
@@ -60,6 +62,53 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
       reply: "这组图可以走清爽白底或浅场景两条方向。",
       script: [],
       userTask: "你觉得这组图适合什么电商风格？先聊聊，不要生成"
+    },
+    {
+      assert: ({ prompt, result, trace }) => {
+        expect(result.reply).toBe("已记住：你主要做家居电商主图，偏好干净浅背景。");
+        expect(trace).toEqual(["remember_user_preference"]);
+        expect(prompt).toContain("remember_user_preference");
+      },
+      id: "remember-explicit-global-preference",
+      initialSnapshot: createSnapshot({ sessions: [createSession("sess_1")] }),
+      reply: "已记住：你主要做家居电商主图，偏好干净浅背景。",
+      script: [
+        {
+          tool: "remember_user_preference",
+          params: { category: "用户偏好", content: "主要做家居电商主图，偏好干净浅背景" }
+        }
+      ],
+      userTask: "记住：我主要做家居电商主图，偏好干净浅背景"
+    },
+    {
+      assert: ({ prompt, trace }) => {
+        expect(trace).toEqual([]);
+        expect(prompt).toContain("主要做家居电商主图，倾向干净浅背景");
+      },
+      id: "injects-global-memory-into-workspace-prompt",
+      initialSnapshot: createSnapshot({ sessions: [createSession("sess_1")] }),
+      memoryEntries: [
+        {
+          category: "用户偏好",
+          content: "主要做家居电商主图，倾向干净浅背景",
+          createdAt: "2026-05-24T00:00:00.000Z",
+          id: "mem_eval1"
+        }
+      ],
+      reply: "我会按你偏好的干净浅背景来做。",
+      script: [],
+      userTask: "生成商品图时风格上有什么建议？"
+    },
+    {
+      assert: ({ result, trace }) => {
+        expect(result.reply).toBe("这个是当前项目专属信息，不写进全局记忆；我会在这段对话里按它理解。");
+        expect(trace).toEqual([]);
+      },
+      id: "does-not-remember-project-specific-context",
+      initialSnapshot: createSnapshot({ sessions: [createSession("sess_1")] }),
+      reply: "这个是当前项目专属信息，不写进全局记忆；我会在这段对话里按它理解。",
+      script: [],
+      userTask: "记住这个项目是某客户的春季新品"
     },
     {
       assert: ({ persisted, prompt, trace }) => {
@@ -399,7 +448,8 @@ async function runWorkspaceAgentEvalScenario(scenario: WorkspaceAgentEvalScenari
         };
       });
       return mutation.result;
-    }
+    },
+    memoryStore: createEvalMemoryStore(scenario.memoryEntries ?? [])
   };
 
   const result = await runEsseAgentTurn(
@@ -441,6 +491,38 @@ async function runWorkspaceAgentEvalScenario(scenario: WorkspaceAgentEvalScenari
     result,
     toolNames,
     trace
+  };
+}
+
+function createEvalMemoryStore(initialEntries: EsseMemoryEntry[]): EsseMemoryStore {
+  let entries = [...initialEntries];
+  return {
+    add: async (entry) => {
+      const nextEntry: EsseMemoryEntry = {
+        category: entry.category ?? "用户偏好",
+        content: entry.content,
+        createdAt: "2026-05-24T00:00:00.000Z",
+        id: `mem_eval_${entries.length + 1}`
+      };
+      entries = [...entries, nextEntry];
+      return nextEntry;
+    },
+    getFilePath: () => "/tmp/esse-memory.md",
+    list: async () => entries,
+    remove: async (id) => {
+      const removed = entries.find((entry) => entry.id === id) ?? null;
+      entries = entries.filter((entry) => entry.id !== id);
+      return { removed };
+    },
+    renderForPrompt: async () => {
+      if (!entries.length) {
+        return "";
+      }
+      return [
+        "==== 全局记忆（用户跨项目偏好，必须遵守）====",
+        ...entries.map((entry) => `${entry.category}：${entry.content}`)
+      ].join("\n");
+    }
   };
 }
 

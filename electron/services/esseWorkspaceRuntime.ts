@@ -16,6 +16,7 @@ import type {
   WorkspaceMutationResult
 } from "./esseWorkspaceTools";
 import { createBlankGenerationSeed } from "./blankGenerationSeed";
+import type { EsseMemoryStore } from "./esseMemoryStore";
 import type { ProjectMutationSink } from "./projectMutationSink";
 import { readProjectImageMetadata } from "./projectImageMetadata";
 import { getProjectGeneratedDirectory, getProjectReferencesDirectory } from "./projectStore";
@@ -37,6 +38,7 @@ interface ProjectSnapshotWorkspaceRuntimeOptions {
   ) => Promise<WorkspaceMutationResult>;
   initialSnapshot: ProjectSnapshot;
   getTurnReferenceImagePaths?: () => string[];
+  memoryStore?: EsseMemoryStore;
   recordToolCalls?: boolean;
   requestPermission?: (request: EsseWorkspacePermissionRequest) => Promise<EsseWorkspacePermissionDecision>;
   requestPreflight?: (payload: EssePreflightPayload) => Promise<EssePreflightDecision>;
@@ -103,6 +105,7 @@ export function createProjectSnapshotWorkspaceRuntime(options: ProjectSnapshotWo
       : {}),
     getState: () => currentSnapshot,
     ...(options.getTurnReferenceImagePaths ? { getTurnReferenceImagePaths: options.getTurnReferenceImagePaths } : {}),
+    ...(options.memoryStore ? { memoryStore: options.memoryStore } : {}),
     ...(options.recordToolCalls
       ? {
           recordToolCall: async (event) => {

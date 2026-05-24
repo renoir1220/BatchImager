@@ -14,6 +14,7 @@ import {
   shouldReportMissingReferenceImage as shouldReportMissingReferenceImageFromMessages
 } from "./referenceAttachmentGuard";
 import { normalizePathForComparison } from "./pathUtils";
+import type { EsseMemoryStore } from "./esseMemoryStore";
 import { createEsseWorkspaceTools, type EsseTurnBudget, type EsseWorkspaceToolRuntime } from "./esseWorkspaceTools";
 
 interface EsseAgentTurnInput {
@@ -117,6 +118,8 @@ export async function runEsseAgentTurn(
     return { reply };
   }
 
+  const memorySection = await renderEsseMemorySection(deps.workspaceToolRuntime?.memoryStore, deps.logger);
+
   return await registry.use(
     {
       key: registryKey,
@@ -133,8 +136,8 @@ export async function runEsseAgentTurn(
       const agentLogState: AgentLogState = { hasPublishedMessageUpdate: false };
       const unsubscribe = runtime.subscribe((event) => logAgentEvent(event, deps.logger, agentLogState));
       const promptText = isFreshRuntime
-        ? buildFullEssePrompt(input, selectedOutputSize, { workspaceToolsEnabled: workspaceTools.length > 0 })
-        : buildEsseTurnPrompt(input, selectedOutputSize, { workspaceToolsEnabled: workspaceTools.length > 0 });
+        ? buildFullEssePrompt(input, selectedOutputSize, { memorySection, workspaceToolsEnabled: workspaceTools.length > 0 })
+        : buildEsseTurnPrompt(input, selectedOutputSize, { memorySection, workspaceToolsEnabled: workspaceTools.length > 0 });
 
       try {
         if (deps.workspaceToolRuntime) {
@@ -195,6 +198,7 @@ function createEsseWorkspaceRuntimeProxy(registryKey: string): EsseWorkspaceTool
     getState: () => current().getState(),
     getTurnReferenceImagePaths: () => current().getTurnReferenceImagePaths?.() ?? [],
     getTurnBudget: () => workspaceTurnContextByRegistryKey.get(registryKey)?.budget,
+    memoryStore: createEsseMemoryStoreProxy(current),
     recordToolCall: (event) => current().recordToolCall?.(event),
     readImageMetadata: (request) =>
       current().readImageMetadata?.(request) ?? Promise.reject(new Error("read_image_metadata unavailable")),
@@ -206,6 +210,41 @@ function createEsseWorkspaceRuntimeProxy(registryKey: string): EsseWorkspaceTool
       current().requestPreflight?.(payload) ?? Promise.resolve({ decision: "cancel", detail: "preflight unavailable" }),
     scanUnreferencedFiles: () => current().scanUnreferencedFiles?.() ?? Promise.resolve([])
   };
+}
+
+function createEsseMemoryStoreProxy(current: () => EsseWorkspaceToolRuntime): EsseMemoryStore {
+  const store = () => {
+    const memoryStore = current().memoryStore;
+    if (!memoryStore) {
+      throw new Error("memory unavailable");
+    }
+    return memoryStore;
+  };
+
+  return {
+    add: (entry) => store().add(entry),
+    getFilePath: () => store().getFilePath(),
+    list: () => store().list(),
+    remove: (id) => store().remove(id),
+    renderForPrompt: () => store().renderForPrompt()
+  };
+}
+
+async function renderEsseMemorySection(memoryStore: EsseMemoryStore | undefined, logger?: AppLogger): Promise<string> {
+  if (!memoryStore) {
+    return "";
+  }
+
+  try {
+    return await memoryStore.renderForPrompt();
+  } catch (error) {
+    logger?.warn("Esse memory render failed", {
+      context: "esse-agent",
+      error,
+      publicMessage: "Esse 记忆读取失败，本轮暂不使用记忆。"
+    });
+    return "";
+  }
 }
 
 function getEsseWorkspaceTurnContext(registryKey: string): EsseWorkspaceTurnContext {
@@ -234,10 +273,10 @@ function countUserMessages(messages: EsseAgentHistoryMessage[]): number {
 function buildFullEssePrompt(
   input: EsseAgentTurnInput,
   selectedOutputSize: string | undefined,
-  options: { workspaceToolsEnabled?: boolean } = {}
+  options: { memorySection?: string; workspaceToolsEnabled?: boolean } = {}
 ): string {
   if (options.workspaceToolsEnabled) {
-    return buildFullEsseWorkspacePrompt(input, selectedOutputSize);
+    return buildFullEsseWorkspacePrompt(input, selectedOutputSize, options.memorySection);
   }
 
   const personaInstructions = ESSE_PERSONA_INSTRUCTIONS[input.persona ?? DEFAULT_ESSE_PERSONA];
@@ -267,10 +306,10 @@ function buildFullEssePrompt(
 function buildEsseTurnPrompt(
   input: EsseAgentTurnInput,
   selectedOutputSize: string | undefined,
-  options: { workspaceToolsEnabled?: boolean } = {}
+  options: { memorySection?: string; workspaceToolsEnabled?: boolean } = {}
 ): string {
   if (options.workspaceToolsEnabled) {
-    return buildEsseWorkspaceTurnPrompt(input, selectedOutputSize);
+    return buildEsseWorkspaceTurnPrompt(input, selectedOutputSize, options.memorySection);
   }
 
   const personaInstructions = ESSE_PERSONA_INSTRUCTIONS[input.persona ?? DEFAULT_ESSE_PERSONA];
@@ -297,7 +336,7 @@ function buildEsseTurnPrompt(
   return sections.join("\n");
 }
 
-function buildFullEsseWorkspacePrompt(input: EsseAgentTurnInput, selectedOutputSize: string | undefined): string {
+function buildFullEsseWorkspacePrompt(input: EsseAgentTurnInput, selectedOutputSize: string | undefined, memorySection?: string): string {
   const personaInstructions = ESSE_PERSONA_INSTRUCTIONS[input.persona ?? DEFAULT_ESSE_PERSONA];
   const sessionLines = buildWorkspaceSessionLines(input);
   const referenceImageLines = buildTurnReferenceImageLines(input);
@@ -306,6 +345,7 @@ function buildFullEsseWorkspacePrompt(input: EsseAgentTurnInput, selectedOutputS
 
   return [
     "你是 BatchImager 的 Esse 工作区 agent。你可以通过工具读取和修改左侧图片工作区。",
+    ...(memorySection ? [memorySection] : []),
     ...buildWorkspaceToolPromptSections(),
     "==== 人格 ====",
     ...personaInstructions,
@@ -325,13 +365,14 @@ function buildFullEsseWorkspacePrompt(input: EsseAgentTurnInput, selectedOutputS
   ].join("\n");
 }
 
-function buildEsseWorkspaceTurnPrompt(input: EsseAgentTurnInput, selectedOutputSize: string | undefined): string {
+function buildEsseWorkspaceTurnPrompt(input: EsseAgentTurnInput, selectedOutputSize: string | undefined, memorySection?: string): string {
   const sessionLines = buildWorkspaceSessionLines(input);
   const referenceImageLines = buildTurnReferenceImageLines(input);
   const selectedDisplayLabel = getSelectedWorkspaceDisplayLabel(input);
 
   return [
     "==== 工作区环境更新 ====",
+    ...(memorySection ? [memorySection] : []),
     ...buildWorkspaceToolPromptSections(),
     selectedOutputSize
       ? `- 用户本轮选择的输出分辨率：${selectedOutputSize}`
@@ -381,8 +422,8 @@ function buildWorkspaceToolPromptSections(): string[] {
     "==== 工作区工具模式 ====",
     "当前你可以通过工具读取和修改左侧工作区。所有工作区副作用必须通过工具执行，不要用 JSON 字段表达工作区操作。",
     "如果用户请求可以由当前工具完成的动作，必须先调用对应工具；不要只回复“我会处理/可以处理”。",
-    "可用读工具：get_project_overview / list_sessions / get_session_records / read_image_metadata / list_reference_images / scan_unreferenced_files。",
-    "可用写工具：restore_session_record / restore_original / rename_session / reorder_sessions / set_session_prompt / add_blank_session / add_reference_image / remove_reference_image / delete_session_record / delete_session / merge_sessions / delete_unreferenced_files。",
+    "可用读工具：get_project_overview / list_sessions / get_session_records / read_image_metadata / list_reference_images / list_remembered_preferences / scan_unreferenced_files。",
+    "可用写工具：restore_session_record / restore_original / rename_session / reorder_sessions / set_session_prompt / add_blank_session / add_reference_image / remove_reference_image / remember_user_preference / forget_user_preference / delete_session_record / delete_session / merge_sessions / delete_unreferenced_files。",
     "生成与文件工具：generate_image / run_batch_generation / package_generated_images。它们每次都会先弹 preflight 卡片让用户确认；生成类确认后会提交后台生成任务，打包类确认后才写桌面 zip。",
     "preflight 卡片只能由这些工具触发；不要先用文字说“请确认后我就执行”。用户已经要求执行时，直接调用工具，让工具产生确认卡片。",
     "工作流要求：",
@@ -394,10 +435,11 @@ function buildWorkspaceToolPromptSections(): string[] {
     "6) 用户明确要求先占一个空位、添加空白图片位、预留空白图位时，用 add_blank_session；不要为了生成新图而先调用它。",
     "7) 物理删除未引用生成文件必须先 scan_unreferenced_files，再把返回的 candidateId 传给 delete_unreferenced_files；不要传 filePath。",
     "8) 管理项目参考图时必须用 list_reference_images / add_reference_image / remove_reference_image。add_reference_image 只能使用本轮参考图路径列表里的 filePath；用户只是粘贴了图但没有要求登记为项目参考图时，不要自动添加。生成时如需引用项目参考图，先 list_reference_images，再把返回的 id 放进 referenceImageIds。",
-    "9) 生成/编辑图片必须用 generate_image 或 run_batch_generation；删除背景、去水印、换白底、改风格都属于图片编辑，不要只口头答应。编辑现有工作区图片时先 list_sessions；用户要全新生成 N 张图（如“生成 4 张鲜花图”）时直接用 run_batch_generation，N 条 target.type='new' command，除非引用了现有图片才先 list_sessions。单张用 generate_image；多张、全部、这批、批量处理同一类任务用 run_batch_generation，一张图一条 command。每条命令必须显式 mode='edit' 或 mode='generate'。只有用户明确要求尺寸、比例、横版、竖版、方图、2K/4K 时才传 size。",
-    "10) 打包/导出/放桌面必须用 package_generated_images；需要限定范围时先 list_sessions，只传稳定 sessionId；不要输出或猜测文件路径，也不要用文字替代 preflight。",
-    "11) 用户取消 preflight 后，不要原样重试，先问用户要调整什么。",
-    "12) 生成工具是 fire-and-forget：工具返回后只能说“已提交 N 个任务/生成会在后台完成”，不要说“已经生成完成”，也不要承诺完成后主动通知。其他工具完成后直接用一句中文总结；不要返回 JSON。"
+    "9) 用户明确说“记住/保存/以后都按这个”这类跨项目长期偏好时，用 remember_user_preference；用户问记住了什么或要求忘记时，用 list_remembered_preferences / forget_user_preference。不要把“这个项目是某客户的”这类项目专属信息写入全局记忆。",
+    "10) 生成/编辑图片必须用 generate_image 或 run_batch_generation；删除背景、去水印、换白底、改风格都属于图片编辑，不要只口头答应。编辑现有工作区图片时先 list_sessions；用户要全新生成 N 张图（如“生成 4 张鲜花图”）时直接用 run_batch_generation，N 条 target.type='new' command，除非引用了现有图片才先 list_sessions。单张用 generate_image；多张、全部、这批、批量处理同一类任务用 run_batch_generation，一张图一条 command。每条命令必须显式 mode='edit' 或 mode='generate'。只有用户明确要求尺寸、比例、横版、竖版、方图、2K/4K 时才传 size。",
+    "11) 打包/导出/放桌面必须用 package_generated_images；需要限定范围时先 list_sessions，只传稳定 sessionId；不要输出或猜测文件路径，也不要用文字替代 preflight。",
+    "12) 用户取消 preflight 后，不要原样重试，先问用户要调整什么。",
+    "13) 生成工具是 fire-and-forget：工具返回后只能说“已提交 N 个任务/生成会在后台完成”，不要说“已经生成完成”，也不要承诺完成后主动通知。其他工具完成后直接用一句中文总结；不要返回 JSON。"
   ];
 }
 

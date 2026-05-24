@@ -26,6 +26,7 @@ import { createBlankGenerationSeed } from "./services/blankGenerationSeed";
 import { runEsseAgentTurn } from "./services/esseAgent";
 import { EsseBatchTaskRegistry } from "./services/esseBatchTaskRegistry";
 import { createEsseImagePreflightExecutor, retryEsseBatchTaskItem } from "./services/esseImagePreflightExecutor";
+import { createEsseMemoryStore } from "./services/esseMemoryStore";
 import { createEssePackagePreflightExecutor } from "./services/essePackagePreflightExecutor";
 import { createProjectSnapshotWorkspaceRuntime } from "./services/esseWorkspaceRuntime";
 import { EssePreflightBroker } from "./services/essePreflightBroker";
@@ -428,6 +429,7 @@ function registerIpc(appLogger: AppLogger): void {
             packageGeneratedImages
           }),
           initialSnapshot: await openProject(projectDirectory),
+          memoryStore: createEsseMemoryStore(path.join(app.getPath("userData"), "esse-memory.md")),
           recordToolCalls: true,
           requestPreflight: (payload) => essePreflightBroker.request(event.sender, payload, { signal }),
           getTurnReferenceImagePaths: () => request.referenceImagePaths ?? [],

@@ -1,5 +1,6 @@
 import type { BatchPlanReferenceImage, EssePreflightCommand, EssePreflightPayload, PersistedImageSession, ProjectSnapshot } from "../ipcTypes";
 import type { AgentToolResult, BatchImagerAgentTool, BatchImagerAgentToolRisk } from "./batchImagerAgentTools";
+import type { EsseMemoryCategory, EsseMemoryStore } from "./esseMemoryStore";
 import type { ProjectImageMetadataResult } from "./projectImageMetadata";
 import type { DeleteUnreferencedFileResult, UnreferencedFileCandidate } from "./projectUnreferencedFiles";
 
@@ -18,6 +19,7 @@ export interface EsseWorkspaceToolRuntime {
   getState: () => EsseWorkspaceState;
   getTurnReferenceImagePaths?: () => string[];
   getTurnBudget?: () => EsseTurnBudget | undefined;
+  memoryStore?: EsseMemoryStore;
   recordToolCall?: (event: EsseWorkspaceToolCallEvent) => void | Promise<void>;
   readImageMetadata?: (request: EsseImageMetadataRequest) => Promise<ProjectImageMetadataResult>;
   removeReferenceImage?: (request: EsseRemoveReferenceImageRequest) => Promise<WorkspaceMutationResult>;
@@ -102,6 +104,9 @@ export function createEsseWorkspaceTools(runtime: EsseWorkspaceToolRuntime): Bat
     createListReferenceImagesTool(runtime),
     createAddReferenceImageTool(runtime),
     createRemoveReferenceImageTool(runtime),
+    createListRememberedPreferencesTool(runtime),
+    createRememberUserPreferenceTool(runtime),
+    createForgetUserPreferenceTool(runtime),
     createScanUnreferencedFilesTool(runtime),
     createDeleteUnreferencedFilesTool(runtime),
     createGenerateImageTool(runtime),
@@ -278,6 +283,136 @@ function createRemoveReferenceImageTool(runtime: EsseWorkspaceToolRuntime): Batc
       }
 
       return toolOk(result.summary, { affectedSessionIds: result.affectedSessionIds });
+    }
+  };
+}
+
+function createListRememberedPreferencesTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
+  return {
+    name: "list_remembered_preferences",
+    label: "列出已记忆条目",
+    risk: "read",
+    requiresPreflight: false,
+    description:
+      "List all currently remembered user preferences with their ids and categories. Use when the user asks what Esse remembers, or before forget_user_preference.",
+    parameters: emptyParameters(),
+    async execute() {
+      if (!runtime.memoryStore) {
+        return toolError("memory unavailable", undefined, "run this tool only when the Esse memory store is configured.");
+      }
+
+      const entries = await runtime.memoryStore.list();
+      if (!entries.length) {
+        return toolOk("当前没有已记忆条目。", { memories: [] });
+      }
+
+      return toolOk(
+        entries.map((entry, index) => `${index + 1}. [${entry.id}] ${entry.category}：${entry.content}`).join("\n"),
+        { memories: entries }
+      );
+    }
+  };
+}
+
+function createRememberUserPreferenceTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
+  return {
+    name: "remember_user_preference",
+    label: "记住用户偏好",
+    risk: "safe-write",
+    requiresPreflight: false,
+    description:
+      "Save a user preference, default, or constraint to be remembered across future Esse sessions in any project. Use only when the user explicitly asks to remember, save, or note something for future use. Do not use this for project-specific context. Parameters: content is concise Chinese text under 200 characters; category is one of 用户偏好, 默认约束, 工作流惯例 and defaults to 用户偏好.",
+    parameters: objectParameters(
+      {
+        category: "Optional category: 用户偏好, 默认约束, or 工作流惯例. Defaults to 用户偏好.",
+        content: "Concise Chinese preference text under 200 characters."
+      },
+      ["content"]
+    ),
+    async execute(_toolCallId, params) {
+      if (!runtime.memoryStore) {
+        return toolError("memory unavailable", undefined, "run this tool only when the Esse memory store is configured.");
+      }
+
+      const content = readString(params.content);
+      if (!content) {
+        return toolError("content is required", undefined, "provide concise Chinese preference text.");
+      }
+      if (content.length > 200) {
+        return toolError("content is too long", undefined, "compress the memory to 200 Chinese characters or less.");
+      }
+
+      const category = readMemoryCategory(params.category);
+      const permission = await requestWorkspaceToolPermission(runtime, {
+        label: "记住用户偏好",
+        name: "remember_user_preference",
+        requiresPreflight: false,
+        risk: "safe-write"
+      }, params);
+      if (permission) {
+        return permission;
+      }
+
+      try {
+        const result = await runtime.memoryStore.add({
+          ...(category ? { category } : {}),
+          content
+        });
+        if ("ok" in result && result.ok === false) {
+          return toolError(
+            "similar memory already exists",
+            `Existing memory: [${result.conflictsWith.id}] ${result.conflictsWith.content}. Similarity: ${result.similarity}.`,
+            result.suggestedNext
+          );
+        }
+
+        if (!("id" in result)) {
+          return toolError("memory write failed", "unexpected memory store response");
+        }
+
+        return toolOk(`已记录新记忆 ${result.id}：${result.content}`, { memory: result });
+      } catch (error) {
+        return toolError("memory write failed", error instanceof Error ? error.message : String(error));
+      }
+    }
+  };
+}
+
+function createForgetUserPreferenceTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
+  return {
+    name: "forget_user_preference",
+    label: "删除记忆条目",
+    risk: "destructive",
+    requiresPreflight: false,
+    description:
+      "Delete one remembered preference by id. Use when the user asks to forget, remove, or no longer apply a specific remembered item. Parameters: memoryId is an id from list_remembered_preferences.",
+    parameters: objectParameters({ memoryId: "Id from list_remembered_preferences." }, ["memoryId"]),
+    async execute(_toolCallId, params) {
+      if (!runtime.memoryStore) {
+        return toolError("memory unavailable", undefined, "run this tool only when the Esse memory store is configured.");
+      }
+
+      const memoryId = readString(params.memoryId);
+      if (!memoryId) {
+        return toolError("memoryId is required", undefined, "call list_remembered_preferences and pass one returned id.");
+      }
+
+      const permission = await requestWorkspaceToolPermission(runtime, {
+        label: "删除记忆条目",
+        name: "forget_user_preference",
+        requiresPreflight: false,
+        risk: "destructive"
+      }, params);
+      if (permission) {
+        return permission;
+      }
+
+      const result = await runtime.memoryStore.remove(memoryId);
+      if (!result.removed) {
+        return toolError("memory not found", undefined, "call list_remembered_preferences and pass one returned id.");
+      }
+
+      return toolOk(`已删除记忆 ${result.removed.id}：${result.removed.content}`, { memory: result.removed });
     }
   };
 }
@@ -1308,6 +1443,11 @@ function batchGenerationParameters(): Record<string, unknown> {
 
 function readString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function readMemoryCategory(value: unknown): EsseMemoryCategory | undefined {
+  const category = readString(value);
+  return category === "用户偏好" || category === "默认约束" || category === "工作流惯例" ? category : undefined;
 }
 
 function readStringArray(value: unknown): string[] {
