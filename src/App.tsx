@@ -61,6 +61,7 @@ import type {
   AppLogEntry,
   ChatReferenceImage,
   EsseAgentHistoryMessage,
+  EsseBashExecutionEvent,
   EssePermissionRequest,
   EssePermissionResponse,
   EssePreflightCommand,
@@ -249,6 +250,23 @@ export function App() {
         projectManagerStateRef.current,
         request,
         createMessageId("esse-permission")
+      );
+      projectManagerStateRef.current = nextState;
+      setProjectManagerState(nextState);
+      persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.batchImager?.subscribeEsseBashExecutionEvents?.((event) => {
+      const nextState = upsertEsseBashExecutionMessage(
+        projectManagerStateRef.current,
+        event,
+        createMessageId("esse-bash")
       );
       projectManagerStateRef.current = nextState;
       setProjectManagerState(nextState);
@@ -1685,6 +1703,34 @@ function appendEssePermissionMessage(
           role: "context"
         }
       ]
+    }
+  };
+}
+
+function upsertEsseBashExecutionMessage(
+  state: ProjectManagerState,
+  event: EsseBashExecutionEvent,
+  messageId: string
+): ProjectManagerState {
+  const existing = state.conversation.messages.find((message) => message.bashExecution?.toolCallId === event.toolCallId);
+  const nextMessage: ProjectManagerMessage = {
+    bashExecution: {
+      ...existing?.bashExecution,
+      ...event
+    },
+    content: "",
+    contextType: "esse-bash-execution",
+    id: existing?.id ?? messageId,
+    role: "context"
+  };
+
+  return {
+    ...state,
+    conversation: {
+      ...state.conversation,
+      messages: existing
+        ? state.conversation.messages.map((message) => (message.id === existing.id ? nextMessage : message))
+        : [...state.conversation.messages, nextMessage]
     }
   };
 }

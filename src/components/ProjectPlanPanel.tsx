@@ -263,6 +263,7 @@ export function ProjectPlanPanel({
                       onRetryItem={onRetryBatchTaskItem}
                     />
                   ) : null}
+                  {message.bashExecution ? <EsseBashExecutionCard execution={message.bashExecution} /> : null}
                 </div>
                 {hasMessageContent ? <MessageActions content={message.content} /> : null}
               </div>
@@ -329,6 +330,32 @@ export function ProjectPlanPanel({
       return nextIds;
     });
   }
+}
+
+function EsseBashExecutionCard({
+  execution
+}: {
+  execution: NonNullable<ProjectManagerState["conversation"]["messages"][number]["bashExecution"]>;
+}) {
+  const statusLabel = execution.status === "running" ? "运行中" : execution.status === "completed" ? "完成" : "失败";
+  const output = execution.output?.trim();
+
+  return (
+    <section className={`esse-bash-card ${execution.status}`} aria-label="Esse Bash 执行">
+      <header>
+        <strong>{execution.skillName ? `${execution.skillName} · bash` : "bash"}</strong>
+        <span>{statusLabel}{execution.exitCode !== undefined ? ` · exit ${execution.exitCode ?? "null"}` : ""}</span>
+      </header>
+      <code>{execution.command}</code>
+      {output ? <pre>{tailLines(output, 200)}</pre> : <p>等待输出...</p>}
+      {execution.outputPath || execution.fullOutputPath ? (
+        <footer>
+          {execution.outputPath ? <span>输出：{execution.outputPath}</span> : null}
+          {execution.fullOutputPath ? <span>完整日志：{execution.fullOutputPath}</span> : null}
+        </footer>
+      ) : null}
+    </section>
+  );
 }
 
 function EssePersonaSelect({
@@ -900,6 +927,15 @@ function countReportedCommands(plan: BatchPlan): number {
   return new Set((plan.reports ?? []).map((report) => report.commandId)).size;
 }
 
+function tailLines(text: string, maxLines: number): string {
+  const lines = text.split(/\r?\n/);
+  if (lines.length <= maxLines) {
+    return text;
+  }
+
+  return [`+${lines.length - maxLines} 行已折叠`, ...lines.slice(-maxLines)].join("\n");
+}
+
 function formatWorkerStatus(report: WorkerReport | undefined): string {
   if (!report) {
     return "待";
@@ -934,6 +970,7 @@ function getProjectThreadContentSignature(
         message.planId ?? "",
         message.preflightRequest?.requestId ?? "",
         message.preflightDecision ?? "",
+        message.bashExecution ? `${message.bashExecution.toolCallId}:${message.bashExecution.status}:${message.bashExecution.output ?? ""}` : "",
         message.referenceFilePaths?.join("|") ?? ""
       ].join(":")
     ),

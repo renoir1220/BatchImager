@@ -51,6 +51,73 @@ export interface SaveApiSettingsRequest {
   llmModel: string;
 }
 
+export type EsseSkillSource = "built-in" | "global" | "project" | "user-path";
+
+export interface EsseSkillRecord {
+  baseDir: string;
+  description: string;
+  disableModelInvocation: boolean;
+  enabled: boolean;
+  filePath: string;
+  name: string;
+  source: EsseSkillSource;
+  sourceLabel: string;
+}
+
+export interface EsseSkillDiagnostic {
+  message: string;
+  path?: string;
+  type: "warning" | "error" | "collision";
+}
+
+export interface EsseSkillsSnapshot {
+  diagnostics: EsseSkillDiagnostic[];
+  disabledSkills: string[];
+  skillPaths: string[];
+  skills: EsseSkillRecord[];
+}
+
+export interface SetEsseSkillEnabledRequest {
+  enabled: boolean;
+  name: string;
+}
+
+export interface AddEsseSkillPathRequest {
+  path: string;
+}
+
+export interface InstallEsseSkillFromGitRequest {
+  gitUrl: string;
+}
+
+export interface RemoveEsseSkillRequest {
+  name: string;
+}
+
+export interface ReadEsseSkillFileRequest {
+  name: string;
+}
+
+export interface ReadEsseSkillFileResponse {
+  content: string;
+  filePath: string;
+}
+
+export type EsseBashExecutionStatus = "running" | "completed" | "failed";
+
+export interface EsseBashExecutionEvent {
+  command: string;
+  cwd: string;
+  exitCode?: number | null;
+  fullOutputPath?: string;
+  isError?: boolean;
+  output?: string;
+  outputPath?: string;
+  skillName?: string | null;
+  status: EsseBashExecutionStatus;
+  toolCallId: string;
+}
+
 export interface RetryEsseBatchTaskItemRequest {
   batchTaskId: string;
   sessionId: string;
@@ -212,8 +279,9 @@ export interface ProjectManagerMessage {
   id: string;
   role: ProjectManagerMessageRole;
   content: string;
+  bashExecution?: EsseBashExecutionEvent;
   batchTask?: EsseBatchTaskCardData;
-  contextType?: "esse-batch-task" | "esse-tool-call";
+  contextType?: "esse-bash-execution" | "esse-batch-task" | "esse-tool-call";
   planId?: string;
   permissionDecision?: "pending" | "allow-once" | "allow-session" | "deny";
   permissionRequest?: EssePermissionRequest;

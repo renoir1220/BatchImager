@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppLogEntry,
+  AddEsseSkillPathRequest,
   ApiSettingsSnapshot,
   CancelEsseBatchTaskAllRequest,
   CancelEsseBatchTaskAllResponse,
@@ -13,17 +14,21 @@ import type {
   CreatePlaceholderImageRequest,
   CreatePlaceholderImageResponse,
   GenerateImageRequest,
+  InstallEsseSkillFromGitRequest,
   GenerateImageResponse,
   ImportProjectImagesRequest,
   OpenProjectRequest,
   ProjectListEntry,
   ProjectSnapshot,
   RenameProjectRequest,
+  RemoveEsseSkillRequest,
   RetryEsseBatchTaskFailedRequest,
   RetryEsseBatchTaskFailedResponse,
   RetryEsseBatchTaskItemRequest,
   RetryEsseBatchTaskItemResponse,
   SaveApiSettingsRequest,
+  ReadEsseSkillFileRequest,
+  ReadEsseSkillFileResponse,
   SaveReferenceImageRequest,
   SaveReferenceImageResponse,
   SaveProjectSnapshotRequest,
@@ -35,8 +40,11 @@ import type {
   EssePermissionRequest,
   EssePermissionResponse,
   EssePermissionResponseAck,
+  EsseBashExecutionEvent,
   SendEsseMessageRequest,
-  SendEsseMessageResponse
+  SendEsseMessageResponse,
+  EsseSkillsSnapshot,
+  SetEsseSkillEnabledRequest
 } from "./ipcTypes";
 
 const IMAGE_PROTOCOL = "batchimager-file";
@@ -82,6 +90,18 @@ const api = {
   getApiSettings: async (): Promise<ApiSettingsSnapshot> => ipcRenderer.invoke("settings:get-api"),
   saveApiSettings: async (request: SaveApiSettingsRequest): Promise<ApiSettingsSnapshot> =>
     ipcRenderer.invoke("settings:save-api", request),
+  listEsseSkills: async (): Promise<EsseSkillsSnapshot> => ipcRenderer.invoke("esse:skills-list"),
+  reloadEsseSkills: async (): Promise<EsseSkillsSnapshot> => ipcRenderer.invoke("esse:skills-reload"),
+  setEsseSkillEnabled: async (request: SetEsseSkillEnabledRequest): Promise<EsseSkillsSnapshot> =>
+    ipcRenderer.invoke("esse:skills-set-enabled", request),
+  addEsseSkillPath: async (request: AddEsseSkillPathRequest): Promise<EsseSkillsSnapshot> =>
+    ipcRenderer.invoke("esse:skills-add-path", request),
+  installEsseSkillFromGit: async (request: InstallEsseSkillFromGitRequest): Promise<EsseSkillsSnapshot> =>
+    ipcRenderer.invoke("esse:skills-install-git", request),
+  removeEsseSkill: async (request: RemoveEsseSkillRequest): Promise<EsseSkillsSnapshot> =>
+    ipcRenderer.invoke("esse:skills-remove", request),
+  readEsseSkillFile: async (request: ReadEsseSkillFileRequest): Promise<ReadEsseSkillFileResponse> =>
+    ipcRenderer.invoke("esse:skills-read-file", request),
   setRunningWorkCount: (count: number): void => {
     ipcRenderer.send("app:set-running-work-count", count);
   },
@@ -123,6 +143,14 @@ const api = {
 
     return () => {
       ipcRenderer.removeListener("esse:permission-request", handler);
+    };
+  },
+  subscribeEsseBashExecutionEvents: (listener: (event: EsseBashExecutionEvent) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, bashEvent: EsseBashExecutionEvent) => listener(bashEvent);
+    ipcRenderer.on("esse:bash-execution", handler);
+
+    return () => {
+      ipcRenderer.removeListener("esse:bash-execution", handler);
     };
   },
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),

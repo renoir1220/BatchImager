@@ -1289,10 +1289,27 @@ textarea {
   background: color-mix(in oklch, var(--green), white 96%);
 }
 
+.esse-bash-card {
+  display: grid;
+  gap: 7px;
+  margin-top: 7px;
+  border: 1px solid color-mix(in oklch, #6f747c, white 70%);
+  border-radius: 8px;
+  padding: 8px 9px;
+  background: #f7f7f4;
+}
+
+.esse-bash-card.failed {
+  border-color: color-mix(in oklch, var(--danger), white 64%);
+  background: color-mix(in oklch, var(--danger), white 95%);
+}
+
 .esse-preflight-card header,
 .esse-preflight-card footer,
 .esse-batch-task-card header,
-.esse-batch-task-card footer {
+.esse-batch-task-card footer,
+.esse-bash-card header,
+.esse-bash-card footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1301,9 +1318,37 @@ textarea {
 
 .esse-preflight-card header span,
 .esse-preflight-card footer span,
-.esse-batch-task-card header span {
+.esse-batch-task-card header span,
+.esse-bash-card header span,
+.esse-bash-card footer span,
+.esse-bash-card p {
   color: #66665f;
   font-size: 12px;
+}
+
+.esse-bash-card code,
+.esse-bash-card pre {
+  display: block;
+  min-width: 0;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid #deded8;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #292925;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 7px;
+  white-space: pre-wrap;
+}
+
+.esse-bash-card pre {
+  max-height: 180px;
+}
+
+.esse-bash-card p {
+  margin: 0;
 }
 
 .esse-preflight-command-list {
@@ -2471,8 +2516,9 @@ textarea {
 }
 
 .settings-dialog {
+  position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   width: min(620px, calc(100vw - 64px));
   max-height: min(720px, calc(100vh - 64px));
   min-height: 0;
@@ -2481,6 +2527,31 @@ textarea {
   border-radius: 8px;
   background: #fbfbfa;
   box-shadow: 0 18px 52px rgb(0 0 0 / 20%);
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--divider);
+  background: #fbfbfa;
+}
+
+.settings-tab {
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #555750;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.settings-tab[aria-selected="true"] {
+  border-color: #c9c9c3;
+  background: #ffffff;
+  color: #242522;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 6%);
 }
 
 .settings-header {
@@ -2550,6 +2621,161 @@ textarea {
   padding: 0 9px;
   background: #ffffff;
   color: #242522;
+}
+
+.settings-inline-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.settings-skills-panel {
+  gap: 10px;
+}
+
+.skill-list {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--divider);
+}
+
+.skill-row {
+  display: grid;
+  grid-template-columns: minmax(128px, 1fr) auto;
+  gap: 5px 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--divider);
+}
+
+.skill-enable {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.skill-enable span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-source {
+  align-self: center;
+  border: 1px solid #d7d7d1;
+  border-radius: 999px;
+  color: #686862;
+  padding: 1px 7px;
+  font-size: 11px;
+}
+
+.skill-row p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #555750;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.skill-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.settings-path-list {
+  display: grid;
+  gap: 4px;
+  color: #686862;
+  font-size: 12px;
+}
+
+.settings-path-list span,
+.settings-empty {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-empty {
+  color: #777a72;
+  font-size: 12px;
+}
+
+.skill-diagnostics {
+  display: grid;
+  gap: 6px;
+  color: #555750;
+  font-size: 12px;
+}
+
+.skill-diagnostics div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.skill-file-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgb(251 251 250 / 74%);
+  backdrop-filter: blur(8px);
+}
+
+.skill-file-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(560px, 100%);
+  max-height: min(560px, 100%);
+  overflow: hidden;
+  border: 1px solid #c9c9c3;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 12px 34px rgb(0 0 0 / 16%);
+}
+
+.skill-file-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--divider);
+  background: #f2f2ef;
+}
+
+.skill-file-header h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.skill-file-header span {
+  display: block;
+  max-width: 460px;
+  overflow: hidden;
+  color: #686862;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-file-panel pre {
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  color: #242522;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .settings-field input:focus {

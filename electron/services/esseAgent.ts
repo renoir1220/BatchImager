@@ -16,6 +16,7 @@ import {
 import { normalizePathForComparison } from "./pathUtils";
 import type { EsseMemoryStore } from "./esseMemoryStore";
 import { createEsseWorkspaceTools, type EsseTurnBudget, type EsseWorkspaceToolRuntime } from "./esseWorkspaceTools";
+import type { EsseSkillLoader } from "./esseSkillLoader";
 
 interface EsseAgentTurnInput {
   messages: EsseAgentHistoryMessage[];
@@ -31,10 +32,12 @@ interface EsseAgentTurnResult {
 }
 
 interface EsseAgentDeps {
+  bashTool?: unknown;
   createRuntime?: (options: CreateAgentRuntimeOptions) => Promise<AgentRuntime>;
   logger?: AppLogger;
   registry?: AgentRuntimeRegistry;
   signal?: AbortSignal;
+  skillLoader?: EsseSkillLoader;
   workspaceToolRuntime?: EsseWorkspaceToolRuntime;
 }
 
@@ -92,6 +95,7 @@ export async function runEsseAgentTurn(
   const registryKey = buildEsseRegistryKey(projectDirectory);
   const userMessageCount = countUserMessages(input.messages);
   const workspaceTools = deps.workspaceToolRuntime ? createEsseWorkspaceTools(createEsseWorkspaceRuntimeProxy(registryKey)) : [];
+  const customToolDefinitions = deps.bashTool ? [...workspaceTools, deps.bashTool] : workspaceTools;
 
   // 首轮（含用户清空对话）强制丢弃旧 runtime，防止沿用上一段 Esse 上下文。
   if (userMessageCount <= 1) {
@@ -119,13 +123,14 @@ export async function runEsseAgentTurn(
   }
 
   const memorySection = await renderEsseMemorySection(deps.workspaceToolRuntime?.memoryStore, deps.logger);
+  const skillsSection = deps.skillLoader?.formatForPrompt() ?? "";
 
   return await registry.use(
     {
       key: registryKey,
       factory: async () =>
         await (deps.createRuntime ?? createAgentRuntime)({
-          customToolDefinitions: workspaceTools,
+          customToolDefinitions,
           llmConfig: config,
           model: config.model,
           projectDirectory,
@@ -136,8 +141,16 @@ export async function runEsseAgentTurn(
       const agentLogState: AgentLogState = { hasPublishedMessageUpdate: false };
       const unsubscribe = runtime.subscribe((event) => logAgentEvent(event, deps.logger, agentLogState));
       const promptText = isFreshRuntime
-        ? buildFullEssePrompt(input, selectedOutputSize, { memorySection, workspaceToolsEnabled: workspaceTools.length > 0 })
-        : buildEsseTurnPrompt(input, selectedOutputSize, { memorySection, workspaceToolsEnabled: workspaceTools.length > 0 });
+        ? buildFullEssePrompt(input, selectedOutputSize, {
+            memorySection,
+            skillsSection,
+            workspaceToolsEnabled: workspaceTools.length > 0
+          })
+        : buildEsseTurnPrompt(input, selectedOutputSize, {
+            memorySection,
+            skillsSection,
+            workspaceToolsEnabled: workspaceTools.length > 0
+          });
 
       try {
         if (deps.workspaceToolRuntime) {
@@ -274,10 +287,10 @@ function countUserMessages(messages: EsseAgentHistoryMessage[]): number {
 function buildFullEssePrompt(
   input: EsseAgentTurnInput,
   selectedOutputSize: string | undefined,
-  options: { memorySection?: string; workspaceToolsEnabled?: boolean } = {}
+  options: { memorySection?: string; skillsSection?: string; workspaceToolsEnabled?: boolean } = {}
 ): string {
   if (options.workspaceToolsEnabled) {
-    return buildFullEsseWorkspacePrompt(input, selectedOutputSize, options.memorySection);
+    return buildFullEsseWorkspacePrompt(input, selectedOutputSize, options.memorySection, options.skillsSection);
   }
 
   const personaInstructions = ESSE_PERSONA_INSTRUCTIONS[input.persona ?? DEFAULT_ESSE_PERSONA];
@@ -287,6 +300,7 @@ function buildFullEssePrompt(
     "你是 BatchImager 的 Esse 智能体。",
     "当前运行时没有工作区工具；只能自然回复，不能声称已经生成、打包、删除或修改了图片。",
     "不要返回 JSON，不要返回 Markdown 代码块。",
+    ...buildSkillsPromptSection(options.skillsSection),
     "==== 人格 ====",
     ...personaInstructions,
     "==== 本轮上下文 ====",
@@ -307,10 +321,10 @@ function buildFullEssePrompt(
 function buildEsseTurnPrompt(
   input: EsseAgentTurnInput,
   selectedOutputSize: string | undefined,
-  options: { memorySection?: string; workspaceToolsEnabled?: boolean } = {}
+  options: { memorySection?: string; skillsSection?: string; workspaceToolsEnabled?: boolean } = {}
 ): string {
   if (options.workspaceToolsEnabled) {
-    return buildEsseWorkspaceTurnPrompt(input, selectedOutputSize, options.memorySection);
+    return buildEsseWorkspaceTurnPrompt(input, selectedOutputSize, options.memorySection, options.skillsSection);
   }
 
   const personaInstructions = ESSE_PERSONA_INSTRUCTIONS[input.persona ?? DEFAULT_ESSE_PERSONA];
@@ -320,6 +334,7 @@ function buildEsseTurnPrompt(
     "==== 环境更新 ====",
     "注意：以下环境从本轮起覆盖此前上下文；如人格变化，请按新人格回复。",
     "当前运行时没有工作区工具；只能自然回复，不能声称已经执行了图片操作。不要返回 JSON。",
+    ...buildSkillsPromptSection(options.skillsSection),
     "==== 人格 ====",
     ...personaInstructions,
     "==== 本轮上下文 ====",
@@ -337,7 +352,12 @@ function buildEsseTurnPrompt(
   return sections.join("\n");
 }
 
-function buildFullEsseWorkspacePrompt(input: EsseAgentTurnInput, selectedOutputSize: string | undefined, memorySection?: string): string {
+function buildFullEsseWorkspacePrompt(
+  input: EsseAgentTurnInput,
+  selectedOutputSize: string | undefined,
+  memorySection?: string,
+  skillsSection?: string
+): string {
   const personaInstructions = ESSE_PERSONA_INSTRUCTIONS[input.persona ?? DEFAULT_ESSE_PERSONA];
   const sessionLines = buildWorkspaceSessionLines(input);
   const referenceImageLines = buildTurnReferenceImageLines(input);
@@ -347,6 +367,7 @@ function buildFullEsseWorkspacePrompt(input: EsseAgentTurnInput, selectedOutputS
   return [
     "你是 BatchImager 的 Esse 工作区 agent。你可以通过工具读取和修改左侧图片工作区。",
     ...(memorySection ? [memorySection] : []),
+    ...buildSkillsPromptSection(skillsSection),
     ...buildWorkspaceToolPromptSections(),
     "==== 人格 ====",
     ...personaInstructions,
@@ -366,7 +387,12 @@ function buildFullEsseWorkspacePrompt(input: EsseAgentTurnInput, selectedOutputS
   ].join("\n");
 }
 
-function buildEsseWorkspaceTurnPrompt(input: EsseAgentTurnInput, selectedOutputSize: string | undefined, memorySection?: string): string {
+function buildEsseWorkspaceTurnPrompt(
+  input: EsseAgentTurnInput,
+  selectedOutputSize: string | undefined,
+  memorySection?: string,
+  skillsSection?: string
+): string {
   const sessionLines = buildWorkspaceSessionLines(input);
   const referenceImageLines = buildTurnReferenceImageLines(input);
   const selectedDisplayLabel = getSelectedWorkspaceDisplayLabel(input);
@@ -374,6 +400,7 @@ function buildEsseWorkspaceTurnPrompt(input: EsseAgentTurnInput, selectedOutputS
   return [
     "==== 工作区环境更新 ====",
     ...(memorySection ? [memorySection] : []),
+    ...buildSkillsPromptSection(skillsSection),
     ...buildWorkspaceToolPromptSections(),
     selectedOutputSize
       ? `- 用户本轮选择的输出分辨率：${selectedOutputSize}`
@@ -395,6 +422,21 @@ function buildWorkspaceSessionLines(input: EsseAgentTurnInput): string[] {
     const currentSource = getWorkspaceSessionCurrentSource(session);
     return `- img-${index + 1} / ${session.id}：${session.fileName}，当前图：${currentSource}，记录数：${session.generatedFilePaths?.length ?? 0}`;
   });
+}
+
+function buildSkillsPromptSection(skillsSection: string | undefined): string[] {
+  if (!skillsSection?.trim()) {
+    return [];
+  }
+
+  return [
+    "==== Available skills (descriptions only; read SKILL.md before use) ====",
+    skillsSection.trim(),
+    "==== Skills usage rules ====",
+    "当用户要求导出 Excel、PDF、交付包或其他 skill description 明确匹配的制品任务时，先用 read 读取对应 SKILL.md，再用 bash 执行其中的命令。",
+    "SKILL.md 示例里的 BATCHIMAGER_PROJECT_DIR 表示当前项目目录；BATCHIMAGER_SKILL_DIR 必须替换为该 SKILL.md 所在目录的绝对路径。",
+    "不要口头声称已经导出文件；需要产出文件时必须调用 bash 或对应工作区工具。"
+  ];
 }
 
 function buildTurnReferenceImageLines(input: EsseAgentTurnInput): string[] {

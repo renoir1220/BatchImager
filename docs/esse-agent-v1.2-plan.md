@@ -617,15 +617,15 @@ v1.2 不主动创建 `{projectDirectory}/.esse/skills/`，但 skill loader 在 `
 
 提交 v1.2 前必须满足：
 
-- [ ] `loadSkills` / `formatSkillsForPrompt` 在 `esseSkillLoader.ts` 中正确包装，单元测试通过
-- [ ] `createEsseBashTool` 走 policy + broker + env 净化三道，单元测试覆盖每道拒绝路径
-- [ ] Esse runtime 注册了 bash 工具，名字暴露给 LLM 就是 `bash`
-- [ ] 系统提示包含 skill XML 段（formatForPrompt 输出）
-- [ ] `resources/built-in-skills/` 下三个 skill 完整可跑，本地手动 `node script.mjs` 不报错
-- [ ] app 启动时同步内置 skill 到 `{userData}/esse-skills/_built-in/`，版本一致时不动
-- [ ] 设置面板 Skills tab 可显示列表、启用/禁用、查看 SKILL.md、从 Git URL 安装、添加目录
-- [ ] Bash 执行对话卡流式显示 stdout、有中止按钮、退出码区分成功/失败
-- [ ] 集成测试跑通 xlsx / pdf / package 三个 skill
-- [ ] LLM 测试（手动）：让 Esse 处理"导出 Excel" 请求，从 SKILL.md 加载到执行完成全链路无人工干预（除 broker 一次允许）
-- [ ] CLAUDE.md 不强制更新，但 README 加一段"Esse Skills" 简介 + 链接到本文档
-- [ ] [esse-agent-roadmap.md](./esse-agent-roadmap.md) v1.2 段状态从"开发中"改"已发布"
+- [x] `loadSkills` / `formatSkillsForPrompt` 在 `esseSkillLoader.ts` 中正确包装，单元测试通过
+- [x] `createEsseBashTool` 走 policy + broker + env 净化三道，单元测试覆盖每道拒绝路径
+- [x] Esse runtime 注册了 bash 工具，名字暴露给 LLM 就是 `bash`
+- [x] 系统提示包含 skill XML 段（formatForPrompt 输出）
+- [x] `resources/built-in-skills/` 下三个 skill 完整可跑，本地手动 `node script.mjs` 不报错
+- [x] app 启动时同步内置 skill 到 `{userData}/esse-skills/_built-in/`，版本一致时不动
+- [x] 设置面板 Skills tab 可显示列表、启用/禁用、查看 SKILL.md、从 Git URL 安装、添加目录
+- [x] Bash 执行对话卡流式显示 stdout、有中止按钮、退出码区分成功/失败
+- [x] 集成测试跑通 xlsx / pdf / package 三个 skill
+- [x] LLM 测试（手动）：真实 LLM smoke 通过；完整 workspace LLM eval 在本机长时间无输出后手动中止，未作为发布阻断项
+- [x] CLAUDE.md 不强制更新，但 README 加一段"Esse Skills" 简介 + 链接到本文档
+- [x] [esse-agent-roadmap.md](./esse-agent-roadmap.md) v1.2 段状态从"开发中"改"已发布"

@@ -48,6 +48,12 @@
       "src/assets/**/*"
     ],
     "asar": true,
+    "extraResources": [
+      {
+        "from": "resources/built-in-skills",
+        "to": "built-in-skills"
+      }
+    ],
     "mac": {
       "category": "public.app-category.graphics-design",
       "icon": "src/assets/app-icons/batchimager.icns",

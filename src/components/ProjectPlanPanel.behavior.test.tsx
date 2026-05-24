@@ -92,6 +92,39 @@ describe("ProjectPlanPanel persona behavior", () => {
   });
 });
 
+describe("ProjectPlanPanel bash execution cards", () => {
+  test("renders streaming bash output and final output path", () => {
+    renderProjectPlanPanelWithState({
+      conversation: {
+        id: "conversation-1",
+        messages: [
+          {
+            bashExecution: {
+              command: "node /skills/xlsx-export/scripts/export.mjs --project /project",
+              cwd: "/project",
+              exitCode: 0,
+              output: "Exported 1 rows.\n[BATCHIMAGER_OUTPUT] /project/exports/all-sessions.xlsx",
+              outputPath: "/project/exports/all-sessions.xlsx",
+              skillName: "xlsx-export",
+              status: "completed",
+              toolCallId: "bash-1"
+            },
+            content: "",
+            contextType: "esse-bash-execution",
+            id: "message-bash-1",
+            role: "context"
+          }
+        ]
+      },
+      plans: []
+    });
+
+    expect(screen.getByRole("region", { name: "Esse Bash 执行" })).toHaveTextContent("xlsx-export · bash");
+    expect(screen.getByText(/Exported 1 rows/)).toBeInTheDocument();
+    expect(screen.getByText("输出：/project/exports/all-sessions.xlsx")).toBeInTheDocument();
+  });
+});
+
 describe("ProjectPlanPanel plan cards", () => {
   test("collapses and expands the current batch confirmation card", async () => {
     const user = userEvent.setup();

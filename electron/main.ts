@@ -1,19 +1,23 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, net, protocol } from "electron";
 import { existsSync } from "node:fs";
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type {
+  AddEsseSkillPathRequest,
   CancelOperationRequest,
   CancelEsseBatchTaskAllRequest,
   CancelEsseBatchTaskItemRequest,
   CopyImageToClipboardRequest,
   CreatePlaceholderImageRequest,
   GenerateImageRequest,
+  InstallEsseSkillFromGitRequest,
   ImportProjectImagesRequest,
   OpenProjectRequest,
+  RemoveEsseSkillRequest,
   RetryEsseBatchTaskFailedRequest,
   RetryEsseBatchTaskItemRequest,
+  ReadEsseSkillFileRequest,
   RenameProjectRequest,
   SaveApiSettingsRequest,
   SaveReferenceImageRequest,
@@ -22,9 +26,13 @@ import type {
   SendEsseMessageRequest,
   EssePermissionResponse,
   EssePreflightResponse,
+  SetEsseSkillEnabledRequest,
   ProjectSnapshot
 } from "./ipcTypes";
 import { createAppLogger, type AppLogger } from "./services/appLogger";
+import { createBatchImagerCommandPolicy } from "./services/agentCommandPolicy";
+import { createEsseBashTool } from "./services/esseBashTool";
+import { syncBuiltInSkills } from "./services/esseBuiltInSkills";
 import { createBlankGenerationSeed } from "./services/blankGenerationSeed";
 import { runEsseAgentTurn } from "./services/esseAgent";
 import { EsseBatchTaskRegistry } from "./services/esseBatchTaskRegistry";
@@ -35,6 +43,15 @@ import { EssePermissionBroker } from "./services/essePermissionBroker";
 import { DEFAULT_ESSE_PERMISSION_POLICY } from "./services/essePermissionPolicy";
 import { createProjectSnapshotWorkspaceRuntime } from "./services/esseWorkspaceRuntime";
 import { EssePreflightBroker } from "./services/essePreflightBroker";
+import { createEsseSkillLoader, type EsseSkillLoader } from "./services/esseSkillLoader";
+import { installSkillFromGit } from "./services/esseSkillInstaller";
+import {
+  addEsseSkillPath,
+  loadEsseSkillSettings,
+  saveEsseSkillSettings,
+  setEsseSkillEnabled,
+  type EsseSkillSettings
+} from "./services/esseSkillSettings";
 import { createImageGenerationExecutor, type ImageGenerationExecutor } from "./services/imageGenerationService";
 import { packageGeneratedImages } from "./services/imagePackage";
 import { configureLocalConfig, getApiSettingsSnapshot, loadTuziConfig, loadTuziLlmConfig, saveApiSettings } from "./services/localConfig";
@@ -70,6 +87,9 @@ const MACOS_TRAFFIC_LIGHT_POSITION = { x: 16, y: 16 };
 const activeOperationControllers = new Map<string, AbortController>();
 let logger: AppLogger | undefined;
 let activeProjectDirectory: string | undefined;
+let esseSkillLoader: EsseSkillLoader | undefined;
+let esseSkillSettings: EsseSkillSettings = { disabledSkills: [], skillPaths: [] };
+let builtInSkillsReady: Promise<void> | undefined;
 let confirmedRunningWorkClose = false;
 let inFlightGenerationCount = 0;
 let rendererRunningWorkCount = 0;
@@ -351,6 +371,70 @@ function registerIpc(appLogger: AppLogger): void {
     return snapshot;
   });
 
+  ipcMain.handle("esse:skills-list", async () => buildEsseSkillsSnapshot(true));
+
+  ipcMain.handle("esse:skills-reload", async () => buildEsseSkillsSnapshot(true));
+
+  ipcMain.handle("esse:skills-set-enabled", async (_event, request: SetEsseSkillEnabledRequest) => {
+    assertSetEsseSkillEnabledRequest(request);
+    esseSkillSettings = await saveEsseSkillSettings(
+      getEsseSkillSettingsPath(),
+      setEsseSkillEnabled(esseSkillSettings, request.name, request.enabled)
+    );
+    await esseSkillLoader?.reload();
+    return buildEsseSkillsSnapshot(true);
+  });
+
+  ipcMain.handle("esse:skills-add-path", async (_event, request: AddEsseSkillPathRequest) => {
+    assertAddEsseSkillPathRequest(request);
+    esseSkillSettings = await saveEsseSkillSettings(
+      getEsseSkillSettingsPath(),
+      addEsseSkillPath(esseSkillSettings, request.path)
+    );
+    await esseSkillLoader?.reload();
+    return buildEsseSkillsSnapshot(true);
+  });
+
+  ipcMain.handle("esse:skills-install-git", async (_event, request: InstallEsseSkillFromGitRequest) => {
+    assertInstallEsseSkillFromGitRequest(request);
+    const result = await installSkillFromGit({
+      gitUrl: request.gitUrl,
+      logger: appLogger,
+      targetDir: getEsseSkillsDirectory()
+    });
+    if (!result.ok) {
+      throw new Error(result.reason);
+    }
+    await esseSkillLoader?.reload();
+    return buildEsseSkillsSnapshot(true);
+  });
+
+  ipcMain.handle("esse:skills-remove", async (_event, request: RemoveEsseSkillRequest) => {
+    assertRemoveEsseSkillRequest(request);
+    const skill = (await buildEsseSkillsSnapshot(true)).skills.find((candidate) => candidate.name === request.name);
+    if (!skill) {
+      throw new Error("Skill not found");
+    }
+    if (skill.source !== "global" && skill.source !== "project") {
+      throw new Error("只能移除全局或项目级 Skill");
+    }
+    await rm(skill.baseDir, { force: true, recursive: true });
+    await esseSkillLoader?.reload();
+    return buildEsseSkillsSnapshot(true);
+  });
+
+  ipcMain.handle("esse:skills-read-file", async (_event, request: ReadEsseSkillFileRequest) => {
+    assertReadEsseSkillFileRequest(request);
+    const skill = (await buildEsseSkillsSnapshot(true)).skills.find((candidate) => candidate.name === request.name);
+    if (!skill) {
+      throw new Error("Skill not found");
+    }
+    return {
+      content: await readFile(skill.filePath, "utf8"),
+      filePath: skill.filePath
+    };
+  });
+
   ipcMain.handle("generation:generate-image", async (_event, request: GenerateImageRequest) => {
     assertGenerateImageRequest(request);
 
@@ -489,6 +573,19 @@ function registerIpc(appLogger: AppLogger): void {
     try {
       const result = await withCancelableOperation(request.operationId, async (signal) => {
         const permissionAllowList = new Set<string>();
+        const skillLoader = requireEsseSkillLoader();
+        await skillLoader.reload();
+        const bashTool = await createEsseBashTool({
+          commandPolicy: createBatchImagerCommandPolicy({ projectDirectory }),
+          permissionBroker: essePermissionBroker,
+          projectDirectory,
+          sessionAllowList: permissionAllowList,
+          sessionId: "esse-agent",
+          signal,
+          skillLoader,
+          userDataDirectory: app.getPath("userData"),
+          webContents: event.sender
+        });
         const workspaceToolRuntime = createProjectSnapshotWorkspaceRuntime({
           executeImagePreflightTool: createEsseImagePreflightExecutor({
             batchTaskRegistry: esseBatchTaskRegistry,
@@ -514,8 +611,10 @@ function registerIpc(appLogger: AppLogger): void {
         });
 
         return await runEsseAgentTurn(request, loadTuziLlmConfig(), projectDirectory, {
+          bashTool,
           logger: appLogger,
           signal,
+          skillLoader,
           workspaceToolRuntime
         });
       });
@@ -887,6 +986,65 @@ function getProjectListOptions(): { indexFilePath: string; projectsDirectory: st
   };
 }
 
+function getEsseSkillsDirectory(): string {
+  return path.join(app.getPath("userData"), "esse-skills");
+}
+
+function getBuiltInSkillsTargetDirectory(): string {
+  return path.join(getEsseSkillsDirectory(), "_built-in");
+}
+
+function getBuiltInSkillsSourceDirectory(): string {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "built-in-skills")
+    : path.join(app.getAppPath(), "resources", "built-in-skills");
+}
+
+function getEsseSkillSettingsPath(): string {
+  return path.join(app.getPath("userData"), "esse-settings.json");
+}
+
+function createAppEsseSkillLoader(options: { includeDisabled?: boolean } = {}): EsseSkillLoader {
+  return createEsseSkillLoader({
+    agentDir: getEsseSkillsDirectory(),
+    builtInSkillsDir: getBuiltInSkillsTargetDirectory(),
+    getDisabledSkills: options.includeDisabled ? () => [] : () => esseSkillSettings.disabledSkills,
+    getProjectDirectory: () => activeProjectDirectory,
+    getUserPaths: () => esseSkillSettings.skillPaths
+  });
+}
+
+function requireEsseSkillLoader(): EsseSkillLoader {
+  if (!esseSkillLoader) {
+    throw new Error("Esse skills are not ready");
+  }
+
+  return esseSkillLoader;
+}
+
+async function buildEsseSkillsSnapshot(forceReload: boolean) {
+  if (builtInSkillsReady) {
+    await builtInSkillsReady;
+  }
+  const loader = forceReload ? createAppEsseSkillLoader({ includeDisabled: true }) : requireEsseSkillLoader();
+  const loadResult = forceReload ? await loader.reload() : { diagnostics: [], skills: loader.list() };
+  const disabled = new Set(esseSkillSettings.disabledSkills);
+
+  return {
+    diagnostics: loadResult.diagnostics.map((diagnostic) => ({
+      message: diagnostic.message,
+      ...(diagnostic.path ? { path: diagnostic.path } : {}),
+      type: diagnostic.type
+    })),
+    disabledSkills: [...esseSkillSettings.disabledSkills],
+    skillPaths: [...esseSkillSettings.skillPaths],
+    skills: loadResult.skills.map((skill) => ({
+      ...skill,
+      enabled: !disabled.has(skill.name)
+    }))
+  };
+}
+
 async function pickProjectDirectory(title: string): Promise<string | null> {
   const projectsDirectory = getProjectsDirectory();
   await mkdir(projectsDirectory, { recursive: true });
@@ -955,6 +1113,42 @@ function assertGenerateImageRequest(request: GenerateImageRequest): void {
 function assertCancelOperationRequest(request: CancelOperationRequest): void {
   if (typeof request !== "object" || request === null || typeof request.operationId !== "string" || !request.operationId.trim()) {
     throw new Error("Invalid cancel operation request");
+  }
+}
+
+function assertSetEsseSkillEnabledRequest(request: SetEsseSkillEnabledRequest): void {
+  if (
+    typeof request !== "object" ||
+    request === null ||
+    typeof request.name !== "string" ||
+    !request.name.trim() ||
+    typeof request.enabled !== "boolean"
+  ) {
+    throw new Error("Invalid Esse skill enabled request");
+  }
+}
+
+function assertAddEsseSkillPathRequest(request: AddEsseSkillPathRequest): void {
+  if (typeof request !== "object" || request === null || typeof request.path !== "string" || !request.path.trim()) {
+    throw new Error("Invalid Esse skill path request");
+  }
+}
+
+function assertInstallEsseSkillFromGitRequest(request: InstallEsseSkillFromGitRequest): void {
+  if (typeof request !== "object" || request === null || typeof request.gitUrl !== "string" || !request.gitUrl.trim()) {
+    throw new Error("Invalid Esse skill git install request");
+  }
+}
+
+function assertRemoveEsseSkillRequest(request: RemoveEsseSkillRequest): void {
+  if (typeof request !== "object" || request === null || typeof request.name !== "string" || !request.name.trim()) {
+    throw new Error("Invalid Esse skill remove request");
+  }
+}
+
+function assertReadEsseSkillFileRequest(request: ReadEsseSkillFileRequest): void {
+  if (typeof request !== "object" || request === null || typeof request.name !== "string" || !request.name.trim()) {
+    throw new Error("Invalid Esse skill read request");
   }
 }
 
@@ -1169,9 +1363,10 @@ function assertSendChatMessageRequest(request: SendChatMessageRequest): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   configureLocalConfig({ userConfigDirectory: app.getPath("userData") });
   logger = createLogger();
+  esseSkillSettings = await loadEsseSkillSettings(getEsseSkillSettingsPath());
   logger.info("Application ready", {
     data: {
       isPackaged: app.isPackaged,
@@ -1179,10 +1374,18 @@ app.whenReady().then(() => {
     },
     publicMessage: "应用已启动。"
   });
+  esseSkillLoader = createAppEsseSkillLoader();
   registerImageProtocol();
   registerIpc(logger);
   createWindow();
   warmupImageSessionAgent(logger);
+  builtInSkillsReady = syncBuiltInSkills({
+    builtInSource: getBuiltInSkillsSourceDirectory(),
+    logger,
+    userTarget: getBuiltInSkillsTargetDirectory()
+  }).then(async () => {
+    await esseSkillLoader?.reload();
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

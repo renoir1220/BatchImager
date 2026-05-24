@@ -455,6 +455,43 @@ describe("esseAgent", () => {
       status: "idle"
     });
   });
+
+  test("registers controlled bash and renders available skills in the prompt", async () => {
+    const workspaceRuntime = createTestWorkspaceRuntime({
+      project: createTestProjectMetadata(),
+      sessions: []
+    });
+    let capturedPrompt = "";
+    let registeredToolNames: string[] = [];
+
+    await runEsseAgentTurn(
+      {
+        messages: [{ role: "user", content: "导出 Excel 给我" }],
+        sessions: []
+      },
+      createEsseTestConfig(),
+      "C:/project",
+      {
+        bashTool: { name: "bash" },
+        createRuntime: async (options) => {
+          const customTools = options.customToolDefinitions as Array<{ name: string }>;
+          registeredToolNames = customTools.map((tool) => tool.name);
+          return createFakeEsseRuntime({
+            onPrompt: (prompt) => {
+              capturedPrompt = prompt;
+            }
+          });
+        },
+        skillLoader: createFakeSkillLoader("<skills><skill name=\"xlsx-export\">导出 Excel</skill></skills>"),
+        workspaceToolRuntime: workspaceRuntime
+      }
+    );
+
+    expect(registeredToolNames).toEqual(expect.arrayContaining(["bash", "list_sessions"]));
+    expect(capturedPrompt).toContain("Available skills");
+    expect(capturedPrompt).toContain("xlsx-export");
+    expect(capturedPrompt).toContain("先用 read 读取对应 SKILL.md，再用 bash 执行");
+  });
 });
 
 function createEsseTestConfig() {
@@ -529,5 +566,15 @@ function createCapturingLogger(publicMessages: string[]): AppLogger {
     info: capture,
     subscribe: () => () => undefined,
     warn: capture
+  };
+}
+
+function createFakeSkillLoader(skillsPrompt: string) {
+  return {
+    formatForPrompt: () => skillsPrompt,
+    get: () => undefined,
+    list: () => [],
+    matchSkillByCwd: () => undefined,
+    reload: async () => ({ diagnostics: [], skills: [] })
   };
 }
