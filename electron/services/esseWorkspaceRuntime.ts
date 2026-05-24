@@ -1,12 +1,15 @@
 import { randomBytes } from "node:crypto";
+import { copyFile, mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
 import type { EssePreflightPayload, ProjectSnapshot } from "../ipcTypes";
 import type {
+  EsseAddReferenceImageRequest,
   EsseBlankSessionRequest,
   EsseWorkspaceToolCallEvent,
   EsseImagePreflightExecutionRequest,
   EssePackagePreflightExecutionRequest,
   EssePreflightDecision,
+  EsseRemoveReferenceImageRequest,
   EsseWorkspacePermissionDecision,
   EsseWorkspacePermissionRequest,
   EsseWorkspaceToolRuntime,
@@ -15,7 +18,7 @@ import type {
 import { createBlankGenerationSeed } from "./blankGenerationSeed";
 import type { ProjectMutationSink } from "./projectMutationSink";
 import { readProjectImageMetadata } from "./projectImageMetadata";
-import { getProjectGeneratedDirectory } from "./projectStore";
+import { getProjectGeneratedDirectory, getProjectReferencesDirectory } from "./projectStore";
 import { deleteProjectUnreferencedFiles, scanProjectUnreferencedFiles } from "./projectUnreferencedFiles";
 
 interface ProjectSnapshotWorkspaceRuntimeOptions {
@@ -33,6 +36,7 @@ interface ProjectSnapshotWorkspaceRuntimeOptions {
     }
   ) => Promise<WorkspaceMutationResult>;
   initialSnapshot: ProjectSnapshot;
+  getTurnReferenceImagePaths?: () => string[];
   recordToolCalls?: boolean;
   requestPermission?: (request: EsseWorkspacePermissionRequest) => Promise<EsseWorkspacePermissionDecision>;
   requestPreflight?: (payload: EssePreflightPayload) => Promise<EssePreflightDecision>;
@@ -56,6 +60,7 @@ export function createProjectSnapshotWorkspaceRuntime(options: ProjectSnapshotWo
   let currentSnapshot = options.initialSnapshot;
 
   const runtime: EsseWorkspaceToolRuntime = {
+    addReferenceImage: async (request) => addReferenceImage(runtime, request, () => currentSnapshot),
     async applyMutation(mutator) {
       try {
         let committedResult: WorkspaceMutationResult | undefined;
@@ -97,6 +102,7 @@ export function createProjectSnapshotWorkspaceRuntime(options: ProjectSnapshotWo
         }
       : {}),
     getState: () => currentSnapshot,
+    ...(options.getTurnReferenceImagePaths ? { getTurnReferenceImagePaths: options.getTurnReferenceImagePaths } : {}),
     ...(options.recordToolCalls
       ? {
           recordToolCall: async (event) => {
@@ -105,6 +111,7 @@ export function createProjectSnapshotWorkspaceRuntime(options: ProjectSnapshotWo
         }
       : {}),
     readImageMetadata: (request) => readProjectImageMetadata(currentSnapshot, request),
+    removeReferenceImage: async (request) => removeReferenceImage(runtime, request, () => currentSnapshot),
     requestPermission: options.requestPermission ?? allowWorkspaceToolPermission,
     ...(options.requestPreflight ? { requestPreflight: options.requestPreflight } : {}),
     scanUnreferencedFiles: () => scanProjectUnreferencedFiles(currentSnapshot)
@@ -133,6 +140,107 @@ async function createBlankSession(
     filePath: seedPath,
     sessionId
   }));
+
+  return mutation.result;
+}
+
+async function addReferenceImage(
+  runtime: EsseWorkspaceToolRuntime,
+  request: EsseAddReferenceImageRequest,
+  getSnapshot: () => ProjectSnapshot
+): Promise<WorkspaceMutationResult> {
+  if (!isSupportedReferenceImagePath(request.filePath)) {
+    return { ok: false, reason: "unsupported reference image type", suggestedNext: "Use a supported image file." };
+  }
+
+  const snapshot = getSnapshot();
+  const sourcePath = path.resolve(request.filePath);
+  const referenceDirectory = getProjectReferencesDirectory(snapshot.project.directory);
+  const referenceId = createUniqueReferenceImageId(snapshot);
+  const displayFileName = request.fileName?.trim() || path.basename(request.filePath) || "reference.png";
+  const destinationPath = path.join(referenceDirectory, `${referenceId}-${toSafeReferenceFileName(displayFileName)}`);
+
+  await mkdir(referenceDirectory, { recursive: true });
+  await copyFile(sourcePath, destinationPath);
+
+  const mutation = await runtime.applyMutation((state) => {
+    if (state.referenceImages?.some((referenceImage) => referenceImage.id === referenceId)) {
+      return {
+        result: {
+          ok: false,
+          reason: "referenceImageId must be unique",
+          suggestedNext: "retry with a new generated reference id."
+        },
+        state
+      };
+    }
+
+    const nextReference = {
+      filePath: destinationPath,
+      id: referenceId,
+      label: displayFileName
+    };
+
+    return {
+      result: {
+        affectedSessionIds: [],
+        ok: true,
+        summary: `已添加参考图：${displayFileName}`
+      },
+      state: {
+        ...state,
+        referenceImages: [...(state.referenceImages ?? []), nextReference]
+      }
+    };
+  });
+
+  if (!mutation.result.ok) {
+    await unlinkIfExists(destinationPath);
+  }
+
+  return mutation.result;
+}
+
+async function removeReferenceImage(
+  runtime: EsseWorkspaceToolRuntime,
+  request: EsseRemoveReferenceImageRequest,
+  getSnapshot: () => ProjectSnapshot
+): Promise<WorkspaceMutationResult> {
+  const referenceImage = getSnapshot().referenceImages?.find((current) => current.id === request.referenceImageId);
+  if (!referenceImage) {
+    return {
+      ok: false,
+      reason: "reference image not found",
+      suggestedNext: "call list_reference_images and pass one returned referenceImageId."
+    };
+  }
+
+  await unlinkIfExists(referenceImage.filePath);
+
+  const mutation = await runtime.applyMutation((state) => {
+    if (!state.referenceImages?.some((current) => current.id === request.referenceImageId)) {
+      return {
+        result: {
+          ok: false,
+          reason: "reference image not found",
+          suggestedNext: "call list_reference_images and pass one returned referenceImageId."
+        },
+        state
+      };
+    }
+
+    return {
+      result: {
+        affectedSessionIds: [],
+        ok: true,
+        summary: `已删除参考图：${referenceImage.label}`
+      },
+      state: {
+        ...state,
+        referenceImages: state.referenceImages.filter((current) => current.id !== request.referenceImageId)
+      }
+    };
+  });
 
   return mutation.result;
 }
@@ -187,6 +295,44 @@ function createUniqueSessionId(snapshot: ProjectSnapshot): string {
   }
 
   return `sess_${Date.now()}_${randomBytes(4).toString("hex")}`;
+}
+
+function createUniqueReferenceImageId(snapshot: ProjectSnapshot): string {
+  const existingIds = new Set((snapshot.referenceImages ?? []).map((referenceImage) => referenceImage.id));
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const candidate = `ref_${randomBytes(8).toString("hex")}`;
+    if (!existingIds.has(candidate)) {
+      return candidate;
+    }
+  }
+
+  return `ref_${Date.now()}_${randomBytes(4).toString("hex")}`;
+}
+
+function isSupportedReferenceImagePath(filePath: string): boolean {
+  return /\.(jpe?g|png|webp|gif|bmp|tiff?|heic|heif)$/i.test(filePath);
+}
+
+function toSafeReferenceFileName(fileName: string): string {
+  const extension = path.extname(fileName) || ".png";
+  const baseName = path.basename(fileName, path.extname(fileName));
+  const safeBaseName =
+    baseName
+      .replace(/[^a-zA-Z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase() || "reference";
+  return `${safeBaseName}${extension.toLowerCase()}`;
+}
+
+async function unlinkIfExists(filePath: string): Promise<void> {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
 }
 
 function appendToolCallMessage(state: ProjectSnapshot, event: EsseWorkspaceToolCallEvent): ProjectSnapshot {

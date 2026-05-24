@@ -65,6 +65,53 @@ describe("esseImagePreflightExecutor", () => {
     });
   });
 
+  test("resolves project-level reference image ids for generation requests", async () => {
+    let snapshot = createSnapshot({
+      referenceImages: [
+        {
+          filePath: "/project/references/style.png",
+          id: "ref_style",
+          label: "风格参考"
+        }
+      ]
+    });
+    const generation = createDeferred<ProductImageResult>();
+    const generatedRequests: UnifiedImageGenerationRequest[] = [];
+    const runtime = createRuntime(snapshot, (nextSnapshot) => {
+      snapshot = nextSnapshot;
+    });
+    const executor = createEsseImagePreflightExecutor({
+      generateImage: async (request) => {
+        generatedRequests.push(request);
+        return await generation.promise;
+      },
+      projectDirectory: "/project"
+    });
+
+    await executor(
+      {
+        commands: [
+          {
+            displayLabel: "img-1",
+            mode: "edit",
+            prompt: "按参考图风格重做",
+            referenceImageIds: ["ref_style"],
+            target: { sessionId: "sess_1", type: "existing" }
+          }
+        ],
+        tool: "generate_image"
+      },
+      runtime
+    );
+
+    await waitUntil(() => generatedRequests.length === 1);
+    expect(generatedRequests[0]).toMatchObject({
+      referenceImagePaths: ["/project/references/style.png"]
+    });
+    generation.resolve({ outputPath: "/project/images/generated/out-ref.png", requestSize: "auto" });
+    await waitUntil(() => snapshot.sessions[0].status === "completed");
+  });
+
   test("creates a new session only after preflight execution and then writes the generated result", async () => {
     const projectDirectory = await mkdtemp(path.join(os.tmpdir(), "batchimager-preflight-exec-"));
     let snapshot = createSnapshot({ project: { ...createSnapshot().project, directory: projectDirectory } });

@@ -1,4 +1,4 @@
-import type { EssePreflightCommand, EssePreflightPayload, PersistedImageSession, ProjectSnapshot } from "../ipcTypes";
+import type { BatchPlanReferenceImage, EssePreflightCommand, EssePreflightPayload, PersistedImageSession, ProjectSnapshot } from "../ipcTypes";
 import type { AgentToolResult, BatchImagerAgentTool, BatchImagerAgentToolRisk } from "./batchImagerAgentTools";
 import type { ProjectImageMetadataResult } from "./projectImageMetadata";
 import type { DeleteUnreferencedFileResult, UnreferencedFileCandidate } from "./projectUnreferencedFiles";
@@ -10,14 +10,17 @@ export interface EsseWorkspaceToolRuntime {
     result: WorkspaceMutationResult;
     state: EsseWorkspaceState;
   }>;
+  addReferenceImage?: (request: EsseAddReferenceImageRequest) => Promise<WorkspaceMutationResult>;
   deleteUnreferencedFiles?: (candidateIds: string[]) => Promise<DeleteUnreferencedFileResult[]>;
   createBlankSession?: (request: EsseBlankSessionRequest) => Promise<WorkspaceMutationResult>;
   executeImagePreflightTool?: (request: EsseImagePreflightExecutionRequest) => Promise<WorkspaceMutationResult>;
   executePackagePreflightTool?: (request: EssePackagePreflightExecutionRequest) => Promise<WorkspaceMutationResult>;
   getState: () => EsseWorkspaceState;
+  getTurnReferenceImagePaths?: () => string[];
   getTurnBudget?: () => EsseTurnBudget | undefined;
   recordToolCall?: (event: EsseWorkspaceToolCallEvent) => void | Promise<void>;
   readImageMetadata?: (request: EsseImageMetadataRequest) => Promise<ProjectImageMetadataResult>;
+  removeReferenceImage?: (request: EsseRemoveReferenceImageRequest) => Promise<WorkspaceMutationResult>;
   requestPermission?: (request: EsseWorkspacePermissionRequest) => Promise<EsseWorkspacePermissionDecision>;
   requestPreflight?: (payload: EssePreflightPayload) => Promise<EssePreflightDecision>;
   scanUnreferencedFiles?: () => Promise<UnreferencedFileCandidate[]>;
@@ -64,6 +67,15 @@ export interface EsseBlankSessionRequest {
   fileName?: string;
 }
 
+export interface EsseAddReferenceImageRequest {
+  fileName?: string;
+  filePath: string;
+}
+
+export interface EsseRemoveReferenceImageRequest {
+  referenceImageId: string;
+}
+
 export interface EsseImageMetadataRequest {
   recordIndex?: number;
   sessionId: string;
@@ -87,6 +99,9 @@ export function createEsseWorkspaceTools(runtime: EsseWorkspaceToolRuntime): Bat
     createReorderSessionsTool(runtime),
     createSetSessionPromptTool(runtime),
     createAddBlankSessionTool(runtime),
+    createListReferenceImagesTool(runtime),
+    createAddReferenceImageTool(runtime),
+    createRemoveReferenceImageTool(runtime),
     createScanUnreferencedFilesTool(runtime),
     createDeleteUnreferencedFilesTool(runtime),
     createGenerateImageTool(runtime),
@@ -125,6 +140,139 @@ function createAddBlankSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImag
       const result = await runtime.createBlankSession({
         ...(fileName ? { fileName } : {})
       });
+      if (!result.ok) {
+        return toolError(result.reason, result.detail, result.suggestedNext);
+      }
+
+      return toolOk(result.summary, { affectedSessionIds: result.affectedSessionIds });
+    }
+  };
+}
+
+function createListReferenceImagesTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
+  return {
+    name: "list_reference_images",
+    label: "列出参考图",
+    risk: "read",
+    requiresPreflight: false,
+    description:
+      "List all reference images registered on the current project. Returns id, label, and fileName for each. Use before passing referenceImageIds to generate_image or run_batch_generation.",
+    parameters: emptyParameters(),
+    async execute() {
+      const referenceImages = runtime.getState().referenceImages ?? [];
+      const safeReferenceImages = referenceImages.map((referenceImage) => formatReferenceImage(referenceImage));
+
+      if (!safeReferenceImages.length) {
+        return toolOk("项目当前没有参考图。", { referenceImages: [] });
+      }
+
+      return toolOk(
+        safeReferenceImages
+          .map((referenceImage, index) => `${index + 1}. id=${referenceImage.id} label=${referenceImage.label} fileName=${referenceImage.fileName}`)
+          .join("\n"),
+        { referenceImages: safeReferenceImages }
+      );
+    }
+  };
+}
+
+function createAddReferenceImageTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
+  return {
+    name: "add_reference_image",
+    label: "添加参考图",
+    risk: "external-write",
+    requiresPreflight: false,
+    description:
+      "Add a reference image to the current project from a local file path the user shared in this turn. Use only when the user explicitly attached or pasted a new image and asks to register it as a reference. Do not invent file paths or download from URLs. Parameters: filePath must be from the current turn's referenceImagePaths input; fileName is optional display text.",
+    parameters: objectParameters(
+      {
+        fileName: "Optional display file name for this reference image.",
+        filePath: "A local image path from the current turn's referenceImagePaths input."
+      },
+      ["filePath"]
+    ),
+    async execute(_toolCallId, params) {
+      if (!runtime.addReferenceImage) {
+        return toolError("add_reference_image unavailable", undefined, "run this tool only in a project workspace runtime.");
+      }
+
+      const filePath = readString(params.filePath);
+      const fileName = readString(params.fileName);
+      if (!filePath) {
+        return toolError("filePath is required", undefined, "pass one exact path from the current turn's referenceImagePaths input.");
+      }
+
+      const allowedPaths = runtime.getTurnReferenceImagePaths?.() ?? [];
+      if (!allowedPaths.includes(filePath)) {
+        return toolError(
+          "filePath is not from this turn",
+          undefined,
+          "Only use a filePath that appears in the current turn's referenceImagePaths input."
+        );
+      }
+
+      if (!isSupportedReferenceImagePath(filePath)) {
+        return toolError("unsupported reference image type", undefined, "Use a jpg, jpeg, png, webp, gif, bmp, tif, tiff, heic, or heif image.");
+      }
+
+      const permission = await requestWorkspaceToolPermission(runtime, {
+        label: "添加参考图",
+        name: "add_reference_image",
+        requiresPreflight: false,
+        risk: "external-write"
+      }, params);
+      if (permission) {
+        return permission;
+      }
+
+      const result = await runtime.addReferenceImage({
+        ...(fileName ? { fileName } : {}),
+        filePath
+      });
+      if (!result.ok) {
+        return toolError(result.reason, result.detail, result.suggestedNext);
+      }
+
+      return toolOk(result.summary, { affectedSessionIds: result.affectedSessionIds });
+    }
+  };
+}
+
+function createRemoveReferenceImageTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
+  return {
+    name: "remove_reference_image",
+    label: "删除参考图",
+    risk: "destructive",
+    requiresPreflight: false,
+    description:
+      "Remove one reference image from the current project by id. Does not delete the original source file shared by the user. Parameters: referenceImageId must be a stable id from list_reference_images.",
+    parameters: objectParameters(
+      {
+        referenceImageId: "Stable reference image id from list_reference_images."
+      },
+      ["referenceImageId"]
+    ),
+    async execute(_toolCallId, params) {
+      if (!runtime.removeReferenceImage) {
+        return toolError("remove_reference_image unavailable", undefined, "run this tool only in a project workspace runtime.");
+      }
+
+      const referenceImageId = readString(params.referenceImageId);
+      if (!referenceImageId) {
+        return toolError("referenceImageId is required", undefined, "call list_reference_images and pass one returned id.");
+      }
+
+      const permission = await requestWorkspaceToolPermission(runtime, {
+        label: "删除参考图",
+        name: "remove_reference_image",
+        requiresPreflight: false,
+        risk: "destructive"
+      }, params);
+      if (permission) {
+        return permission;
+      }
+
+      const result = await runtime.removeReferenceImage({ referenceImageId });
       if (!result.ok) {
         return toolError(result.reason, result.detail, result.suggestedNext);
       }
@@ -1062,6 +1210,18 @@ function getCurrentImageSource(session: PersistedImageSession): "generated" | "o
 
 function basenameFromPath(filePath: string): string {
   return filePath.split(/[\\/]/).filter(Boolean).pop() ?? filePath;
+}
+
+function formatReferenceImage(referenceImage: BatchPlanReferenceImage): { fileName: string; id: string; label: string } {
+  return {
+    fileName: basenameFromPath(referenceImage.filePath),
+    id: referenceImage.id,
+    label: referenceImage.label
+  };
+}
+
+function isSupportedReferenceImagePath(filePath: string): boolean {
+  return /\.(jpe?g|png|webp|gif|bmp|tiff?|heic|heif)$/i.test(filePath);
 }
 
 function ok(state: EsseWorkspaceState, affectedSessionIds: string[], summary: string) {

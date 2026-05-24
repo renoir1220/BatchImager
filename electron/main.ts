@@ -253,7 +253,7 @@ function registerIpc(appLogger: AppLogger): void {
     return getProjectSnapshotSink(requireActiveProjectDirectory()).apply((snapshot) => ({
       ...snapshot,
       projectManagerState: request.projectManagerState,
-      referenceImages: request.referenceImages,
+      referenceImages: request.referenceImages ?? snapshot.referenceImages,
       selectedSessionId: request.selectedSessionId,
       sessions: request.sessions
     }));
@@ -430,6 +430,7 @@ function registerIpc(appLogger: AppLogger): void {
           initialSnapshot: await openProject(projectDirectory),
           recordToolCalls: true,
           requestPreflight: (payload) => essePreflightBroker.request(event.sender, payload, { signal }),
+          getTurnReferenceImagePaths: () => request.referenceImagePaths ?? [],
           sink: getProjectSnapshotSink(projectDirectory)
         });
 

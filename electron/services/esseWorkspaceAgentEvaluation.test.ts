@@ -16,6 +16,7 @@ interface WorkspaceAgentEvalScenario {
   assert: (context: WorkspaceAgentEvalContext) => void;
   id: string;
   initialSnapshot: ProjectSnapshot;
+  referenceImagePaths?: string[];
   reply: string;
   script: ToolScriptStep[];
   userTask: string;
@@ -59,6 +60,31 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
       reply: "这组图可以走清爽白底或浅场景两条方向。",
       script: [],
       userTask: "你觉得这组图适合什么电商风格？先聊聊，不要生成"
+    },
+    {
+      assert: ({ persisted, prompt, trace }) => {
+        expect(trace).toEqual(["list_reference_images", "add_reference_image"]);
+        expect(prompt).toContain("/tmp/esse-uploaded-style.png");
+        expect(persisted.referenceImages).toEqual([
+          {
+            filePath: "/tmp/esse-uploaded-style.png",
+            id: "ref_eval_1",
+            label: "uploaded-style.png"
+          }
+        ]);
+      },
+      id: "register-pasted-reference-image",
+      initialSnapshot: createSnapshot({ sessions: [createSession("sess_1")] }),
+      referenceImagePaths: ["/tmp/esse-uploaded-style.png"],
+      reply: "已把这张图添加为项目参考图。",
+      script: [
+        { tool: "list_reference_images", params: {} },
+        {
+          tool: "add_reference_image",
+          params: { fileName: "uploaded-style.png", filePath: "/tmp/esse-uploaded-style.png" }
+        }
+      ],
+      userTask: "把这张图加为项目参考图"
     },
     {
       assert: ({ persisted, prompt, result, trace }) => {
@@ -333,7 +359,7 @@ async function runWorkspaceAgentEvalScenario(scenario: WorkspaceAgentEvalScenari
       return persisted;
     }
   });
-  const workspaceToolRuntime = createProjectSnapshotWorkspaceRuntime({
+  const baseWorkspaceToolRuntime = createProjectSnapshotWorkspaceRuntime({
     executeImagePreflightTool: async (request) => ({
       affectedSessionIds: request.commands.flatMap((command) => command.target.sessionId ?? []),
       ok: true,
@@ -343,6 +369,7 @@ async function runWorkspaceAgentEvalScenario(scenario: WorkspaceAgentEvalScenari
       packageRequests.push(request);
       return { affectedSessionIds: persisted.sessions.map((session) => session.id), ok: true, summary: "已打包生成图。" };
     },
+    getTurnReferenceImagePaths: () => scenario.referenceImagePaths ?? [],
     initialSnapshot: scenario.initialSnapshot,
     requestPreflight: async (payload) => {
       preflightPayloads.push(payload);
@@ -350,10 +377,35 @@ async function runWorkspaceAgentEvalScenario(scenario: WorkspaceAgentEvalScenari
     },
     sink
   });
+  const workspaceToolRuntime = {
+    ...baseWorkspaceToolRuntime,
+    addReferenceImage: async (request) => {
+      const mutation = await baseWorkspaceToolRuntime.applyMutation((state) => {
+        const referenceId = `ref_eval_${(state.referenceImages ?? []).length + 1}`;
+        const label = request.fileName ?? request.filePath.split(/[\\/]/).filter(Boolean).pop() ?? "reference.png";
+        return {
+          result: { affectedSessionIds: [], ok: true as const, summary: `已添加参考图：${label}` },
+          state: {
+            ...state,
+            referenceImages: [
+              ...(state.referenceImages ?? []),
+              {
+                filePath: request.filePath,
+                id: referenceId,
+                label
+              }
+            ]
+          }
+        };
+      });
+      return mutation.result;
+    }
+  };
 
   const result = await runEsseAgentTurn(
     {
       messages: [{ role: "user", content: scenario.userTask }],
+      referenceImagePaths: scenario.referenceImagePaths,
       sessions: scenario.initialSnapshot.sessions.map((session) => ({
         currentImagePath: session.generatedFilePath ?? session.filePath,
         fileName: session.fileName,

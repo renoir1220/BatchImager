@@ -244,7 +244,15 @@ describe("projectStore", () => {
       makeNow: () => new Date("2026-05-21T15:00:00.000Z"),
       projectsDirectory: root
     });
+    const referenceImages = [
+      {
+        filePath: path.join(project.project.directory, "references", "style.png"),
+        id: "ref_keep",
+        label: "风格参考"
+      }
+    ];
     await saveProjectSnapshot(project.project.directory, {
+      referenceImages,
       selectedSessionId: "sess_test_1",
       sessions: [
         {
@@ -283,6 +291,7 @@ describe("projectStore", () => {
       status: "completed"
     });
     await expect(openProject(project.project.directory)).resolves.toMatchObject({
+      referenceImages,
       sessions: mutated.sessions
     });
   });

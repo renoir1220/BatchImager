@@ -199,7 +199,10 @@ export async function applyProjectSnapshotMutation(
     try {
       const currentSnapshot = readProjectSnapshot(db, projectDirectory);
       const nextInput = mutator(currentSnapshot);
-      writeProjectSnapshotRowsWithinTransaction(db, nextInput);
+      writeProjectSnapshotRowsWithinTransaction(db, {
+        referenceImages: currentSnapshot.referenceImages,
+        ...nextInput
+      });
       touchProject(db, makeNow());
       db.exec("commit");
     } catch (error) {

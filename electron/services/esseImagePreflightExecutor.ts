@@ -489,9 +489,15 @@ function selectReferenceImagePaths(referenceImageIds: string[] | undefined, stat
   }
 
   const byId = new Map<string, string>();
+  for (const referenceImage of state.referenceImages ?? []) {
+    byId.set(referenceImage.id, referenceImage.filePath);
+  }
+
   for (const plan of state.projectManagerState?.plans ?? []) {
     for (const referenceImage of plan.referenceImages ?? []) {
-      byId.set(referenceImage.id, referenceImage.filePath);
+      if (!byId.has(referenceImage.id)) {
+        byId.set(referenceImage.id, referenceImage.filePath);
+      }
     }
   }
 

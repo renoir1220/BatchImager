@@ -52,6 +52,73 @@ describe("esseWorkspaceRuntime", () => {
     expect(broadcasts).toHaveLength(0);
   });
 
+  test("adds, lists, and removes project reference images through turn-scoped paths", async () => {
+    const projectDirectory = await mkdtemp(path.join(os.tmpdir(), "batchimager-reference-tools-"));
+    const sourcePath = path.join(projectDirectory, "uploaded-style.png");
+    const textPath = path.join(projectDirectory, "uploaded-style.txt");
+    await writeFile(sourcePath, "style");
+
+    let persisted = createSnapshot({
+      project: { ...createSnapshot().project, directory: projectDirectory },
+      referenceImages: [
+        {
+          filePath: path.join(projectDirectory, "references", "existing.png"),
+          id: "ref_existing",
+          label: "已有参考"
+        }
+      ]
+    });
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const runtime = createProjectSnapshotWorkspaceRuntime({
+      getTurnReferenceImagePaths: () => [sourcePath, textPath],
+      initialSnapshot: persisted,
+      sink
+    });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    const listBefore = await tools.get("list_reference_images")?.execute("list-1", {});
+    expect(listBefore?.content[0]?.text).toContain("ref_existing");
+
+    const outsideTurn = await tools.get("add_reference_image")?.execute("add-outside", {
+      filePath: path.join(projectDirectory, "other.png")
+    });
+    expect(outsideTurn?.isError).toBe(true);
+    expect(outsideTurn?.content[0]?.text).toContain("filePath is not from this turn");
+
+    const unsupported = await tools.get("add_reference_image")?.execute("add-text", {
+      filePath: textPath
+    });
+    expect(unsupported?.isError).toBe(true);
+
+    const addResult = await tools.get("add_reference_image")?.execute("add-1", {
+      fileName: "style.png",
+      filePath: sourcePath
+    });
+    expect(addResult?.isError).toBeUndefined();
+    expect(persisted.referenceImages).toHaveLength(2);
+    const addedReference = persisted.referenceImages?.find((referenceImage) => referenceImage.id !== "ref_existing");
+    expect(addedReference).toMatchObject({ label: "style.png" });
+    await expect(readFile(addedReference?.filePath ?? "")).resolves.toEqual(Buffer.from("style"));
+
+    const removeResult = await tools.get("remove_reference_image")?.execute("remove-1", {
+      referenceImageId: addedReference?.id
+    });
+    expect(removeResult?.isError).toBeUndefined();
+    expect(persisted.referenceImages).toEqual([
+      {
+        filePath: path.join(projectDirectory, "references", "existing.png"),
+        id: "ref_existing",
+        label: "已有参考"
+      }
+    ]);
+    await expect(readFile(addedReference?.filePath ?? "")).rejects.toThrow();
+  });
+
   test("runs each workspace mutation only once through the sink state", async () => {
     let persisted = createSnapshot();
     let calls = 0;

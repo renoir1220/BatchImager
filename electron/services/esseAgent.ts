@@ -182,6 +182,8 @@ function createEsseWorkspaceRuntimeProxy(registryKey: string): EsseWorkspaceTool
   const current = () => getEsseWorkspaceTurnContext(registryKey).runtime;
 
   return {
+    addReferenceImage: (request) =>
+      current().addReferenceImage?.(request) ?? Promise.resolve({ ok: false, reason: "add_reference_image unavailable" }),
     applyMutation: (mutator) => current().applyMutation(mutator),
     createBlankSession: (request) =>
       current().createBlankSession?.(request) ?? Promise.resolve({ ok: false, reason: "add_blank_session unavailable" }),
@@ -191,10 +193,13 @@ function createEsseWorkspaceRuntimeProxy(registryKey: string): EsseWorkspaceTool
     executePackagePreflightTool: (request) =>
       current().executePackagePreflightTool?.(request) ?? Promise.resolve({ ok: false, reason: "package execution unavailable" }),
     getState: () => current().getState(),
+    getTurnReferenceImagePaths: () => current().getTurnReferenceImagePaths?.() ?? [],
     getTurnBudget: () => workspaceTurnContextByRegistryKey.get(registryKey)?.budget,
     recordToolCall: (event) => current().recordToolCall?.(event),
     readImageMetadata: (request) =>
       current().readImageMetadata?.(request) ?? Promise.reject(new Error("read_image_metadata unavailable")),
+    removeReferenceImage: (request) =>
+      current().removeReferenceImage?.(request) ?? Promise.resolve({ ok: false, reason: "remove_reference_image unavailable" }),
     requestPermission: (request) =>
       current().requestPermission?.(request) ?? Promise.resolve({ decision: "allow" }),
     requestPreflight: (payload) =>
@@ -295,6 +300,7 @@ function buildEsseTurnPrompt(
 function buildFullEsseWorkspacePrompt(input: EsseAgentTurnInput, selectedOutputSize: string | undefined): string {
   const personaInstructions = ESSE_PERSONA_INSTRUCTIONS[input.persona ?? DEFAULT_ESSE_PERSONA];
   const sessionLines = buildWorkspaceSessionLines(input);
+  const referenceImageLines = buildTurnReferenceImageLines(input);
   const selectedDisplayLabel = getSelectedWorkspaceDisplayLabel(input);
   const history = input.messages.map((message) => `${message.role === "user" ? "用户" : "Esse"}：${message.content}`).join("\n");
 
@@ -308,6 +314,8 @@ function buildFullEsseWorkspacePrompt(input: EsseAgentTurnInput, selectedOutputS
       ? `- 用户本轮选择的输出分辨率：${selectedOutputSize}`
       : "- 用户本轮没有选择输出分辨率。",
     selectedDisplayLabel ? `- 当前界面焦点图片：${selectedDisplayLabel}` : "- 当前没有界面焦点图片。",
+    referenceImageLines.length ? "- 本轮参考图路径（仅用于 add_reference_image 工具参数，不要回复给用户）：" : "- 本轮没有新上传/粘贴参考图。",
+    ...referenceImageLines.map((line) => `  ${line}`),
     sessionLines.length ? "- 项目图片：" : "- 当前项目没有图片。",
     ...sessionLines.map((line) => `  ${line}`),
     "==== 对话历史 ====",
@@ -319,6 +327,7 @@ function buildFullEsseWorkspacePrompt(input: EsseAgentTurnInput, selectedOutputS
 
 function buildEsseWorkspaceTurnPrompt(input: EsseAgentTurnInput, selectedOutputSize: string | undefined): string {
   const sessionLines = buildWorkspaceSessionLines(input);
+  const referenceImageLines = buildTurnReferenceImageLines(input);
   const selectedDisplayLabel = getSelectedWorkspaceDisplayLabel(input);
 
   return [
@@ -328,6 +337,8 @@ function buildEsseWorkspaceTurnPrompt(input: EsseAgentTurnInput, selectedOutputS
       ? `- 用户本轮选择的输出分辨率：${selectedOutputSize}`
       : "- 用户本轮没有选择输出分辨率。",
     selectedDisplayLabel ? `- 当前界面焦点图片：${selectedDisplayLabel}` : "- 当前没有界面焦点图片。",
+    referenceImageLines.length ? "- 本轮参考图路径（仅用于 add_reference_image 工具参数，不要回复给用户）：" : "- 本轮没有新上传/粘贴参考图。",
+    ...referenceImageLines.map((line) => `  ${line}`),
     sessionLines.length ? "- 项目图片（覆盖此前）：" : "- 当前项目没有图片（覆盖此前）。",
     ...sessionLines.map((line) => `  ${line}`),
     "==== 用户本轮要求 ====",
@@ -342,6 +353,10 @@ function buildWorkspaceSessionLines(input: EsseAgentTurnInput): string[] {
     const currentSource = getWorkspaceSessionCurrentSource(session);
     return `- img-${index + 1} / ${session.id}：${session.fileName}，当前图：${currentSource}，记录数：${session.generatedFilePaths?.length ?? 0}`;
   });
+}
+
+function buildTurnReferenceImageLines(input: EsseAgentTurnInput): string[] {
+  return (input.referenceImagePaths ?? []).map((filePath, index) => `${index + 1}. ${filePath}`);
 }
 
 function getWorkspaceSessionCurrentSource(session: ProjectManagerPlanSession): "生成图" | "原图" {
@@ -366,8 +381,8 @@ function buildWorkspaceToolPromptSections(): string[] {
     "==== 工作区工具模式 ====",
     "当前你可以通过工具读取和修改左侧工作区。所有工作区副作用必须通过工具执行，不要用 JSON 字段表达工作区操作。",
     "如果用户请求可以由当前工具完成的动作，必须先调用对应工具；不要只回复“我会处理/可以处理”。",
-    "可用读工具：get_project_overview / list_sessions / get_session_records / read_image_metadata / scan_unreferenced_files。",
-    "可用写工具：restore_session_record / restore_original / rename_session / reorder_sessions / set_session_prompt / add_blank_session / delete_session_record / delete_session / merge_sessions / delete_unreferenced_files。",
+    "可用读工具：get_project_overview / list_sessions / get_session_records / read_image_metadata / list_reference_images / scan_unreferenced_files。",
+    "可用写工具：restore_session_record / restore_original / rename_session / reorder_sessions / set_session_prompt / add_blank_session / add_reference_image / remove_reference_image / delete_session_record / delete_session / merge_sessions / delete_unreferenced_files。",
     "生成与文件工具：generate_image / run_batch_generation / package_generated_images。它们每次都会先弹 preflight 卡片让用户确认；生成类确认后会提交后台生成任务，打包类确认后才写桌面 zip。",
     "preflight 卡片只能由这些工具触发；不要先用文字说“请确认后我就执行”。用户已经要求执行时，直接调用工具，让工具产生确认卡片。",
     "工作流要求：",
@@ -378,10 +393,11 @@ function buildWorkspaceToolPromptSections(): string[] {
     "5) 用户询问图片尺寸、格式、字节大小、当前图信息时，用 read_image_metadata；先 list_sessions，把 UI label 映射为 sessionId；不要输出 filePath。",
     "6) 用户明确要求先占一个空位、添加空白图片位、预留空白图位时，用 add_blank_session；不要为了生成新图而先调用它。",
     "7) 物理删除未引用生成文件必须先 scan_unreferenced_files，再把返回的 candidateId 传给 delete_unreferenced_files；不要传 filePath。",
-    "8) 生成/编辑图片必须用 generate_image 或 run_batch_generation；删除背景、去水印、换白底、改风格都属于图片编辑，不要只口头答应。编辑现有工作区图片时先 list_sessions；用户要全新生成 N 张图（如“生成 4 张鲜花图”）时直接用 run_batch_generation，N 条 target.type='new' command，除非引用了现有图片才先 list_sessions。单张用 generate_image；多张、全部、这批、批量处理同一类任务用 run_batch_generation，一张图一条 command。每条命令必须显式 mode='edit' 或 mode='generate'。只有用户明确要求尺寸、比例、横版、竖版、方图、2K/4K 时才传 size。",
-    "9) 打包/导出/放桌面必须用 package_generated_images；需要限定范围时先 list_sessions，只传稳定 sessionId；不要输出或猜测文件路径，也不要用文字替代 preflight。",
-    "10) 用户取消 preflight 后，不要原样重试，先问用户要调整什么。",
-    "11) 生成工具是 fire-and-forget：工具返回后只能说“已提交 N 个任务/生成会在后台完成”，不要说“已经生成完成”，也不要承诺完成后主动通知。其他工具完成后直接用一句中文总结；不要返回 JSON。"
+    "8) 管理项目参考图时必须用 list_reference_images / add_reference_image / remove_reference_image。add_reference_image 只能使用本轮参考图路径列表里的 filePath；用户只是粘贴了图但没有要求登记为项目参考图时，不要自动添加。生成时如需引用项目参考图，先 list_reference_images，再把返回的 id 放进 referenceImageIds。",
+    "9) 生成/编辑图片必须用 generate_image 或 run_batch_generation；删除背景、去水印、换白底、改风格都属于图片编辑，不要只口头答应。编辑现有工作区图片时先 list_sessions；用户要全新生成 N 张图（如“生成 4 张鲜花图”）时直接用 run_batch_generation，N 条 target.type='new' command，除非引用了现有图片才先 list_sessions。单张用 generate_image；多张、全部、这批、批量处理同一类任务用 run_batch_generation，一张图一条 command。每条命令必须显式 mode='edit' 或 mode='generate'。只有用户明确要求尺寸、比例、横版、竖版、方图、2K/4K 时才传 size。",
+    "10) 打包/导出/放桌面必须用 package_generated_images；需要限定范围时先 list_sessions，只传稳定 sessionId；不要输出或猜测文件路径，也不要用文字替代 preflight。",
+    "11) 用户取消 preflight 后，不要原样重试，先问用户要调整什么。",
+    "12) 生成工具是 fire-and-forget：工具返回后只能说“已提交 N 个任务/生成会在后台完成”，不要说“已经生成完成”，也不要承诺完成后主动通知。其他工具完成后直接用一句中文总结；不要返回 JSON。"
   ];
 }
 
