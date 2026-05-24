@@ -3,21 +3,26 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import type { ProjectSnapshot } from "../ipcTypes";
+import type { ProductImageResult } from "./tuziImageApi";
 import { EsseBatchTaskRegistry } from "./esseBatchTaskRegistry";
 import { createEsseImagePreflightExecutor } from "./esseImagePreflightExecutor";
 import { ProjectMutationSink } from "./projectMutationSink";
 import { createProjectSnapshotWorkspaceRuntime } from "./esseWorkspaceRuntime";
-import type { ImageGenerationExecutor, UnifiedImageGenerationRequest } from "./imageGenerationService";
+import type { UnifiedImageGenerationRequest } from "./imageGenerationService";
 
 describe("esseImagePreflightExecutor", () => {
   test("executes confirmed existing-image generation and writes the generated result through the mutation sink", async () => {
     let snapshot = createSnapshot();
+    const generation = createDeferred<ProductImageResult>();
     const generatedRequests: UnifiedImageGenerationRequest[] = [];
     const runtime = createRuntime(snapshot, (nextSnapshot) => {
       snapshot = nextSnapshot;
     });
     const executor = createEsseImagePreflightExecutor({
-      generateImage: createFakeGenerator(generatedRequests, "/project/images/generated/out-1.png"),
+      generateImage: async (request) => {
+        generatedRequests.push(request);
+        return await generation.promise;
+      },
       projectDirectory: "/project"
     });
 
@@ -36,15 +41,21 @@ describe("esseImagePreflightExecutor", () => {
       runtime
     );
 
-    expect(result).toEqual({ affectedSessionIds: ["sess_1"], ok: true, summary: "图片生成完成。" });
+    expect(result).toEqual({ affectedSessionIds: ["sess_1"], ok: true, summary: "已提交 1 个生成任务。完成后会自动出现在工作区。" });
+    await waitUntil(() => generatedRequests.length === 1 && snapshot.sessions[0].status === "generating");
     expect(generatedRequests).toEqual([
       {
         imagePath: "/project/original/a.jpg",
         mode: "edit",
         prompt: "保留主体，换成白底主图",
+        signal: generatedRequests[0].signal,
         sessionId: "sess_1"
       }
     ]);
+    expect(snapshot.sessions[0].generatedFilePath).toBeUndefined();
+
+    generation.resolve({ outputPath: "/project/images/generated/out-1.png", requestSize: "auto" });
+    await waitUntil(() => snapshot.sessions[0].status === "completed");
     expect(snapshot.sessions[0].generatedFilePath).toBe("/project/images/generated/out-1.png");
     expect(snapshot.sessions[0].generatedFilePaths).toEqual(["/project/images/generated/out-1.png"]);
     expect(snapshot.sessions[0].chatMessages.at(-1)).toMatchObject({
@@ -57,6 +68,7 @@ describe("esseImagePreflightExecutor", () => {
   test("creates a new session only after preflight execution and then writes the generated result", async () => {
     const projectDirectory = await mkdtemp(path.join(os.tmpdir(), "batchimager-preflight-exec-"));
     let snapshot = createSnapshot({ project: { ...createSnapshot().project, directory: projectDirectory } });
+    const generation = createDeferred<ProductImageResult>();
     const generatedRequests: UnifiedImageGenerationRequest[] = [];
     const runtime = createRuntime(snapshot, (nextSnapshot) => {
       snapshot = nextSnapshot;
@@ -68,7 +80,10 @@ describe("esseImagePreflightExecutor", () => {
         await writeFile(seedPath, "seed");
         return seedPath;
       },
-      generateImage: createFakeGenerator(generatedRequests, path.join(projectDirectory, "images", "generated", "new-output.png")),
+      generateImage: async (request) => {
+        generatedRequests.push(request);
+        return await generation.promise;
+      },
       makeSessionId: () => "sess_new",
       projectDirectory
     });
@@ -88,12 +103,14 @@ describe("esseImagePreflightExecutor", () => {
       runtime
     );
 
-    expect(result).toEqual({ affectedSessionIds: ["sess_new"], ok: true, summary: "图片生成完成。" });
+    expect(result).toEqual({ affectedSessionIds: ["sess_new"], ok: true, summary: "已提交 1 个生成任务。完成后会自动出现在工作区。" });
+    await waitUntil(() => generatedRequests.length === 1 && snapshot.sessions[1]?.status === "generating");
     expect(generatedRequests).toEqual([
       {
         imagePath: path.join(projectDirectory, "images", "generated", "seeds", "sess_new.png"),
         mode: "generate",
         prompt: "新增一张场景图",
+        signal: generatedRequests[0].signal,
         sessionId: "sess_new",
         size: "2048x1152"
       }
@@ -101,6 +118,15 @@ describe("esseImagePreflightExecutor", () => {
     expect(snapshot.sessions.map((session) => session.id)).toEqual(["sess_1", "sess_new"]);
     expect(snapshot.selectedSessionId).toBe("sess_new");
     const generatedPath = path.join(projectDirectory, "images", "generated", "new-output.png");
+    expect(snapshot.sessions[1]).toMatchObject({
+      fileName: "scene.png",
+      filePath: path.join(projectDirectory, "images", "generated", "seeds", "sess_new.png"),
+      originatedFromGeneration: true,
+      status: "generating"
+    });
+
+    generation.resolve({ outputPath: generatedPath, requestSize: "2048x1152" });
+    await waitUntil(() => snapshot.sessions[1]?.status === "completed");
     expect(snapshot.sessions[1]).toMatchObject({
       fileName: "scene.png",
       filePath: generatedPath,
@@ -127,6 +153,7 @@ describe("esseImagePreflightExecutor", () => {
       ]
     });
     const registry = new EsseBatchTaskRegistry();
+    const generations = new Map<string, Deferred<ProductImageResult>>();
     const registrySnapshots: unknown[] = [];
     const generatedRequests: UnifiedImageGenerationRequest[] = [];
     const runtime = createRuntime(snapshot, (nextSnapshot) => {
@@ -135,12 +162,11 @@ describe("esseImagePreflightExecutor", () => {
     const executor = createEsseImagePreflightExecutor({
       batchTaskRegistry: registry,
       generateImage: async (request) => {
+        const generation = createDeferred<ProductImageResult>();
+        generations.set(request.sessionId, generation);
         registrySnapshots.push(registry.getSnapshot("batch_1"));
         generatedRequests.push(request);
-        return {
-          outputPath: `/project/images/generated/${request.sessionId}.png`,
-          requestSize: request.size ?? "auto"
-        };
+        return await generation.promise;
       },
       makeBatchTaskId: () => "batch_1",
       projectDirectory: "/project"
@@ -165,7 +191,8 @@ describe("esseImagePreflightExecutor", () => {
       runtime
     );
 
-    expect(result).toEqual({ affectedSessionIds: ["sess_1", "sess_2"], ok: true, summary: "已完成 2 个生成任务。" });
+    expect(result).toEqual({ affectedSessionIds: ["sess_1", "sess_2"], ok: true, summary: "已提交 2 个生成任务。完成后会自动出现在工作区。" });
+    await waitUntil(() => generatedRequests.length === 2);
     expect(registrySnapshots).toEqual([
       {
         activeSessionIds: ["sess_1", "sess_2"],
@@ -174,13 +201,19 @@ describe("esseImagePreflightExecutor", () => {
         retryCounts: {}
       },
       {
-        activeSessionIds: ["sess_2"],
+        activeSessionIds: ["sess_1", "sess_2"],
         batchTaskId: "batch_1",
         projectDirectory: "/project",
         retryCounts: {}
       }
     ]);
     expect(generatedRequests.map((request) => request.signal?.aborted)).toEqual([false, false]);
+    expect(registry.has("batch_1")).toBe(true);
+
+    generations.get("sess_1")?.resolve({ outputPath: "/project/images/generated/sess_1.png", requestSize: "auto" });
+    await waitUntil(() => registry.getSnapshot("batch_1")?.activeSessionIds.join(",") === "sess_2");
+    generations.get("sess_2")?.resolve({ outputPath: "/project/images/generated/sess_2.png", requestSize: "auto" });
+    await waitUntil(() => !registry.has("batch_1"));
     expect(registry.has("batch_1")).toBe(false);
   });
 
@@ -203,7 +236,7 @@ describe("esseImagePreflightExecutor", () => {
       signal: parentController.signal
     });
 
-    await expect(executor(
+    const result = await executor(
       {
         commands: [
           {
@@ -215,9 +248,12 @@ describe("esseImagePreflightExecutor", () => {
         tool: "run_batch_generation"
       },
       runtime
-    )).rejects.toThrow("aborted");
+    );
+    expect(result).toEqual({ affectedSessionIds: ["sess_1"], ok: true, summary: "已提交 1 个生成任务。完成后会自动出现在工作区。" });
+    await waitUntil(() => snapshot.sessions[0].status === "failed");
     expect(registry.has("batch_1")).toBe(false);
     expect(snapshot.sessions[0].generatedFilePath).toBeUndefined();
+    expect(snapshot.sessions[0].errorMessage).toBe("已取消");
   });
 });
 
@@ -236,14 +272,27 @@ function createRuntime(initialSnapshot: ProjectSnapshot, onPersist: (snapshot: P
   };
 }
 
-function createFakeGenerator(requests: UnifiedImageGenerationRequest[], outputPath: string): ImageGenerationExecutor {
-  return async (request) => {
-    requests.push(request);
-    return {
-      outputPath,
-      requestSize: request.size ?? "auto"
-    };
-  };
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("Timed out waiting for asynchronous generation update.");
 }
 
 function createSnapshot(overrides: Partial<ProjectSnapshot> = {}): ProjectSnapshot {

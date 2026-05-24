@@ -415,9 +415,8 @@ function registerIpc(appLogger: AppLogger): void {
         const workspaceToolRuntime = createProjectSnapshotWorkspaceRuntime({
           executeImagePreflightTool: createEsseImagePreflightExecutor({
             batchTaskRegistry: esseBatchTaskRegistry,
-            generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger, signal),
-            projectDirectory,
-            signal
+            generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger),
+            projectDirectory
           }),
           executePackagePreflightTool: createEssePackagePreflightExecutor({
             desktopDirectory: app.getPath("desktop"),

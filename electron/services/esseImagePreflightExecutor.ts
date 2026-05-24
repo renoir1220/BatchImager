@@ -35,8 +35,7 @@ export function createEsseImagePreflightExecutor(options: CreateEsseImagePreflig
     request: EsseImagePreflightExecutionRequest,
     context: EsseImagePreflightExecutionContext
   ): Promise<WorkspaceMutationResult> => {
-    const affectedSessionIds: string[] = [];
-    const batchTaskId = request.tool === "run_batch_generation" ? makeBatchTaskId() : undefined;
+    const batchTaskId = makeBatchTaskId();
     const preparedCommands: PreparedCommand[] = [];
 
     for (const command of request.commands) {
@@ -51,14 +50,11 @@ export function createEsseImagePreflightExecutor(options: CreateEsseImagePreflig
       preparedCommands.push({ command, prepared });
     }
 
-    const batchControllers =
-      batchTaskId && options.batchTaskRegistry
-        ? preparedCommands.map(({ prepared }) => ({
-            controller: createAbortController(),
-            sessionId: prepared.sessionId
-          }))
-        : [];
-    if (batchTaskId && options.batchTaskRegistry) {
+    const batchControllers = preparedCommands.map(({ prepared }) => ({
+      controller: createAbortController(),
+      sessionId: prepared.sessionId
+    }));
+    if (options.batchTaskRegistry) {
       const registerResult = options.batchTaskRegistry.register({
         batchTaskId,
         items: batchControllers,
@@ -69,51 +65,28 @@ export function createEsseImagePreflightExecutor(options: CreateEsseImagePreflig
       }
     }
 
-    try {
-      for (const { command, prepared } of preparedCommands) {
-        const batchController = batchControllers.find((item) => item.sessionId === prepared.sessionId)?.controller;
-        const cleanupLinkedAbort = linkAbortSignal(options.signal, batchController);
-        try {
-          const result = await runSharedGenerateImageCore({
-            generateImage: options.generateImage,
-            imagePath: prepared.imagePath,
-            mode: command.mode ?? "generate",
-            prompt: command.prompt ?? "",
-            referenceImagePaths: prepared.referenceImagePaths,
-            sessionId: prepared.sessionId,
-            ...(batchController ? { signal: batchController.signal } : {}),
-            toolRequestedSize: command.size
-          });
+    const affectedSessionIds = preparedCommands.map(({ prepared }) => prepared.sessionId);
+    const queuedMutation = await context.applyMutation((state) => markSessionsQueued(state, affectedSessionIds));
+    if (!queuedMutation.result.ok) {
+      return queuedMutation.result;
+    }
 
-          const mutation = await context.applyMutation((state) => appendGeneratedResult(state, {
-            outputPath: result.outputPath,
-            prompt: command.prompt ?? "",
-            sessionId: prepared.sessionId
-          }));
-          if (!mutation.result.ok) {
-            return mutation.result;
-          }
-          if (prepared.blankSeedPath && prepared.blankSeedPath !== result.outputPath) {
-            await unlinkBlankSeedSafely(prepared.blankSeedPath);
-          }
-          affectedSessionIds.push(prepared.sessionId);
-        } finally {
-          cleanupLinkedAbort();
-          if (batchTaskId) {
-            options.batchTaskRegistry?.notifyItemComplete(batchTaskId, prepared.sessionId);
-          }
-        }
-      }
-    } finally {
-      if (batchTaskId) {
-        options.batchTaskRegistry?.cancelAll(batchTaskId);
-      }
+    for (const { command, prepared } of preparedCommands) {
+      const batchController = batchControllers.find((item) => item.sessionId === prepared.sessionId)?.controller;
+      void runPreparedGeneration({
+        batchController,
+        batchTaskId,
+        command,
+        context,
+        options,
+        prepared
+      });
     }
 
     return {
       affectedSessionIds,
       ok: true,
-      summary: request.tool === "run_batch_generation" ? `已完成 ${affectedSessionIds.length} 个生成任务。` : "图片生成完成。"
+      summary: `已提交 ${affectedSessionIds.length} 个生成任务。完成后会自动出现在工作区。`
     };
   };
 }
@@ -121,6 +94,47 @@ export function createEsseImagePreflightExecutor(options: CreateEsseImagePreflig
 interface PreparedCommand {
   command: EssePreflightCommand;
   prepared: { blankSeedPath?: string; imagePath: string; ok: true; referenceImagePaths: string[]; sessionId: string };
+}
+
+async function runPreparedGeneration(params: {
+  batchController: AbortController | undefined;
+  batchTaskId: string;
+  command: EssePreflightCommand;
+  context: EsseImagePreflightExecutionContext;
+  options: CreateEsseImagePreflightExecutorOptions;
+  prepared: PreparedCommand["prepared"];
+}): Promise<void> {
+  const cleanupLinkedAbort = linkAbortSignal(params.options.signal, params.batchController);
+  try {
+    await params.context.applyMutation((state) => markSessionGenerating(state, params.prepared.sessionId));
+    const result = await runSharedGenerateImageCore({
+      generateImage: params.options.generateImage,
+      imagePath: params.prepared.imagePath,
+      mode: params.command.mode ?? "generate",
+      prompt: params.command.prompt ?? "",
+      referenceImagePaths: params.prepared.referenceImagePaths,
+      sessionId: params.prepared.sessionId,
+      ...(params.batchController ? { signal: params.batchController.signal } : {}),
+      toolRequestedSize: params.command.size
+    });
+
+    const mutation = await params.context.applyMutation((state) => appendGeneratedResult(state, {
+      outputPath: result.outputPath,
+      prompt: params.command.prompt ?? "",
+      sessionId: params.prepared.sessionId
+    }));
+    if (mutation.result.ok && params.prepared.blankSeedPath && params.prepared.blankSeedPath !== result.outputPath) {
+      await unlinkBlankSeedSafely(params.prepared.blankSeedPath);
+    }
+  } catch (error) {
+    await params.context.applyMutation((state) => markSessionFailed(state, {
+      errorMessage: params.batchController?.signal.aborted ? "已取消" : toErrorMessage(error),
+      sessionId: params.prepared.sessionId
+    }));
+  } finally {
+    cleanupLinkedAbort();
+    params.options.batchTaskRegistry?.notifyItemComplete(params.batchTaskId, params.prepared.sessionId);
+  }
 }
 
 async function prepareCommand(
@@ -271,6 +285,69 @@ function appendGeneratedResult(
   };
 }
 
+function markSessionsQueued(
+  state: ProjectSnapshot,
+  sessionIds: string[]
+): { result: WorkspaceMutationResult; state: ProjectSnapshot } {
+  return {
+    result: { affectedSessionIds: sessionIds, ok: true, summary: "已提交生成任务。" },
+    state: {
+      ...state,
+      sessions: state.sessions.map((session) =>
+        sessionIds.includes(session.id)
+          ? {
+              ...session,
+              errorMessage: undefined,
+              status: "queued"
+            }
+          : session
+      )
+    }
+  };
+}
+
+function markSessionGenerating(
+  state: ProjectSnapshot,
+  sessionId: string
+): { result: WorkspaceMutationResult; state: ProjectSnapshot } {
+  return {
+    result: { affectedSessionIds: [sessionId], ok: true, summary: "图片生成中。" },
+    state: {
+      ...state,
+      sessions: state.sessions.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              errorMessage: undefined,
+              status: "generating"
+            }
+          : session
+      )
+    }
+  };
+}
+
+function markSessionFailed(
+  state: ProjectSnapshot,
+  params: { errorMessage: string; sessionId: string }
+): { result: WorkspaceMutationResult; state: ProjectSnapshot } {
+  return {
+    result: { affectedSessionIds: [params.sessionId], ok: true, summary: "图片生成失败。" },
+    state: {
+      ...state,
+      sessions: state.sessions.map((session) =>
+        session.id === params.sessionId
+          ? {
+              ...session,
+              errorMessage: params.errorMessage,
+              status: "failed"
+            }
+          : session
+      )
+    }
+  };
+}
+
 function selectReferenceImagePaths(referenceImageIds: string[] | undefined, state: ProjectSnapshot): string[] {
   if (!referenceImageIds?.length) {
     return [];
@@ -341,6 +418,10 @@ function linkAbortSignal(parentSignal: AbortSignal | undefined, childController:
   return () => {
     parentSignal.removeEventListener("abort", abortChild);
   };
+}
+
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function unlinkBlankSeedSafely(filePath: string): Promise<void> {
