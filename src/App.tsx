@@ -68,6 +68,7 @@ import type {
 } from "../electron/ipcTypes";
 import type {
   BatchPlan,
+  BatchPlanReferenceImage,
   EsseImageRequest,
   EssePersona,
   ProjectManagerMessage,
@@ -98,6 +99,7 @@ export function App() {
   const [currentProject, setCurrentProject] = useState<ProjectMetadata | null>(null);
   const [sessions, setSessions] = useState<ImageSession[]>([]);
   const [projectManagerState, setProjectManagerState] = useState<ProjectManagerState>(() => createEmptyProjectManagerState());
+  const [projectReferenceImages, setProjectReferenceImages] = useState<BatchPlanReferenceImage[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>("image");
   const [columns, setColumns] = useState(DEFAULT_COLUMNS);
@@ -116,6 +118,7 @@ export function App() {
   const [isSessionPanelResizing, setIsSessionPanelResizing] = useState(false);
   const sessionsRef = useRef(sessions);
   const projectManagerStateRef = useRef(projectManagerState);
+  const projectReferenceImagesRef = useRef(projectReferenceImages);
   const selectedSessionIdRef = useRef(selectedSessionId);
   const currentProjectRef = useRef(currentProject);
   const activeSessionOperationIdsRef = useRef(new Map<string, string>());
@@ -152,6 +155,10 @@ export function App() {
   useEffect(() => {
     projectManagerStateRef.current = projectManagerState;
   }, [projectManagerState]);
+
+  useEffect(() => {
+    projectReferenceImagesRef.current = projectReferenceImages;
+  }, [projectReferenceImages]);
 
   useEffect(() => {
     selectedSessionIdRef.current = selectedSessionId;
@@ -255,10 +262,12 @@ export function App() {
     setCurrentProject(snapshot.project);
     setSessions(nextSessions);
     setProjectManagerState(snapshot.projectManagerState ?? createEmptyProjectManagerState());
+    setProjectReferenceImages(snapshot.referenceImages ?? []);
     setSelectedSessionId(nextSelectedSessionId);
     currentProjectRef.current = snapshot.project;
     sessionsRef.current = nextSessions;
     projectManagerStateRef.current = snapshot.projectManagerState ?? createEmptyProjectManagerState();
+    projectReferenceImagesRef.current = snapshot.referenceImages ?? [];
     selectedSessionIdRef.current = nextSelectedSessionId;
     if (options.closePreviews ?? true) {
       setPreviewSessionId(null);
@@ -293,6 +302,7 @@ export function App() {
     void window.batchImager
       ?.saveProjectSnapshot({
         projectManagerState: nextProjectManagerState,
+        referenceImages: projectReferenceImagesRef.current,
         selectedSessionId: nextSelectedSessionId,
         sessions: nextSessions
       })

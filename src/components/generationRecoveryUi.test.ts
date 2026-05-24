@@ -59,6 +59,17 @@ describe("generation recovery UI", () => {
     expect(main).toContain("retryEsseBatchTaskItem");
   });
 
+  test("renderer preserves project-level reference images when saving snapshots", () => {
+    const app = readProjectFile("src/App.tsx");
+    const ipcTypes = readProjectFile("electron/ipcTypes.ts");
+    const main = readProjectFile("electron/main.ts");
+
+    expect(ipcTypes).toContain("referenceImages?: BatchPlanReferenceImage[]");
+    expect(app).toContain("projectReferenceImagesRef");
+    expect(app).toContain("referenceImages: projectReferenceImagesRef.current");
+    expect(main).toContain("referenceImages: request.referenceImages");
+  });
+
   test("macOS red close exits the app instead of leaving it running without windows", () => {
     const main = readProjectFile("electron/main.ts");
     const windowAllClosedHandler = main.match(/app\.on\("window-all-closed", \(\) => \{(?<body>[\s\S]*?)\n\}\);/)?.groups?.body ?? "";

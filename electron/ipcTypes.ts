@@ -342,6 +342,7 @@ export interface OpenProjectRequest {
 export interface ProjectSnapshot {
   projectManagerState?: ProjectManagerState;
   project: ProjectMetadata;
+  referenceImages?: BatchPlanReferenceImage[];
   selectedSessionId?: string | null;
   sessions: PersistedImageSession[];
 }
@@ -352,6 +353,7 @@ export interface ImportProjectImagesRequest {
 
 export interface SaveProjectSnapshotRequest {
   projectManagerState?: ProjectManagerState;
+  referenceImages?: BatchPlanReferenceImage[];
   selectedSessionId?: string | null;
   sessions: PersistedImageSession[];
 }

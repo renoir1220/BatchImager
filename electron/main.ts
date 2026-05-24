@@ -253,6 +253,7 @@ function registerIpc(appLogger: AppLogger): void {
     return getProjectSnapshotSink(requireActiveProjectDirectory()).apply((snapshot) => ({
       ...snapshot,
       projectManagerState: request.projectManagerState,
+      referenceImages: request.referenceImages,
       selectedSessionId: request.selectedSessionId,
       sessions: request.sessions
     }));
@@ -883,7 +884,17 @@ function assertSaveProjectSnapshotRequest(request: SaveProjectSnapshotRequest): 
     !request.sessions.every((session) => typeof session === "object" && session !== null && typeof session.id === "string") ||
     (request.selectedSessionId !== undefined &&
       request.selectedSessionId !== null &&
-      typeof request.selectedSessionId !== "string")
+      typeof request.selectedSessionId !== "string") ||
+    (request.referenceImages !== undefined &&
+      (!Array.isArray(request.referenceImages) ||
+        !request.referenceImages.every(
+          (referenceImage) =>
+            typeof referenceImage === "object" &&
+            referenceImage !== null &&
+            typeof referenceImage.filePath === "string" &&
+            typeof referenceImage.id === "string" &&
+            typeof referenceImage.label === "string"
+        )))
   ) {
     throw new Error("Invalid project snapshot save request");
   }

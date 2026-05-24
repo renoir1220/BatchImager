@@ -211,6 +211,32 @@ describe("projectStore", () => {
     });
   });
 
+  test("persists project-level reference images in project_state json", async () => {
+    const root = await makeTempRoot();
+    const project = await createProject({
+      makeId: () => "project-1",
+      makeNow: () => new Date("2026-05-21T15:00:00.000Z"),
+      projectsDirectory: root
+    });
+    const referenceImages = [
+      {
+        filePath: path.join(project.project.directory, "references", "style.png"),
+        id: "ref_1",
+        label: "风格参考"
+      }
+    ];
+
+    await saveProjectSnapshot(project.project.directory, {
+      referenceImages,
+      selectedSessionId: null,
+      sessions: []
+    });
+
+    await expect(openProject(project.project.directory)).resolves.toMatchObject({
+      referenceImages
+    });
+  });
+
   test("applies a project snapshot mutation transactionally", async () => {
     const root = await makeTempRoot();
     const project = await createProject({

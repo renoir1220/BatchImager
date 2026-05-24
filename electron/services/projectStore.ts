@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   PersistedImageSession,
   PersistedImageSessionChatMessage,
+  BatchPlanReferenceImage,
   ProjectManagerState,
   ProjectMetadata,
   ProjectSummary,
@@ -25,6 +26,7 @@ interface ImportProjectImagesDeps {
 
 interface SaveProjectSnapshotInput {
   projectManagerState?: ProjectManagerState;
+  referenceImages?: BatchPlanReferenceImage[];
   selectedSessionId?: string | null;
   sessions: PersistedImageSession[];
 }
@@ -340,6 +342,7 @@ function writeProjectSnapshotRowsWithinTransaction(db: DatabaseSync, input: Save
   });
 
   setProjectState(db, "projectManagerState", input.projectManagerState ? JSON.stringify(input.projectManagerState) : null);
+  setProjectState(db, "referenceImages", input.referenceImages?.length ? JSON.stringify(input.referenceImages) : null);
   setProjectState(db, "selectedSessionId", input.selectedSessionId ?? null);
 }
 
@@ -482,6 +485,7 @@ function readProjectSnapshot(db: DatabaseSync, projectDirectory: string): Projec
   return {
     projectManagerState: parseProjectManagerState(getProjectState(db, "projectManagerState")),
     project: readProjectMetadata(db, projectDirectory, sessions.length),
+    referenceImages: parseReferenceImages(getProjectState(db, "referenceImages")),
     selectedSessionId: getProjectState(db, "selectedSessionId"),
     sessions
   };
@@ -732,6 +736,28 @@ function parseProjectManagerState(value: string | null): ProjectManagerState | u
   const parsed = JSON.parse(value) as ProjectManagerState;
 
   return parsed && typeof parsed === "object" ? parsed : undefined;
+}
+
+function parseReferenceImages(value: string | null): BatchPlanReferenceImage[] | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = JSON.parse(value);
+  if (!Array.isArray(parsed)) {
+    return undefined;
+  }
+
+  const referenceImages = parsed.filter(
+    (item): item is BatchPlanReferenceImage =>
+      typeof item === "object" &&
+      item !== null &&
+      typeof item.filePath === "string" &&
+      typeof item.id === "string" &&
+      typeof item.label === "string"
+  );
+
+  return referenceImages.length ? referenceImages : undefined;
 }
 
 function stringifyOptionalArray(value: string[] | undefined): string | null {
