@@ -15,11 +15,18 @@ export interface EsseWorkspaceToolRuntime {
   executeImagePreflightTool?: (request: EsseImagePreflightExecutionRequest) => Promise<WorkspaceMutationResult>;
   executePackagePreflightTool?: (request: EssePackagePreflightExecutionRequest) => Promise<WorkspaceMutationResult>;
   getState: () => EsseWorkspaceState;
+  getTurnBudget?: () => EsseTurnBudget | undefined;
   recordToolCall?: (event: EsseWorkspaceToolCallEvent) => void | Promise<void>;
   readImageMetadata?: (request: EsseImageMetadataRequest) => Promise<ProjectImageMetadataResult>;
   requestPermission?: (request: EsseWorkspacePermissionRequest) => Promise<EsseWorkspacePermissionDecision>;
   requestPreflight?: (payload: EssePreflightPayload) => Promise<EssePreflightDecision>;
   scanUnreferencedFiles?: () => Promise<UnreferencedFileCandidate[]>;
+}
+
+export interface EsseTurnBudget {
+  deadline: number;
+  toolCalls: { limit: number; used: number };
+  writeCalls: { limit: number; used: number };
 }
 
 export type WorkspaceMutationResult =
@@ -90,7 +97,9 @@ export function createEsseWorkspaceTools(runtime: EsseWorkspaceToolRuntime): Bat
     createMergeSessionsTool(runtime)
   ];
 
-  return runtime.recordToolCall ? tools.map((tool) => instrumentWorkspaceTool(runtime, tool)) : tools;
+  const budgetedTools = runtime.getTurnBudget ? tools.map((tool) => withTurnBudget(runtime, tool)) : tools;
+
+  return runtime.recordToolCall ? budgetedTools.map((tool) => instrumentWorkspaceTool(runtime, tool)) : budgetedTools;
 }
 
 function createAddBlankSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
@@ -173,6 +182,43 @@ function instrumentWorkspaceTool(runtime: EsseWorkspaceToolRuntime, tool: BatchI
         toolName: tool.name
       });
       return result;
+    }
+  };
+}
+
+function withTurnBudget(runtime: EsseWorkspaceToolRuntime, tool: BatchImagerAgentTool): BatchImagerAgentTool {
+  return {
+    ...tool,
+    async execute(toolCallId, params) {
+      const budget = runtime.getTurnBudget?.();
+      if (!budget) {
+        return toolError("turn budget unavailable", undefined, "Return a final reply explaining that the current Esse turn expired.");
+      }
+
+      if (budget.toolCalls.used >= budget.toolCalls.limit) {
+        return toolError(
+          "Tool call limit reached for this turn",
+          undefined,
+          "Summarize what you have done and return a final reply."
+        );
+      }
+
+      if (Date.now() > budget.deadline) {
+        return toolError("Turn execution timed out", undefined, "Return a final reply explaining the timeout.");
+      }
+
+      const isWriteTool = tool.risk === "safe-write" || tool.risk === "destructive" || tool.risk === "external-write";
+      const countsTowardWriteLimit = isWriteTool && !tool.requiresPreflight;
+      if (countsTowardWriteLimit && budget.writeCalls.used >= budget.writeCalls.limit) {
+        return toolError("Write tool call limit reached", undefined, "Summarize and return a final reply.");
+      }
+
+      budget.toolCalls.used += 1;
+      if (countsTowardWriteLimit) {
+        budget.writeCalls.used += 1;
+      }
+
+      return await tool.execute(toolCallId, params);
     }
   };
 }

@@ -81,6 +81,53 @@ describe("esseWorkspaceRuntime", () => {
     expect(persisted.sessions[0]?.fileName).toBe("changed-1.png");
   });
 
+  test("enforces per-turn tool and write call budgets", async () => {
+    let persisted = createSnapshot();
+    const budget = {
+      deadline: Date.now() + 60_000,
+      toolCalls: { limit: 30, used: 0 },
+      writeCalls: { limit: 10, used: 0 }
+    };
+    const runtime = createProjectSnapshotWorkspaceRuntime({
+      initialSnapshot: persisted,
+      sink: new ProjectMutationSink<ProjectSnapshot>({
+        applyTransaction: async (mutator) => {
+          persisted = mutator(persisted);
+          return persisted;
+        }
+      })
+    });
+    const budgetedRuntime = {
+      ...runtime,
+      getTurnBudget: () => budget
+    };
+    const tools = toolsByName(createEsseWorkspaceTools(budgetedRuntime));
+
+    for (let index = 0; index < 30; index += 1) {
+      const result = await tools.get("list_sessions")?.execute(`read-${index}`, {});
+      expect(result?.isError).toBeUndefined();
+    }
+    const overReadLimit = await tools.get("list_sessions")?.execute("read-over", {});
+    expect(overReadLimit?.isError).toBe(true);
+    expect(overReadLimit?.content[0]?.text).toContain("Tool call limit reached");
+
+    budget.toolCalls.used = 0;
+    budget.writeCalls.used = 0;
+    for (let index = 0; index < 10; index += 1) {
+      const result = await tools.get("rename_session")?.execute(`write-${index}`, {
+        fileName: `flower-${index}.png`,
+        sessionId: "sess_1"
+      });
+      expect(result?.isError).toBeUndefined();
+    }
+    const overWriteLimit = await tools.get("rename_session")?.execute("write-over", {
+      fileName: "flower-over.png",
+      sessionId: "sess_1"
+    });
+    expect(overWriteLimit?.isError).toBe(true);
+    expect(overWriteLimit?.content[0]?.text).toContain("Write tool call limit reached");
+  });
+
   test("accepts numeric string record indexes from LLM tool calls", async () => {
     let persisted = createSnapshot();
     const sink = new ProjectMutationSink<ProjectSnapshot>({

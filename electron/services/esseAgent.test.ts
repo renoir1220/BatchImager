@@ -218,6 +218,89 @@ describe("esseAgent", () => {
     expect(prompts[1]).not.toContain("输出契约");
   });
 
+  test("reused workspace tools read the current turn runtime state", async () => {
+    const registry = new AgentRuntimeRegistry();
+    const listedFileNames: string[] = [];
+    let factoryCalls = 0;
+
+    const createRuntime = async (options: { customToolDefinitions?: unknown[] }) => {
+      factoryCalls += 1;
+      const customTools = options.customToolDefinitions as Array<{
+        execute: (toolCallId: string, params: Record<string, unknown>) => Promise<{ details?: Record<string, unknown> }>;
+        name: string;
+      }>;
+      return createFakeEsseRuntime({
+        getLastAssistantText: () => `已读取 ${listedFileNames.length} 次。`,
+        onPrompt: async () => {
+          const listSessions = customTools.find((tool) => tool.name === "list_sessions");
+          const result = await listSessions?.execute(`list-${listedFileNames.length + 1}`, {});
+          const sessions = result?.details?.sessions as Array<{ fileName: string }> | undefined;
+          if (sessions?.[0]) {
+            listedFileNames.push(sessions[0].fileName);
+          }
+        }
+      });
+    };
+
+    await runEsseAgentTurn(
+      {
+        messages: [{ role: "user", content: "列一下工作区" }],
+        sessions: [{ fileName: "first.jpg", id: "sess_1" }]
+      },
+      createEsseTestConfig(),
+      "C:/project",
+      {
+        createRuntime,
+        registry,
+        workspaceToolRuntime: createTestWorkspaceRuntime({
+          project: createTestProjectMetadata(),
+          sessions: [
+            {
+              chatMessages: [],
+              chatStatus: "idle",
+              fileName: "first.jpg",
+              filePath: "C:/project/original/first.jpg",
+              id: "sess_1",
+              status: "idle"
+            }
+          ]
+        })
+      }
+    );
+    await runEsseAgentTurn(
+      {
+        messages: [
+          { role: "user", content: "列一下工作区" },
+          { role: "assistant", content: "已读取 1 次。" },
+          { role: "user", content: "再列一下工作区" }
+        ],
+        sessions: [{ fileName: "second.jpg", id: "sess_2" }]
+      },
+      createEsseTestConfig(),
+      "C:/project",
+      {
+        createRuntime,
+        registry,
+        workspaceToolRuntime: createTestWorkspaceRuntime({
+          project: createTestProjectMetadata(),
+          sessions: [
+            {
+              chatMessages: [],
+              chatStatus: "idle",
+              fileName: "second.jpg",
+              filePath: "C:/project/original/second.jpg",
+              id: "sess_2",
+              status: "idle"
+            }
+          ]
+        })
+      }
+    );
+
+    expect(factoryCalls).toBe(1);
+    expect(listedFileNames).toEqual(["first.jpg", "second.jpg"]);
+  });
+
   test("clears a prior Esse runtime when a fresh missing-reference turn is handled locally", async () => {
     const registry = new AgentRuntimeRegistry();
     let factoryCalls = 0;

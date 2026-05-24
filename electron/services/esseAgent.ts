@@ -14,7 +14,7 @@ import {
   shouldReportMissingReferenceImage as shouldReportMissingReferenceImageFromMessages
 } from "./referenceAttachmentGuard";
 import { normalizePathForComparison } from "./pathUtils";
-import { createEsseWorkspaceTools, type EsseWorkspaceToolRuntime } from "./esseWorkspaceTools";
+import { createEsseWorkspaceTools, type EsseTurnBudget, type EsseWorkspaceToolRuntime } from "./esseWorkspaceTools";
 
 interface EsseAgentTurnInput {
   messages: EsseAgentHistoryMessage[];
@@ -38,6 +38,16 @@ interface EsseAgentDeps {
 }
 
 const DEFAULT_ESSE_PERSONA: EssePersona = "excellent-employee";
+const ESSE_TURN_TOOL_CALL_LIMIT = 30;
+const ESSE_TURN_WRITE_CALL_LIMIT = 10;
+const ESSE_TURN_TIMEOUT_MS = 5 * 60 * 1000;
+
+interface EsseWorkspaceTurnContext {
+  budget: EsseTurnBudget;
+  runtime: EsseWorkspaceToolRuntime;
+}
+
+const workspaceTurnContextByRegistryKey = new Map<string, EsseWorkspaceTurnContext>();
 
 const ESSE_PERSONA_INSTRUCTIONS: Record<EssePersona, string[]> = {
   "excellent-employee": [
@@ -80,7 +90,7 @@ export async function runEsseAgentTurn(
   const registry = deps.registry ?? getSharedAgentRuntimeRegistry();
   const registryKey = buildEsseRegistryKey(projectDirectory);
   const userMessageCount = countUserMessages(input.messages);
-  const workspaceTools = deps.workspaceToolRuntime ? createEsseWorkspaceTools(deps.workspaceToolRuntime) : [];
+  const workspaceTools = deps.workspaceToolRuntime ? createEsseWorkspaceTools(createEsseWorkspaceRuntimeProxy(registryKey)) : [];
 
   // 首轮（含用户清空对话）强制丢弃旧 runtime，防止沿用上一段 Esse 上下文。
   if (userMessageCount <= 1) {
@@ -127,9 +137,18 @@ export async function runEsseAgentTurn(
         : buildEsseTurnPrompt(input, selectedOutputSize, { workspaceToolsEnabled: workspaceTools.length > 0 });
 
       try {
+        if (deps.workspaceToolRuntime) {
+          workspaceTurnContextByRegistryKey.set(registryKey, {
+            budget: createEsseTurnBudget(),
+            runtime: deps.workspaceToolRuntime
+          });
+        } else {
+          workspaceTurnContextByRegistryKey.delete(registryKey);
+        }
         await promptWithAbort(runtime, promptText, deps.signal);
       } finally {
         unsubscribe();
+        workspaceTurnContextByRegistryKey.delete(registryKey);
       }
 
       const content = runtime.getLastAssistantText()?.trim();
@@ -149,6 +168,48 @@ export async function runEsseAgentTurn(
       return { reply: content };
     }
   );
+}
+
+function createEsseTurnBudget(now = Date.now()): EsseTurnBudget {
+  return {
+    deadline: now + ESSE_TURN_TIMEOUT_MS,
+    toolCalls: { limit: ESSE_TURN_TOOL_CALL_LIMIT, used: 0 },
+    writeCalls: { limit: ESSE_TURN_WRITE_CALL_LIMIT, used: 0 }
+  };
+}
+
+function createEsseWorkspaceRuntimeProxy(registryKey: string): EsseWorkspaceToolRuntime {
+  const current = () => getEsseWorkspaceTurnContext(registryKey).runtime;
+
+  return {
+    applyMutation: (mutator) => current().applyMutation(mutator),
+    createBlankSession: (request) =>
+      current().createBlankSession?.(request) ?? Promise.resolve({ ok: false, reason: "add_blank_session unavailable" }),
+    deleteUnreferencedFiles: (candidateIds) => current().deleteUnreferencedFiles?.(candidateIds) ?? Promise.resolve([]),
+    executeImagePreflightTool: (request) =>
+      current().executeImagePreflightTool?.(request) ?? Promise.resolve({ ok: false, reason: "image execution unavailable" }),
+    executePackagePreflightTool: (request) =>
+      current().executePackagePreflightTool?.(request) ?? Promise.resolve({ ok: false, reason: "package execution unavailable" }),
+    getState: () => current().getState(),
+    getTurnBudget: () => workspaceTurnContextByRegistryKey.get(registryKey)?.budget,
+    recordToolCall: (event) => current().recordToolCall?.(event),
+    readImageMetadata: (request) =>
+      current().readImageMetadata?.(request) ?? Promise.reject(new Error("read_image_metadata unavailable")),
+    requestPermission: (request) =>
+      current().requestPermission?.(request) ?? Promise.resolve({ decision: "allow" }),
+    requestPreflight: (payload) =>
+      current().requestPreflight?.(payload) ?? Promise.resolve({ decision: "cancel", detail: "preflight unavailable" }),
+    scanUnreferencedFiles: () => current().scanUnreferencedFiles?.() ?? Promise.resolve([])
+  };
+}
+
+function getEsseWorkspaceTurnContext(registryKey: string): EsseWorkspaceTurnContext {
+  const context = workspaceTurnContextByRegistryKey.get(registryKey);
+  if (!context) {
+    throw new Error("Esse workspace turn context unavailable");
+  }
+
+  return context;
 }
 
 function buildEsseRegistryKey(projectDirectory: string): string {
