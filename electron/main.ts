@@ -15,6 +15,7 @@ import type {
   RetryEsseBatchTaskFailedRequest,
   RetryEsseBatchTaskItemRequest,
   RenameProjectRequest,
+  SaveApiSettingsRequest,
   SaveReferenceImageRequest,
   SaveProjectSnapshotRequest,
   SendChatMessageRequest,
@@ -36,7 +37,7 @@ import { createProjectSnapshotWorkspaceRuntime } from "./services/esseWorkspaceR
 import { EssePreflightBroker } from "./services/essePreflightBroker";
 import { createImageGenerationExecutor, type ImageGenerationExecutor } from "./services/imageGenerationService";
 import { packageGeneratedImages } from "./services/imagePackage";
-import { loadTuziConfig, loadTuziLlmConfig } from "./services/localConfig";
+import { configureLocalConfig, getApiSettingsSnapshot, loadTuziConfig, loadTuziLlmConfig, saveApiSettings } from "./services/localConfig";
 import { saveReferenceImageToDirectory } from "./services/localImageStorage";
 import { runImageSessionAgent, warmupImageSessionAgentDependencies } from "./services/imageSessionAgent";
 import { getSharedAgentRuntimeRegistry } from "./services/agentRuntimeRegistry";
@@ -330,6 +331,24 @@ function registerIpc(appLogger: AppLogger): void {
     });
 
     return { canceled: true };
+  });
+
+  ipcMain.handle("settings:get-api", () => getApiSettingsSnapshot());
+
+  ipcMain.handle("settings:save-api", async (_event, request: SaveApiSettingsRequest) => {
+    assertSaveApiSettingsRequest(request);
+    const snapshot = await saveApiSettings(request);
+    getSharedAgentRuntimeRegistry().invalidateAll();
+    appLogger.info("API settings saved", {
+      data: {
+        imageBaseUrl: snapshot.imageBaseUrl,
+        imageModel: snapshot.imageModel,
+        llmBaseUrl: snapshot.llmBaseUrl,
+        llmModel: snapshot.llmModel
+      },
+      publicMessage: "API 设置已保存。"
+    });
+    return snapshot;
   });
 
   ipcMain.handle("generation:generate-image", async (_event, request: GenerateImageRequest) => {
@@ -939,6 +958,25 @@ function assertCancelOperationRequest(request: CancelOperationRequest): void {
   }
 }
 
+function assertSaveApiSettingsRequest(request: SaveApiSettingsRequest): void {
+  if (
+    typeof request !== "object" ||
+    request === null ||
+    typeof request.imageBaseUrl !== "string" ||
+    !request.imageBaseUrl.trim() ||
+    typeof request.imageModel !== "string" ||
+    !request.imageModel.trim() ||
+    typeof request.llmBaseUrl !== "string" ||
+    !request.llmBaseUrl.trim() ||
+    typeof request.llmModel !== "string" ||
+    !request.llmModel.trim() ||
+    (request.imageApiKey !== undefined && typeof request.imageApiKey !== "string") ||
+    (request.llmApiKey !== undefined && typeof request.llmApiKey !== "string")
+  ) {
+    throw new Error("Invalid API settings request");
+  }
+}
+
 function assertCancelEsseBatchTaskItemRequest(request: CancelEsseBatchTaskItemRequest): void {
   if (
     typeof request !== "object" ||
@@ -1132,6 +1170,7 @@ function assertSendChatMessageRequest(request: SendChatMessageRequest): void {
 }
 
 app.whenReady().then(() => {
+  configureLocalConfig({ userConfigDirectory: app.getPath("userData") });
   logger = createLogger();
   logger.info("Application ready", {
     data: {

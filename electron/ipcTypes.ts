@@ -32,6 +32,25 @@ export interface CancelEsseBatchTaskAllResponse {
   canceledCount: number;
 }
 
+export interface ApiSettingsSnapshot {
+  configPath?: string;
+  imageApiKeyConfigured: boolean;
+  imageBaseUrl: string;
+  imageModel: string;
+  llmApiKeyConfigured: boolean;
+  llmBaseUrl: string;
+  llmModel: string;
+}
+
+export interface SaveApiSettingsRequest {
+  imageApiKey?: string;
+  imageBaseUrl: string;
+  imageModel: string;
+  llmApiKey?: string;
+  llmBaseUrl: string;
+  llmModel: string;
+}
+
 export interface RetryEsseBatchTaskItemRequest {
   batchTaskId: string;
   sessionId: string;

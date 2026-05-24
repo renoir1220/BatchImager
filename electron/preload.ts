@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppLogEntry,
+  ApiSettingsSnapshot,
   CancelEsseBatchTaskAllRequest,
   CancelEsseBatchTaskAllResponse,
   CancelEsseBatchTaskItemRequest,
@@ -22,6 +23,7 @@ import type {
   RetryEsseBatchTaskFailedResponse,
   RetryEsseBatchTaskItemRequest,
   RetryEsseBatchTaskItemResponse,
+  SaveApiSettingsRequest,
   SaveReferenceImageRequest,
   SaveReferenceImageResponse,
   SaveProjectSnapshotRequest,
@@ -77,6 +79,9 @@ const api = {
   respondEssePermission: async (response: EssePermissionResponse): Promise<EssePermissionResponseAck> =>
     ipcRenderer.invoke("esse:permission-response", response),
   getLogs: async (): Promise<AppLogEntry[]> => ipcRenderer.invoke("logs:list"),
+  getApiSettings: async (): Promise<ApiSettingsSnapshot> => ipcRenderer.invoke("settings:get-api"),
+  saveApiSettings: async (request: SaveApiSettingsRequest): Promise<ApiSettingsSnapshot> =>
+    ipcRenderer.invoke("settings:save-api", request),
   setRunningWorkCount: (count: number): void => {
     ipcRenderer.send("app:set-running-work-count", count);
   },

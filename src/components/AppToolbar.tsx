@@ -9,6 +9,7 @@ interface AppToolbarProps {
   onImport: () => void;
   onOpenProject: () => void;
   onOpenLogs?: () => void;
+  onOpenSettings?: () => void;
   projectLabel?: string;
 }
 
@@ -20,7 +21,8 @@ export function AppToolbar({
   onImport,
   onOpenProject,
   projectLabel,
-  onOpenLogs
+  onOpenLogs,
+  onOpenSettings
 }: AppToolbarProps) {
   return (
     <header className="app-toolbar">
@@ -53,6 +55,9 @@ export function AppToolbar({
 
       <MenuBar ariaLabel="状态操作">
         <MenuBarGroup className="toolbar-status-actions">
+          {onOpenSettings ? (
+            <SettingsButton onClick={onOpenSettings} />
+          ) : null}
           {onOpenLogs ? (
             <LogButton count={logCount} onClick={onOpenLogs} />
           ) : null}
@@ -122,6 +127,27 @@ function MenuBarItem({ children, disabled = false, onClick, variant = "default" 
     <button className={`toolbar-button ${variant === "primary" ? "primary" : ""}`.trim()} type="button" disabled={disabled} onClick={onClick}>
       {children}
     </button>
+  );
+}
+
+interface SettingsButtonProps {
+  onClick: () => void;
+}
+
+function SettingsButton({ onClick }: SettingsButtonProps) {
+  return (
+    <button className="toolbar-button toolbar-icon-button" type="button" aria-label="打开设置" title="打开设置" onClick={onClick}>
+      <SettingsIcon />
+    </button>
+  );
+}
+
+function SettingsIcon() {
+  return (
+    <svg className="toolbar-settings-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M8 5.4a2.6 2.6 0 1 1 0 5.2 2.6 2.6 0 0 1 0-5.2Z" />
+      <path d="M8 1.8v1.4M8 12.8v1.4M13.4 8h-1.4M4 8H2.6M11.8 4.2l-1 1M5.2 10.8l-1 1M11.8 11.8l-1-1M5.2 5.2l-1-1" />
+    </svg>
   );
 }
 

@@ -1,5 +1,25 @@
-import { describe, expect, test } from "vitest";
-import { parseEnvFile, resolveTuziConfig, resolveTuziLlmConfig } from "./localConfig";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, test } from "vitest";
+import {
+  configureLocalConfig,
+  getApiSettingsSnapshot,
+  parseEnvFile,
+  resolveApiSettingsSnapshot,
+  resolveTuziConfig,
+  resolveTuziLlmConfig,
+  saveApiSettings
+} from "./localConfig";
+
+let tempDirectory: string | undefined;
+
+afterEach(async () => {
+  if (tempDirectory) {
+    await rm(tempDirectory, { force: true, recursive: true });
+    tempDirectory = undefined;
+  }
+});
 
 describe("localConfig", () => {
   test("parses simple local env files", () => {
@@ -54,4 +74,47 @@ TUZI_IMAGE_MODEL=gpt-image-2
     });
   });
 
+  test("summarizes API settings without exposing keys", () => {
+    expect(
+      resolveApiSettingsSnapshot({
+        TUZI_API_KEY: "image-key",
+        TUZI_BASE_URL: "https://image.example",
+        TUZI_IMAGE_MODEL: "image-model",
+        TUZI_LLM_API_KEY: "llm-key",
+        TUZI_LLM_BASE_URL: "https://llm.example",
+        TUZI_LLM_MODEL: "llm-model"
+      }, "/tmp/api-settings.json")
+    ).toEqual({
+      configPath: "/tmp/api-settings.json",
+      imageApiKeyConfigured: true,
+      imageBaseUrl: "https://image.example",
+      imageModel: "image-model",
+      llmApiKeyConfigured: true,
+      llmBaseUrl: "https://llm.example",
+      llmModel: "llm-model"
+    });
+  });
+
+  test("persists API settings in the configured user data directory", async () => {
+    tempDirectory = await mkdtemp(path.join(os.tmpdir(), "batchimager-config-"));
+    configureLocalConfig({ userConfigDirectory: tempDirectory });
+
+    await saveApiSettings({
+      imageApiKey: "image-key",
+      imageBaseUrl: "https://image.example",
+      imageModel: "gpt-image-2",
+      llmApiKey: "llm-key",
+      llmBaseUrl: "https://llm.example",
+      llmModel: "gpt-5.5"
+    });
+
+    expect(getApiSettingsSnapshot()).toMatchObject({
+      imageApiKeyConfigured: true,
+      imageBaseUrl: "https://image.example",
+      imageModel: "gpt-image-2",
+      llmApiKeyConfigured: true,
+      llmBaseUrl: "https://llm.example",
+      llmModel: "gpt-5.5"
+    });
+  });
 });

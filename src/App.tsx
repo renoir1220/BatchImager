@@ -49,6 +49,7 @@ import {
 } from "./domain/sessionPanelWidth";
 import type { ImageSession, ImageSessionChatMessage } from "./types/image";
 import { AppToolbar } from "./components/AppToolbar";
+import { ApiSettingsDialog } from "./components/ApiSettingsDialog";
 import { EmptyWorkspace } from "./components/EmptyWorkspace";
 import { ImagePreviewDialog, type PreviewImage } from "./components/ImagePreviewDialog";
 import { ImageWorkspace } from "./components/ImageWorkspace";
@@ -109,6 +110,7 @@ export function App() {
   const [isCreatingProjectPlan, setIsCreatingProjectPlan] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isLogPanelOpen, setIsLogPanelOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [logs, setLogs] = useState<AppLogEntry[]>([]);
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
   const [chatImagePreview, setChatImagePreview] = useState<ChatImagePreview | null>(null);
@@ -1361,6 +1363,7 @@ export function App() {
         onNewProject={handleNewProject}
         onOpenProject={handleOpenProject}
         onOpenLogs={() => setIsLogPanelOpen(true)}
+        onOpenSettings={() => setIsSettingsOpen(true)}
         projectLabel={projectLabel}
       />
 
@@ -1480,6 +1483,7 @@ export function App() {
       </main>
 
       {isLogPanelOpen ? <LogPanel logs={logs} onClose={() => setIsLogPanelOpen(false)} /> : null}
+      {isSettingsOpen ? <ApiSettingsDialog onClose={() => setIsSettingsOpen(false)} /> : null}
 
       {isProjectListOpen ? (
         <ProjectListDialog

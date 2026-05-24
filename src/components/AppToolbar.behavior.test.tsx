@@ -17,6 +17,7 @@ function renderToolbar() {
       onNewProject={vi.fn()}
       onOpenProject={vi.fn()}
       onOpenLogs={vi.fn()}
+      onOpenSettings={vi.fn()}
     />
   );
 
@@ -52,5 +53,12 @@ describe("AppToolbar menu behavior", () => {
     expect(logsButton).not.toHaveTextContent("日志");
     expect(screen.queryByText(/张图片/)).not.toBeInTheDocument();
     expect(screen.queryByText("等待导入")).not.toBeInTheDocument();
+  });
+
+  test("renders settings as an icon button", () => {
+    renderToolbar();
+
+    expect(screen.getByRole("button", { name: "打开设置" })).toBeInTheDocument();
+    expect(screen.queryByText("设置")).not.toBeInTheDocument();
   });
 });
