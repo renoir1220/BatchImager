@@ -257,6 +257,7 @@ function registerIpc(appLogger: AppLogger): void {
     assertSaveProjectSnapshotRequest(request);
     return getProjectSnapshotSink(requireActiveProjectDirectory()).apply((snapshot) => ({
       ...snapshot,
+      esseUndoLog: request.esseUndoLog ?? snapshot.esseUndoLog,
       projectManagerState: request.projectManagerState,
       referenceImages: request.referenceImages ?? snapshot.referenceImages,
       selectedSessionId: request.selectedSessionId,
@@ -913,7 +914,8 @@ function assertSaveProjectSnapshotRequest(request: SaveProjectSnapshotRequest): 
             typeof referenceImage.filePath === "string" &&
             typeof referenceImage.id === "string" &&
             typeof referenceImage.label === "string"
-        )))
+        ))) ||
+    (request.esseUndoLog !== undefined && !Array.isArray(request.esseUndoLog))
   ) {
     throw new Error("Invalid project snapshot save request");
   }

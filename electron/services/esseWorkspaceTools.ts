@@ -3,8 +3,10 @@ import type {
   EssePermissionPayload,
   EssePreflightCommand,
   EssePreflightPayload,
+  PersistedUndoEntry,
   PersistedImageSession,
-  ProjectSnapshot
+  ProjectSnapshot,
+  SerializableUndoDescriptor
 } from "../ipcTypes";
 import type { AgentToolResult, BatchImagerAgentTool, BatchImagerAgentToolRisk } from "./batchImagerAgentTools";
 import type { EsseMemoryCategory, EsseMemoryStore } from "./esseMemoryStore";
@@ -87,6 +89,7 @@ export interface EsseImageMetadataRequest {
 
 export interface EsseWorkspaceToolCallEvent {
   params: Record<string, unknown>;
+  reversible?: PersistedUndoEntry;
   result: AgentToolResult;
   toolName: string;
 }
@@ -109,6 +112,7 @@ export function createEsseWorkspaceTools(runtime: EsseWorkspaceToolRuntime): Bat
     createListRememberedPreferencesTool(runtime),
     createRememberUserPreferenceTool(runtime),
     createForgetUserPreferenceTool(runtime),
+    createUndoLastActionsTool(runtime),
     createScanUnreferencedFilesTool(runtime),
     createDeleteUnreferencedFilesTool(runtime),
     createGenerateImageTool(runtime),
@@ -415,6 +419,39 @@ function createForgetUserPreferenceTool(runtime: EsseWorkspaceToolRuntime): Batc
       }
 
       return toolOk(`已删除记忆 ${result.removed.id}：${result.removed.content}`, { memory: result.removed });
+    }
+  };
+}
+
+function createUndoLastActionsTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
+  return {
+    name: "undo_last_actions",
+    label: "撤销最近操作",
+    risk: "destructive",
+    requiresPreflight: false,
+    description:
+      "Undo the most recent N reversible workspace actions in this project. Use when the user asks to undo, revert, take back, or restore the previous state. Not all actions are reversible: image generation, packaging, and physical file deletion cannot be undone. Parameters: count is optional 1..10, default 1.",
+    parameters: objectParameters({ count: "Optional 1..10, default 1." }, []),
+    async execute(_toolCallId, params) {
+      const permission = await requestWorkspaceToolPermission(runtime, {
+        label: "撤销最近操作",
+        name: "undo_last_actions",
+        requiresPreflight: false,
+        risk: "destructive"
+      }, params);
+      if (permission) {
+        return permission;
+      }
+
+      const count = Math.min(10, Math.max(1, readInteger(params.count) || 1));
+      const mutation = await runtime.applyMutation((state) => undoLastActions(state, count));
+      if (!mutation.result.ok) {
+        return toolError(mutation.result.reason, mutation.result.detail, mutation.result.suggestedNext);
+      }
+
+      return toolOk(mutation.result.summary, {
+        affectedSessionIds: mutation.result.affectedSessionIds
+      });
     }
   };
 }
@@ -808,7 +845,7 @@ function createGetSessionRecordsTool(runtime: EsseWorkspaceToolRuntime): BatchIm
 }
 
 function createRestoreSessionRecordTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
-  return mutationTool({
+  return reversibleMutationTool({
     description: "Restore a session to a previous generated record. Call list_sessions and get_session_records first. recordIndex is 1-based.",
     label: "回退记录",
     name: "restore_session_record",
@@ -819,7 +856,7 @@ function createRestoreSessionRecordTool(runtime: EsseWorkspaceToolRuntime): Batc
 }
 
 function createRestoreOriginalTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
-  return mutationTool({
+  return reversibleMutationTool({
     description: "Restore a session to its original imported image. Call list_sessions first. Does not delete generated records.",
     label: "恢复原图",
     name: "restore_original",
@@ -830,7 +867,7 @@ function createRestoreOriginalTool(runtime: EsseWorkspaceToolRuntime): BatchImag
 }
 
 function createRenameSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
-  return mutationTool({
+  return reversibleMutationTool({
     description: "Rename one image session's display fileName. Call list_sessions first. Does not rename files on disk.",
     label: "重命名图片",
     name: "rename_session",
@@ -841,7 +878,7 @@ function createRenameSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImager
 }
 
 function createReorderSessionsTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
-  return mutationTool({
+  return reversibleMutationTool({
     description: "Reorder all image sessions. sessionIds must be a complete permutation of stable ids from list_sessions.",
     label: "调整顺序",
     name: "reorder_sessions",
@@ -852,7 +889,7 @@ function createReorderSessionsTool(runtime: EsseWorkspaceToolRuntime): BatchImag
 }
 
 function createSetSessionPromptTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
-  return mutationTool({
+  return reversibleMutationTool({
     description: "Set one image session's default prompt for future generation. Does not call the image API.",
     label: "设置提示词",
     name: "set_session_prompt",
@@ -863,7 +900,7 @@ function createSetSessionPromptTool(runtime: EsseWorkspaceToolRuntime): BatchIma
 }
 
 function createDeleteSessionRecordTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
-  return mutationTool({
+  return reversibleMutationTool({
     description: "Logically delete one generated record from a session. Call list_sessions and get_session_records first. Does not delete files from disk.",
     label: "删除记录",
     name: "delete_session_record",
@@ -875,7 +912,7 @@ function createDeleteSessionRecordTool(runtime: EsseWorkspaceToolRuntime): Batch
 }
 
 function createDeleteSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
-  return mutationTool({
+  return reversibleMutationTool({
     description: "Delete one image session from the workspace. Call list_sessions first. This only removes workspace references.",
     label: "删除图片",
     name: "delete_session",
@@ -887,7 +924,7 @@ function createDeleteSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImager
 }
 
 function createMergeSessionsTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
-  return mutationTool({
+  return reversibleMutationTool({
     description: "Merge generated records from source sessions into a target session, then remove source sessions. Call list_sessions first.",
     label: "合并图片",
     name: "merge_sessions",
@@ -983,6 +1020,120 @@ function mutationTool(options: {
       });
     }
   };
+}
+
+function reversibleMutationTool(options: {
+  description: string;
+  label: string;
+  mutate: (state: EsseWorkspaceState, params: Record<string, unknown>) => { result: WorkspaceMutationResult; state: EsseWorkspaceState };
+  name: string;
+  parameters: Record<string, unknown>;
+  risk?: BatchImagerAgentToolRisk;
+  runtime: EsseWorkspaceToolRuntime;
+}): BatchImagerAgentTool {
+  return mutationTool({
+    ...options,
+    mutate: (state, params) => {
+      const mutation = options.mutate(state, params);
+      if (!mutation.result.ok) {
+        return mutation;
+      }
+
+      return {
+        result: mutation.result,
+        state: appendUndoEntry(mutation.state, createUndoEntry({
+          affectedSessionIds: mutation.result.affectedSessionIds,
+          beforeState: state,
+          summary: mutation.result.summary,
+          toolName: options.name
+        }))
+      };
+    }
+  });
+}
+
+function undoLastActions(state: EsseWorkspaceState, count: number): { result: WorkspaceMutationResult; state: EsseWorkspaceState } {
+  const entries = [...(state.esseUndoLog ?? [])].reverse().filter((entry) => !entry.undone).slice(0, count);
+  if (!entries.length) {
+    return fail(state, "nothing to undo", undefined, "There are no reversible workspace actions to undo.");
+  }
+
+  let nextState = state;
+  const undoneSummaries: string[] = [];
+  const affectedSessionIds = new Set<string>();
+
+  for (const entry of entries) {
+    nextState = applyUndoDescriptor(nextState, entry.inverseDescriptor);
+    const undoneIds = new Set([entry.id]);
+    nextState = {
+      ...nextState,
+      esseUndoLog: (nextState.esseUndoLog ?? []).map((current) => (undoneIds.has(current.id) ? { ...current, undone: true } : current))
+    };
+    undoneSummaries.push(entry.summary);
+    for (const sessionId of entry.affectedSessionIds) {
+      affectedSessionIds.add(sessionId);
+    }
+  }
+
+  return ok(
+    nextState,
+    [...affectedSessionIds],
+    `已撤销 ${entries.length} 个操作：${undoneSummaries.join("；")}`
+  );
+}
+
+function appendUndoEntry(state: EsseWorkspaceState, entry: PersistedUndoEntry): EsseWorkspaceState {
+  return {
+    ...state,
+    esseUndoLog: [...(state.esseUndoLog ?? []), entry].slice(-50)
+  };
+}
+
+function createUndoEntry(params: {
+  affectedSessionIds: string[];
+  beforeState: EsseWorkspaceState;
+  summary: string;
+  toolName: string;
+}): PersistedUndoEntry {
+  return {
+    affectedSessionIds: params.affectedSessionIds,
+    createdAt: new Date().toISOString(),
+    id: `undo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    inverseDescriptor: createRestoreWorkspaceDescriptor(params.beforeState),
+    summary: params.summary,
+    toolName: params.toolName
+  };
+}
+
+function createRestoreWorkspaceDescriptor(state: EsseWorkspaceState): SerializableUndoDescriptor {
+  return {
+    kind: "restore-workspace",
+    projectImageCount: state.project.imageCount,
+    ...(state.referenceImages?.length ? { referenceImages: state.referenceImages.map((referenceImage) => ({ ...referenceImage })) } : {}),
+    selectedSessionId: state.selectedSessionId ?? null,
+    sessions: state.sessions.map(cloneSession)
+  };
+}
+
+function applyUndoDescriptor(state: EsseWorkspaceState, descriptor: SerializableUndoDescriptor): EsseWorkspaceState {
+  if (descriptor.kind !== "restore-workspace") {
+    return state;
+  }
+
+  return {
+    ...state,
+    project: {
+      ...state.project,
+      imageCount: descriptor.projectImageCount
+    },
+    referenceImages: descriptor.referenceImages?.map((referenceImage) => ({ ...referenceImage })),
+    selectedSessionId: descriptor.selectedSessionId ?? null,
+    sessions: descriptor.sessions.map(cloneSession)
+  };
+}
+
+function cloneSession(session: PersistedImageSession): PersistedImageSession {
+  return JSON.parse(JSON.stringify(session)) as PersistedImageSession;
 }
 
 function restoreSessionRecord(state: EsseWorkspaceState, params: { recordIndex: number; sessionId: string }) {

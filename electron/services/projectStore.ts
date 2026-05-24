@@ -6,6 +6,7 @@ import type {
   PersistedImageSession,
   PersistedImageSessionChatMessage,
   BatchPlanReferenceImage,
+  PersistedUndoEntry,
   ProjectManagerState,
   ProjectMetadata,
   ProjectSummary,
@@ -25,6 +26,7 @@ interface ImportProjectImagesDeps {
 }
 
 interface SaveProjectSnapshotInput {
+  esseUndoLog?: PersistedUndoEntry[];
   projectManagerState?: ProjectManagerState;
   referenceImages?: BatchPlanReferenceImage[];
   selectedSessionId?: string | null;
@@ -200,6 +202,7 @@ export async function applyProjectSnapshotMutation(
       const currentSnapshot = readProjectSnapshot(db, projectDirectory);
       const nextInput = mutator(currentSnapshot);
       writeProjectSnapshotRowsWithinTransaction(db, {
+        esseUndoLog: currentSnapshot.esseUndoLog,
         referenceImages: currentSnapshot.referenceImages,
         ...nextInput
       });
@@ -345,6 +348,7 @@ function writeProjectSnapshotRowsWithinTransaction(db: DatabaseSync, input: Save
   });
 
   setProjectState(db, "projectManagerState", input.projectManagerState ? JSON.stringify(input.projectManagerState) : null);
+  setProjectState(db, "esseUndoLog", input.esseUndoLog?.length ? JSON.stringify(input.esseUndoLog) : null);
   setProjectState(db, "referenceImages", input.referenceImages?.length ? JSON.stringify(input.referenceImages) : null);
   setProjectState(db, "selectedSessionId", input.selectedSessionId ?? null);
 }
@@ -486,6 +490,7 @@ function readProjectSnapshot(db: DatabaseSync, projectDirectory: string): Projec
   );
 
   return {
+    esseUndoLog: parseUndoLog(getProjectState(db, "esseUndoLog")),
     projectManagerState: parseProjectManagerState(getProjectState(db, "projectManagerState")),
     project: readProjectMetadata(db, projectDirectory, sessions.length),
     referenceImages: parseReferenceImages(getProjectState(db, "referenceImages")),
@@ -761,6 +766,48 @@ function parseReferenceImages(value: string | null): BatchPlanReferenceImage[] |
   );
 
   return referenceImages.length ? referenceImages : undefined;
+}
+
+function parseUndoLog(value: string | null): PersistedUndoEntry[] | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = JSON.parse(value);
+  if (!Array.isArray(parsed)) {
+    return undefined;
+  }
+
+  const undoLog = parsed.filter(
+    (item): item is PersistedUndoEntry =>
+      typeof item === "object" &&
+      item !== null &&
+      Array.isArray(item.affectedSessionIds) &&
+      item.affectedSessionIds.every((sessionId: unknown) => typeof sessionId === "string") &&
+      typeof item.createdAt === "string" &&
+      typeof item.id === "string" &&
+      typeof item.summary === "string" &&
+      typeof item.toolName === "string" &&
+      (item.undone === undefined || typeof item.undone === "boolean") &&
+      isRestoreWorkspaceUndoDescriptor(item.inverseDescriptor)
+  );
+
+  return undoLog.length ? undoLog : undefined;
+}
+
+function isRestoreWorkspaceUndoDescriptor(value: unknown): value is PersistedUndoEntry["inverseDescriptor"] {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    value.kind === "restore-workspace" &&
+    "projectImageCount" in value &&
+    typeof value.projectImageCount === "number" &&
+    "sessions" in value &&
+    Array.isArray(value.sessions) &&
+    (!("selectedSessionId" in value) || value.selectedSessionId === null || typeof value.selectedSessionId === "string") &&
+    (!("referenceImages" in value) || Array.isArray(value.referenceImages))
+  );
 }
 
 function stringifyOptionalArray(value: string[] | undefined): string | null {

@@ -237,6 +237,48 @@ describe("projectStore", () => {
     });
   });
 
+  test("persists Esse undo log in project_state json", async () => {
+    const root = await makeTempRoot();
+    const project = await createProject({
+      makeId: () => "project-1",
+      makeNow: () => new Date("2026-05-21T15:00:00.000Z"),
+      projectsDirectory: root
+    });
+    const session = {
+      chatMessages: [],
+      chatStatus: "idle" as const,
+      fileName: "flower.png",
+      filePath: path.join(project.project.directory, "images", "original", "flower.png"),
+      id: "sess_test_1",
+      status: "idle" as const
+    };
+    const esseUndoLog = [
+      {
+        affectedSessionIds: ["sess_test_1"],
+        createdAt: "2026-05-21T15:00:00.000Z",
+        id: "undo_1",
+        inverseDescriptor: {
+          kind: "restore-workspace" as const,
+          projectImageCount: 1,
+          selectedSessionId: "sess_test_1",
+          sessions: [session]
+        },
+        summary: "已重命名为 hero.png。",
+        toolName: "rename_session"
+      }
+    ];
+
+    await saveProjectSnapshot(project.project.directory, {
+      esseUndoLog,
+      selectedSessionId: "sess_test_1",
+      sessions: [session]
+    });
+
+    await expect(openProject(project.project.directory)).resolves.toMatchObject({
+      esseUndoLog
+    });
+  });
+
   test("applies a project snapshot mutation transactionally", async () => {
     const root = await makeTempRoot();
     const project = await createProject({

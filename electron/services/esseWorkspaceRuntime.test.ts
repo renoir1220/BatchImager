@@ -213,6 +213,79 @@ describe("esseWorkspaceRuntime", () => {
     expect(persisted.sessions[0]?.generatedFilePaths).toEqual(["/project/generated/a-1.png"]);
   });
 
+  test("records reversible mutations and undoes them in reverse order", async () => {
+    let persisted = createSnapshot({
+      selectedSessionId: "sess_1",
+      sessions: [createSession("sess_1"), createSession("sess_2")]
+    });
+    const initialWorkspace = stripUndoLog(persisted);
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const runtime = createProjectSnapshotWorkspaceRuntime({ initialSnapshot: persisted, sink });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    await tools.get("rename_session")?.execute("rename", { fileName: "renamed.jpg", sessionId: "sess_1" });
+    await tools.get("reorder_sessions")?.execute("reorder", { sessionIds: ["sess_2", "sess_1"] });
+    expect(persisted.esseUndoLog).toHaveLength(2);
+    expect(persisted.sessions.map((session) => session.id)).toEqual(["sess_2", "sess_1"]);
+
+    const undoResult = await tools.get("undo_last_actions")?.execute("undo", { count: 2 });
+
+    expect(undoResult?.isError).toBeUndefined();
+    expect(stripUndoLog(persisted)).toEqual(initialWorkspace);
+    expect(persisted.esseUndoLog?.every((entry) => entry.undone)).toBe(true);
+  });
+
+  test("undo restores deleted records and deleted sessions", async () => {
+    let persisted = createSnapshot({
+      sessions: [
+        createSession("sess_1", {
+          generatedFilePath: "/project/generated/a-2.png",
+          generatedFilePaths: ["/project/generated/a-1.png", "/project/generated/a-2.png"]
+        }),
+        createSession("sess_2")
+      ]
+    });
+    const initialWorkspace = stripUndoLog(persisted);
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const runtime = createProjectSnapshotWorkspaceRuntime({ initialSnapshot: persisted, sink });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    await tools.get("delete_session_record")?.execute("delete-record", { recordIndex: 2, sessionId: "sess_1" });
+    await tools.get("delete_session")?.execute("delete-session", { sessionId: "sess_2" });
+    await tools.get("undo_last_actions")?.execute("undo", { count: 2 });
+
+    expect(stripUndoLog(persisted)).toEqual(initialWorkspace);
+  });
+
+  test("keeps only the latest fifty undo entries", async () => {
+    let persisted = createSnapshot();
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const runtime = createProjectSnapshotWorkspaceRuntime({ initialSnapshot: persisted, sink });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    for (let index = 0; index < 55; index += 1) {
+      await tools.get("rename_session")?.execute(`rename-${index}`, { fileName: `name-${index}.jpg`, sessionId: "sess_1" });
+    }
+
+    expect(persisted.esseUndoLog).toHaveLength(50);
+    expect(persisted.esseUndoLog?.[0]?.summary).toBe("已重命名为 name-5.jpg。");
+  });
+
   test("records workspace tool calls as persisted project-manager context messages", async () => {
     let persisted = createSnapshot();
     const broadcasts: ProjectSnapshot[] = [];
@@ -601,6 +674,7 @@ describe("esseWorkspaceRuntime", () => {
     ]);
     expect(JSON.stringify(preflightPayloads)).not.toContain('"size"');
     expect(executions).toHaveLength(1);
+    expect(runtime.getState().esseUndoLog).toBeUndefined();
   });
 
   test("returns a do-not-retry error when the user cancels image preflight", async () => {
@@ -875,6 +949,11 @@ describe("esseWorkspaceRuntime", () => {
 
 function toolsByName(tools: ReturnType<typeof createEsseWorkspaceTools>) {
   return new Map(tools.map((tool) => [tool.name, tool]));
+}
+
+function stripUndoLog(snapshot: ProjectSnapshot): ProjectSnapshot {
+  const { esseUndoLog: _esseUndoLog, ...rest } = snapshot;
+  return rest;
 }
 
 function createNoopSink(): ProjectMutationSink<ProjectSnapshot> {

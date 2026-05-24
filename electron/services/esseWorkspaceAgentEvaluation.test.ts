@@ -111,6 +111,37 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
       userTask: "记住这个项目是某客户的春季新品"
     },
     {
+      assert: ({ persisted, prompt, result, trace }) => {
+        expect(result.reply).toBe("已撤销刚才的重命名。");
+        expect(trace).toEqual(["undo_last_actions"]);
+        expect(prompt).toContain("undo_last_actions");
+        expect(persisted.sessions[0]?.fileName).toBe("sess_1.jpg");
+        expect(persisted.esseUndoLog?.[0]?.undone).toBe(true);
+      },
+      id: "undo-last-reversible-action",
+      initialSnapshot: createSnapshot({
+        esseUndoLog: [
+          {
+            affectedSessionIds: ["sess_1"],
+            createdAt: "2026-05-24T00:00:00.000Z",
+            id: "undo_eval_1",
+            inverseDescriptor: {
+              kind: "restore-workspace",
+              projectImageCount: 1,
+              selectedSessionId: "sess_1",
+              sessions: [createSession("sess_1")]
+            },
+            summary: "已重命名为 hero.jpg。",
+            toolName: "rename_session"
+          }
+        ],
+        sessions: [createSession("sess_1", { fileName: "hero.jpg" })]
+      }),
+      reply: "已撤销刚才的重命名。",
+      script: [{ tool: "undo_last_actions", params: {} }],
+      userTask: "撤销刚才那步"
+    },
+    {
       assert: ({ persisted, prompt, trace }) => {
         expect(trace).toEqual(["list_reference_images", "add_reference_image"]);
         expect(prompt).toContain("/tmp/esse-uploaded-style.png");

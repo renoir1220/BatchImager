@@ -229,6 +229,24 @@ export interface BatchPlanReferenceImage {
   label: string;
 }
 
+export type SerializableUndoDescriptor = {
+  kind: "restore-workspace";
+  projectImageCount: number;
+  referenceImages?: BatchPlanReferenceImage[];
+  selectedSessionId?: string | null;
+  sessions: PersistedImageSession[];
+};
+
+export interface PersistedUndoEntry {
+  affectedSessionIds: string[];
+  createdAt: string;
+  id: string;
+  inverseDescriptor: SerializableUndoDescriptor;
+  summary: string;
+  toolName: string;
+  undone?: boolean;
+}
+
 export interface WorkerReport {
   commandId: string;
   errorMessage?: string;
@@ -373,6 +391,7 @@ export interface OpenProjectRequest {
 }
 
 export interface ProjectSnapshot {
+  esseUndoLog?: PersistedUndoEntry[];
   projectManagerState?: ProjectManagerState;
   project: ProjectMetadata;
   referenceImages?: BatchPlanReferenceImage[];
@@ -385,6 +404,7 @@ export interface ImportProjectImagesRequest {
 }
 
 export interface SaveProjectSnapshotRequest {
+  esseUndoLog?: PersistedUndoEntry[];
   projectManagerState?: ProjectManagerState;
   referenceImages?: BatchPlanReferenceImage[];
   selectedSessionId?: string | null;
