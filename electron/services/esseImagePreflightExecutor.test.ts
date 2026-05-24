@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import type { ProjectSnapshot } from "../ipcTypes";
+import { EsseBatchTaskRegistry } from "./esseBatchTaskRegistry";
 import { createEsseImagePreflightExecutor } from "./esseImagePreflightExecutor";
 import { ProjectMutationSink } from "./projectMutationSink";
 import { createProjectSnapshotWorkspaceRuntime } from "./esseWorkspaceRuntime";
@@ -109,6 +110,114 @@ describe("esseImagePreflightExecutor", () => {
       status: "completed"
     });
     await expect(access(path.join(projectDirectory, "images", "generated", "seeds", "sess_new.png"))).rejects.toThrow();
+  });
+
+  test("registers batch item controllers and cleans them as each item finishes", async () => {
+    let snapshot = createSnapshot({
+      sessions: [
+        ...createSnapshot().sessions,
+        {
+          chatMessages: [],
+          chatStatus: "idle",
+          fileName: "b.jpg",
+          filePath: "/project/original/b.jpg",
+          id: "sess_2",
+          status: "idle"
+        }
+      ]
+    });
+    const registry = new EsseBatchTaskRegistry();
+    const registrySnapshots: unknown[] = [];
+    const generatedRequests: UnifiedImageGenerationRequest[] = [];
+    const runtime = createRuntime(snapshot, (nextSnapshot) => {
+      snapshot = nextSnapshot;
+    });
+    const executor = createEsseImagePreflightExecutor({
+      batchTaskRegistry: registry,
+      generateImage: async (request) => {
+        registrySnapshots.push(registry.getSnapshot("batch_1"));
+        generatedRequests.push(request);
+        return {
+          outputPath: `/project/images/generated/${request.sessionId}.png`,
+          requestSize: request.size ?? "auto"
+        };
+      },
+      makeBatchTaskId: () => "batch_1",
+      projectDirectory: "/project"
+    });
+
+    const result = await executor(
+      {
+        commands: [
+          {
+            mode: "edit",
+            prompt: "第一张换白底",
+            target: { sessionId: "sess_1", type: "existing" }
+          },
+          {
+            mode: "edit",
+            prompt: "第二张换白底",
+            target: { sessionId: "sess_2", type: "existing" }
+          }
+        ],
+        tool: "run_batch_generation"
+      },
+      runtime
+    );
+
+    expect(result).toEqual({ affectedSessionIds: ["sess_1", "sess_2"], ok: true, summary: "已完成 2 个生成任务。" });
+    expect(registrySnapshots).toEqual([
+      {
+        activeSessionIds: ["sess_1", "sess_2"],
+        batchTaskId: "batch_1",
+        projectDirectory: "/project",
+        retryCounts: {}
+      },
+      {
+        activeSessionIds: ["sess_2"],
+        batchTaskId: "batch_1",
+        projectDirectory: "/project",
+        retryCounts: {}
+      }
+    ]);
+    expect(generatedRequests.map((request) => request.signal?.aborted)).toEqual([false, false]);
+    expect(registry.has("batch_1")).toBe(false);
+  });
+
+  test("aborts batch item controllers from the parent operation signal and cleans the registry", async () => {
+    let snapshot = createSnapshot();
+    const parentController = new AbortController();
+    const registry = new EsseBatchTaskRegistry();
+    const runtime = createRuntime(snapshot, (nextSnapshot) => {
+      snapshot = nextSnapshot;
+    });
+    const executor = createEsseImagePreflightExecutor({
+      batchTaskRegistry: registry,
+      generateImage: async (request) => {
+        parentController.abort();
+        expect(request.signal?.aborted).toBe(true);
+        throw new Error("aborted");
+      },
+      makeBatchTaskId: () => "batch_1",
+      projectDirectory: "/project",
+      signal: parentController.signal
+    });
+
+    await expect(executor(
+      {
+        commands: [
+          {
+            mode: "edit",
+            prompt: "换白底",
+            target: { sessionId: "sess_1", type: "existing" }
+          }
+        ],
+        tool: "run_batch_generation"
+      },
+      runtime
+    )).rejects.toThrow("aborted");
+    expect(registry.has("batch_1")).toBe(false);
+    expect(snapshot.sessions[0].generatedFilePath).toBeUndefined();
   });
 });
 
