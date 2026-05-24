@@ -1,5 +1,11 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { ProjectMutationSink, ProjectMutationSinkRegistry } from "./projectMutationSink";
+
+const originalNodeEnv = process.env.NODE_ENV;
+
+afterEach(() => {
+  process.env.NODE_ENV = originalNodeEnv;
+});
 
 describe("ProjectMutationSink", () => {
   test("serializes mutations and broadcasts successful states", async () => {
@@ -64,5 +70,38 @@ describe("ProjectMutationSinkRegistry", () => {
 
     expect(again).toBe(first);
     expect(other).not.toBe(first);
+  });
+
+  test("throws in development when the same key is reused with different options", () => {
+    process.env.NODE_ENV = "development";
+    const registry = new ProjectMutationSinkRegistry<{ value: number }>();
+    const firstOptions = {
+      applyTransaction: async (mutator: (current: { value: number }) => { value: number }) => mutator({ value: 0 })
+    };
+    const secondOptions = {
+      applyTransaction: async (mutator: (current: { value: number }) => { value: number }) => mutator({ value: 1 })
+    };
+
+    registry.getOrCreate("project-a", firstOptions);
+
+    expect(() => registry.getOrCreate("project-a", secondOptions)).toThrow(
+      "ProjectMutationSinkRegistry options changed for key: project-a"
+    );
+  });
+
+  test("keeps production getOrCreate compatible when options differ", () => {
+    process.env.NODE_ENV = "production";
+    const registry = new ProjectMutationSinkRegistry<{ value: number }>();
+    const firstOptions = {
+      applyTransaction: async (mutator: (current: { value: number }) => { value: number }) => mutator({ value: 0 })
+    };
+    const secondOptions = {
+      applyTransaction: async (mutator: (current: { value: number }) => { value: number }) => mutator({ value: 1 })
+    };
+
+    const first = registry.getOrCreate("project-a", firstOptions);
+    const again = registry.getOrCreate("project-a", secondOptions);
+
+    expect(again).toBe(first);
   });
 });

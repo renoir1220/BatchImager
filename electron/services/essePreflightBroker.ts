@@ -3,6 +3,7 @@ import type { EssePreflightPayload, EssePreflightRequest, EssePreflightResponse 
 import type { EssePreflightDecision } from "./esseWorkspaceTools";
 
 interface PendingPreflight {
+  cleanup?: () => void;
   reject: (error: Error) => void;
   resolve: (decision: EssePreflightDecision) => void;
   timeout: NodeJS.Timeout;
@@ -41,11 +42,11 @@ export class EssePreflightBroker {
       };
 
       this.pending.set(requestId, {
-        reject,
-        resolve: (decision) => {
+        cleanup: () => {
           options.signal?.removeEventListener("abort", abort);
-          resolve(decision);
         },
+        reject,
+        resolve,
         timeout
       });
       options.signal?.addEventListener("abort", abort, { once: true });
@@ -69,6 +70,7 @@ export class EssePreflightBroker {
 
     this.pending.delete(requestId);
     (this.options.clearTimeoutFn ?? clearTimeout)(pending.timeout);
+    pending.cleanup?.();
     pending.reject(error);
     return true;
   }
@@ -81,6 +83,7 @@ export class EssePreflightBroker {
 
     this.pending.delete(requestId);
     (this.options.clearTimeoutFn ?? clearTimeout)(pending.timeout);
+    pending.cleanup?.();
     pending.resolve(decision);
     return true;
   }

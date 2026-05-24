@@ -49,6 +49,18 @@ describe("EssePreflightBroker", () => {
     await expect(pending).rejects.toThrow("Operation aborted");
     expect(broker.respond({ decision: "execute", requestId: "request-1" })).toBe(false);
   });
+
+  test("removes the abort listener when a pending preflight is rejected", async () => {
+    const controller = new AbortController();
+    const removeEventListener = vi.spyOn(controller.signal, "removeEventListener");
+    const broker = new EssePreflightBroker({ makeId: () => "request-1" });
+    const pending = broker.request({ send: vi.fn() }, createPayload(), { signal: controller.signal });
+
+    expect(broker.reject("request-1", new Error("manual reject"))).toBe(true);
+
+    await expect(pending).rejects.toThrow("manual reject");
+    expect(removeEventListener).toHaveBeenCalledWith("abort", expect.any(Function));
+  });
 });
 
 function createPayload(): EssePreflightPayload {
