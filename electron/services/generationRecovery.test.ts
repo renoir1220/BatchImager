@@ -123,6 +123,48 @@ describe("generationRecovery", () => {
 
     await expect(recoverInterruptedGenerationJobs(project.project.directory)).resolves.toEqual({ completed: 0, failed: 0 });
   });
+
+  test("marks queued or generating sessions without an active job as failed", async () => {
+    const project = await makeProject();
+    const sourcePath = path.join(project.project.directory, "images", "original", "img-1-flower.png");
+    await saveProjectSnapshot(project.project.directory, {
+      selectedSessionId: "img-1",
+      sessions: [
+        {
+          chatMessages: [],
+          chatStatus: "idle",
+          fileName: "flower.png",
+          filePath: sourcePath,
+          id: "img-1",
+          status: "generating"
+        },
+        {
+          chatMessages: [],
+          chatStatus: "idle",
+          fileName: "queued.png",
+          filePath: path.join(project.project.directory, "images", "original", "img-2-queued.png"),
+          id: "img-2",
+          status: "queued"
+        }
+      ]
+    });
+
+    const recovered = await recoverInterruptedGenerationJobs(project.project.directory);
+
+    expect(recovered).toEqual({ completed: 0, failed: 2 });
+    await expect(openProject(project.project.directory)).resolves.toMatchObject({
+      sessions: [
+        {
+          errorMessage: "上次生成任务已中断。请重试。",
+          status: "failed"
+        },
+        {
+          errorMessage: "上次生成任务已中断。请重试。",
+          status: "failed"
+        }
+      ]
+    });
+  });
 });
 
 async function makeProject(): Promise<Awaited<ReturnType<typeof createProject>>> {

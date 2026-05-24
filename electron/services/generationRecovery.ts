@@ -188,6 +188,8 @@ export async function recoverInterruptedGenerationJobs(
       }
     }
 
+    failed += failOrphanedGeneratingSessions(db, "上次生成任务已中断。请重试。");
+
     return { completed, failed };
   } finally {
     db.close();
@@ -289,6 +291,24 @@ function failInterruptedJob(db: DatabaseSync, sessionId: string, errorMessage: s
           updated_at = ?
       where session_id = ?`
   ).run(errorMessage, new Date().toISOString(), sessionId);
+}
+
+function failOrphanedGeneratingSessions(db: DatabaseSync, errorMessage: string): number {
+  const rows = db
+    .prepare(
+      `select id from image_sessions
+        where status in ('queued', 'generating')
+          and id not in (
+            select session_id from generation_jobs where stage in ('requesting', 'remote-received')
+          )`
+    )
+    .all() as Array<{ id: string }>;
+
+  for (const row of rows) {
+    failInterruptedJob(db, row.id, errorMessage);
+  }
+
+  return rows.length;
 }
 
 function parseOptionalArray(value: string | null): string[] {
