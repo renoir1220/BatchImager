@@ -31,6 +31,16 @@ const MAX_MEMORY_COUNT = 100;
 const MAX_MEMORY_CONTENT_LENGTH = 200;
 const MEMORY_SIMILARITY_THRESHOLD = 0.85;
 const MAX_PROMPT_CHARS = 2000;
+const MEMORY_PROMPT_HEADER = "==== 全局记忆（用户跨项目偏好，必须遵守）====";
+const MEMORY_PROMPT_TRUNCATION_HINT = "- 更多记忆请用 list_remembered_preferences 查看。";
+const MEMORY_PROMPT_RULES_LINES = [
+  "记忆管理规则：",
+  "- 在做决策时优先遵守上述记忆中的偏好和约束",
+  "- 用户说“记住 xxx”时调 remember_user_preference，调完后 reply 里告诉用户记住了什么",
+  "- 用户说“别记 xxx”或“忘了 xxx”时先 list_remembered_preferences 找到对应 id，再 forget_user_preference，并在 reply 里告诉用户删了什么",
+  "- 如果 remember 返回 similarity conflict，先告诉用户现有条目，问用户是否要替换",
+  "- 不要把项目专属内容写进全局记忆；项目上下文已经在 sessions 和聊天历史里"
+];
 
 export function createEsseMemoryStore(filePath: string): EsseMemoryStore {
   let queue: Promise<void> = Promise.resolve();
@@ -198,31 +208,29 @@ function renderMemoryForPrompt(entries: EsseMemoryEntry[]): string {
     return "";
   }
 
-  const lines = [
-    "==== 全局记忆（用户跨项目偏好，必须遵守）====",
-    ...MEMORY_CATEGORIES.flatMap((category) => {
-      const categoryEntries = entries.filter((entry) => entry.category === category);
-      return categoryEntries.length ? [`${category}：`, ...categoryEntries.map((entry) => `- ${entry.content}`)] : [];
-    }),
-    "记忆管理规则：",
-    "- 在做决策时优先遵守上述记忆中的偏好和约束",
-    "- 用户说“记住 xxx”时调 remember_user_preference，调完后 reply 里告诉用户记住了什么",
-    "- 用户说“别记 xxx”或“忘了 xxx”时先 list_remembered_preferences 找到对应 id，再 forget_user_preference，并在 reply 里告诉用户删了什么",
-    "- 如果 remember 返回 similarity conflict，先告诉用户现有条目，问用户是否要替换",
-    "- 不要把项目专属内容写进全局记忆；项目上下文已经在 sessions 和聊天历史里"
-  ];
+  const rulesText = MEMORY_PROMPT_RULES_LINES.join("\n");
+  const reservedLength = [MEMORY_PROMPT_HEADER, MEMORY_PROMPT_TRUNCATION_HINT, rulesText].join("\n").length;
+  const entryBudget = Math.max(0, MAX_PROMPT_CHARS - reservedLength - 1);
+  const selectedEntryLines: string[] = [];
 
-  const selected: string[] = [];
-  for (const line of lines) {
-    const candidate = [...selected, line, "- 更多记忆请用 list_remembered_preferences 查看。"].join("\n");
-    if (candidate.length > MAX_PROMPT_CHARS) {
-      selected.push("- 更多记忆请用 list_remembered_preferences 查看。");
-      break;
+  for (const category of MEMORY_CATEGORIES) {
+    const categoryEntries = entries.filter((entry) => entry.category === category);
+    if (!categoryEntries.length) {
+      continue;
     }
-    selected.push(line);
+
+    const candidateLines = [`${category}：`, ...categoryEntries.map((entry) => `- ${entry.content}`)];
+    for (const line of candidateLines) {
+      const candidate = [...selectedEntryLines, line].join("\n");
+      if (candidate.length > entryBudget) {
+        selectedEntryLines.push(MEMORY_PROMPT_TRUNCATION_HINT);
+        return [MEMORY_PROMPT_HEADER, ...selectedEntryLines, rulesText].join("\n");
+      }
+      selectedEntryLines.push(line);
+    }
   }
 
-  return selected.join("\n");
+  return [MEMORY_PROMPT_HEADER, ...selectedEntryLines, rulesText].join("\n");
 }
 
 function findMemoryConflict(entries: EsseMemoryEntry[], content: string): EsseMemoryConflict | undefined {

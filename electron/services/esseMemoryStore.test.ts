@@ -57,6 +57,22 @@ describe("esseMemoryStore", () => {
     await expect(readFile(filePath, "utf8")).resolves.toContain(`- [${entries[0]?.id}] 主要做家居电商主图`);
   });
 
+  test("keeps memory management rules when prompt rendering truncates many entries", async () => {
+    const filePath = await makeMemoryPath();
+    const longEntries = Array.from({ length: 40 }, (_value, index) =>
+      `- [mem_${index.toString(16).padStart(8, "0")}] 第 ${index} 条长期偏好，包含一段较长描述用于占满提示词预算，仍然不能挤掉记忆管理规则`
+    );
+    await writeFile(filePath, ["# Esse 记忆", "", "## 用户偏好", ...longEntries].join("\n"), "utf8");
+    const store = createEsseMemoryStore(filePath);
+
+    const prompt = await store.renderForPrompt();
+
+    expect(prompt).toContain("记忆管理规则：");
+    expect(prompt).toContain("用户说“记住 xxx”时调 remember_user_preference");
+    expect(prompt).toContain("更多记忆请用 list_remembered_preferences 查看");
+    expect(prompt.length).toBeLessThanOrEqual(2000);
+  });
+
   test("detects near-duplicate memories without writing a second entry", async () => {
     const filePath = await makeMemoryPath();
     const store = createEsseMemoryStore(filePath);

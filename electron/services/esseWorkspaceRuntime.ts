@@ -63,7 +63,7 @@ export function createProjectSnapshotWorkspaceRuntime(options: ProjectSnapshotWo
 
   const runtime: EsseWorkspaceToolRuntime = {
     addReferenceImage: async (request) => addReferenceImage(runtime, request, () => currentSnapshot),
-    async applyMutation(mutator) {
+    async applyMutation(mutator, applyOptions) {
       try {
         let committedResult: WorkspaceMutationResult | undefined;
         const committedState = await options.sink.apply((state) => {
@@ -73,7 +73,7 @@ export function createProjectSnapshotWorkspaceRuntime(options: ProjectSnapshotWo
           }
           committedResult = mutation.result;
           return mutation.state;
-        });
+        }, applyOptions);
 
         currentSnapshot = committedState;
         return { result: committedResult!, state: currentSnapshot };
@@ -104,12 +104,13 @@ export function createProjectSnapshotWorkspaceRuntime(options: ProjectSnapshotWo
         }
       : {}),
     getState: () => currentSnapshot,
+    getSinkRevision: () => options.sink.getRevision(),
     ...(options.getTurnReferenceImagePaths ? { getTurnReferenceImagePaths: options.getTurnReferenceImagePaths } : {}),
     ...(options.memoryStore ? { memoryStore: options.memoryStore } : {}),
     ...(options.recordToolCalls
       ? {
           recordToolCall: async (event) => {
-            currentSnapshot = await options.sink.apply((state) => appendToolCallMessage(state, event));
+            currentSnapshot = await options.sink.apply((state) => appendToolCallMessage(state, event), { countRevision: false });
           }
         }
       : {}),

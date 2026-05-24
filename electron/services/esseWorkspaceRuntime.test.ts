@@ -240,6 +240,56 @@ describe("esseWorkspaceRuntime", () => {
     expect(persisted.esseUndoLog?.every((entry) => entry.undone)).toBe(true);
   });
 
+  test("undo warns when another workspace write happened after the reversible action", async () => {
+    let persisted = createSnapshot({
+      sessions: [createSession("sess_1"), createSession("sess_manual")]
+    });
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const runtime = createProjectSnapshotWorkspaceRuntime({ initialSnapshot: persisted, sink });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    await tools.get("rename_session")?.execute("rename", { fileName: "renamed.jpg", sessionId: "sess_1" });
+    expect(persisted.esseUndoLog?.[0]?.sinkRevisionAfter).toBe(1);
+    await sink.apply((state) => ({
+      ...state,
+      sessions: state.sessions.filter((session) => session.id !== "sess_manual")
+    }));
+    expect(sink.getRevision()).toBe(2);
+
+    const undoResult = await tools.get("undo_last_actions")?.execute("undo", {});
+
+    expect(undoResult?.isError).toBeUndefined();
+    expect(undoResult?.content[0]?.text).toContain("⚠️");
+    expect(undoResult?.content[0]?.text).toContain("1 个中间工作区写入");
+    expect(persisted.sessions.map((session) => session.id)).toEqual(["sess_1", "sess_manual"]);
+  });
+
+  test("undo does not warn for consecutive Esse reversible writes", async () => {
+    let persisted = createSnapshot({
+      sessions: [createSession("sess_1"), createSession("sess_2")]
+    });
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const runtime = createProjectSnapshotWorkspaceRuntime({ initialSnapshot: persisted, sink });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    await tools.get("rename_session")?.execute("rename", { fileName: "renamed.jpg", sessionId: "sess_1" });
+    await tools.get("reorder_sessions")?.execute("reorder", { sessionIds: ["sess_2", "sess_1"] });
+    const undoResult = await tools.get("undo_last_actions")?.execute("undo", { count: 2 });
+
+    expect(undoResult?.isError).toBeUndefined();
+    expect(undoResult?.content[0]?.text).not.toContain("⚠️");
+  });
+
   test("undo restores deleted records and deleted sessions", async () => {
     let persisted = createSnapshot({
       sessions: [
@@ -515,9 +565,63 @@ describe("esseWorkspaceRuntime", () => {
     expect(toolsByName(tools).get("delete_session")).toMatchObject({ risk: "destructive", requiresPreflight: false });
     expect(toolsByName(tools).get("generate_image")).toMatchObject({ risk: "safe-write", requiresPreflight: true });
     expect(toolsByName(tools).get("package_generated_images")).toMatchObject({
-      risk: "external-write",
+      risk: "safe-write",
       requiresPreflight: true
     });
+  });
+
+  test("package uses preflight without an external-write permission card while reference add still asks", async () => {
+    const projectDirectory = await mkdtemp(path.join(os.tmpdir(), "batchimager-package-permission-"));
+    const turnReferencePath = path.join(projectDirectory, "style.png");
+    await writeFile(turnReferencePath, "not-a-real-image-but-extension-is-supported");
+    const permissionRequests: EsseWorkspacePermissionRequest[] = [];
+    const preflightPayloads: EssePreflightPayload[] = [];
+    let persisted = createSnapshot({
+      project: {
+        createdAt: "2026-05-24T00:00:00.000Z",
+        directory: projectDirectory,
+        id: "project_1",
+        imageCount: 1,
+        name: "权限评估项目",
+        updatedAt: "2026-05-24T00:00:00.000Z"
+      },
+      sessions: [
+        createSession("sess_1", {
+          generatedFilePaths: ["/project/generated/a.png"]
+        })
+      ]
+    });
+    const sink = new ProjectMutationSink<ProjectSnapshot>({
+      applyTransaction: async (mutator) => {
+        persisted = mutator(persisted);
+        return persisted;
+      }
+    });
+    const runtime = createProjectSnapshotWorkspaceRuntime({
+      executePackagePreflightTool: async () => ({ affectedSessionIds: ["sess_1"], ok: true, summary: "已打包生成图。" }),
+      initialSnapshot: persisted,
+      getTurnReferenceImagePaths: () => [turnReferencePath],
+      requestPermission: async (request) => {
+        if (request.risk !== "safe-write") {
+          permissionRequests.push(request);
+        }
+        return { decision: "allow" };
+      },
+      requestPreflight: async (payload) => {
+        preflightPayloads.push(payload);
+        return { decision: "execute" };
+      },
+      sink
+    });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    await tools.get("package_generated_images")?.execute("package", {});
+    await tools.get("add_reference_image")?.execute("add-reference", { filePath: turnReferencePath });
+
+    expect(preflightPayloads).toHaveLength(1);
+    expect(preflightPayloads[0]?.tool).toBe("package_generated_images");
+    expect(permissionRequests.map((request) => request.toolName)).toEqual(["add_reference_image"]);
+    expect(permissionRequests[0]).toMatchObject({ risk: "external-write" });
   });
 
   test("routes non-read workspace tools through permission before preflight or mutation", async () => {

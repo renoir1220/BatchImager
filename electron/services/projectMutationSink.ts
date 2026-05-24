@@ -4,14 +4,26 @@ export interface ProjectMutationSinkOptions<TState> {
   onBroadcastError?: (error: unknown, state: TState) => void;
 }
 
+export interface ProjectMutationSinkApplyOptions {
+  countRevision?: boolean;
+}
+
 export class ProjectMutationSink<TState> {
   private chain: Promise<unknown> = Promise.resolve();
+  private currentRevision = 0;
 
   constructor(private readonly options: ProjectMutationSinkOptions<TState>) {}
 
-  apply(mutator: (current: TState) => TState): Promise<TState> {
+  getRevision(): number {
+    return this.currentRevision;
+  }
+
+  apply(mutator: (current: TState) => TState, applyOptions: ProjectMutationSinkApplyOptions = {}): Promise<TState> {
     const next = this.chain.then(async () => {
       const state = await this.options.applyTransaction(mutator);
+      if (applyOptions.countRevision !== false) {
+        this.currentRevision += 1;
+      }
       try {
         this.options.broadcast?.(state);
       } catch (error) {

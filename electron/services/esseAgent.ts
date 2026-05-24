@@ -187,7 +187,7 @@ function createEsseWorkspaceRuntimeProxy(registryKey: string): EsseWorkspaceTool
   return {
     addReferenceImage: (request) =>
       current().addReferenceImage?.(request) ?? Promise.resolve({ ok: false, reason: "add_reference_image unavailable" }),
-    applyMutation: (mutator) => current().applyMutation(mutator),
+    applyMutation: (mutator, options) => current().applyMutation(mutator, options),
     createBlankSession: (request) =>
       current().createBlankSession?.(request) ?? Promise.resolve({ ok: false, reason: "add_blank_session unavailable" }),
     deleteUnreferencedFiles: (candidateIds) => current().deleteUnreferencedFiles?.(candidateIds) ?? Promise.resolve([]),
@@ -196,6 +196,7 @@ function createEsseWorkspaceRuntimeProxy(registryKey: string): EsseWorkspaceTool
     executePackagePreflightTool: (request) =>
       current().executePackagePreflightTool?.(request) ?? Promise.resolve({ ok: false, reason: "package execution unavailable" }),
     getState: () => current().getState(),
+    getSinkRevision: () => current().getSinkRevision?.() ?? 0,
     getTurnReferenceImagePaths: () => current().getTurnReferenceImagePaths?.() ?? [],
     getTurnBudget: () => workspaceTurnContextByRegistryKey.get(registryKey)?.budget,
     memoryStore: createEsseMemoryStoreProxy(current),
@@ -436,6 +437,7 @@ function buildWorkspaceToolPromptSections(): string[] {
     "7) 物理删除未引用生成文件必须先 scan_unreferenced_files，再把返回的 candidateId 传给 delete_unreferenced_files；不要传 filePath。",
     "8) 管理项目参考图时必须用 list_reference_images / add_reference_image / remove_reference_image。add_reference_image 只能使用本轮参考图路径列表里的 filePath；用户只是粘贴了图但没有要求登记为项目参考图时，不要自动添加。生成时如需引用项目参考图，先 list_reference_images，再把返回的 id 放进 referenceImageIds。",
     "9) 用户明确说“记住/保存/以后都按这个”这类跨项目长期偏好时，用 remember_user_preference；用户问记住了什么或要求忘记时，用 list_remembered_preferences / forget_user_preference。不要把“这个项目是某客户的”这类项目专属信息写入全局记忆。",
+    "10) undo_last_actions 会把工作区整体回退到那个时刻的状态。如果工具结果带 ⚠️ 警告，必须在 reply 里告诉用户这次撤销可能影响了中间的其他工作区操作。",
     "11) 用户要求把某些生成记录单独拆出来时，先 list_sessions 和 get_session_records，再用 split_session；用户要求复制一份用于对比或试改时，先 list_sessions，再用 duplicate_session。",
     "12) 生成/编辑图片必须用 generate_image 或 run_batch_generation；删除背景、去水印、换白底、改风格都属于图片编辑，不要只口头答应。编辑现有工作区图片时先 list_sessions；用户要全新生成 N 张图（如“生成 4 张鲜花图”）时直接用 run_batch_generation，N 条 target.type='new' command，除非引用了现有图片才先 list_sessions。单张用 generate_image；多张、全部、这批、批量处理同一类任务用 run_batch_generation，一张图一条 command。每条命令必须显式 mode='edit' 或 mode='generate'。只有用户明确要求尺寸、比例、横版、竖版、方图、2K/4K 时才传 size。",
     "13) 打包/导出/放桌面必须用 package_generated_images；需要限定范围时先 list_sessions，只传稳定 sessionId；不要输出或猜测文件路径，也不要用文字替代 preflight。",

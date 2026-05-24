@@ -35,6 +35,7 @@ describe("EsseBatchTaskRegistry", () => {
     const first = new AbortController();
     const second = new AbortController();
 
+    registry.recordRetry("batch_1", "sess_2");
     registry.register({
       batchTaskId: "batch_1",
       items: [
@@ -51,11 +52,13 @@ describe("EsseBatchTaskRegistry", () => {
     expect(first.signal.aborted).toBe(false);
     expect(second.signal.aborted).toBe(true);
     expect(registry.has("batch_1")).toBe(false);
+    expect(registry.getRetryBatchCount()).toBe(0);
   });
 
   test("removes a task after the last active item completes", () => {
     const registry = new EsseBatchTaskRegistry();
 
+    registry.recordRetry("batch_1", "sess_1");
     registry.register({
       batchTaskId: "batch_1",
       items: [
@@ -70,6 +73,39 @@ describe("EsseBatchTaskRegistry", () => {
 
     registry.notifyItemComplete("batch_1", "sess_2");
     expect(registry.has("batch_1")).toBe(false);
+    expect(registry.getRetryBatchCount()).toBe(0);
+  });
+
+  test("does not retain retry count maps across many completed batches", () => {
+    const registry = new EsseBatchTaskRegistry();
+
+    for (let index = 0; index < 100; index += 1) {
+      const batchTaskId = `batch_${index}`;
+      const sessionId = `sess_${index}`;
+      registry.recordRetry(batchTaskId, sessionId);
+      registry.register({
+        batchTaskId,
+        items: [{ controller: new AbortController(), sessionId }],
+        projectDirectory: "/project"
+      });
+      registry.notifyItemComplete(batchTaskId, sessionId);
+    }
+
+    expect(registry.getRetryBatchCount()).toBe(0);
+  });
+
+  test("does not retain retry counts for empty registrations", () => {
+    const registry = new EsseBatchTaskRegistry();
+
+    registry.recordRetry("batch_empty", "sess_1");
+    expect(registry.register({
+      batchTaskId: "batch_empty",
+      items: [],
+      projectDirectory: "/project"
+    })).toEqual({ itemCount: 0, ok: true });
+
+    expect(registry.has("batch_empty")).toBe(false);
+    expect(registry.getRetryBatchCount()).toBe(0);
   });
 
   test("tracks retry counts up to a fixed maximum after active items have completed", () => {

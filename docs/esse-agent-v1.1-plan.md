@@ -275,6 +275,22 @@ export const DEFAULT_ESSE_PERMISSION_POLICY: EssePermissionPolicy = {
 
 policy 来源：v1.1 先用 hardcoded 常量，留个 `localConfig` 字段供后续覆盖。不做用户面 setting UI（v1.2）。
 
+#### 为什么 generate_image / run_batch_generation 是 safe-write
+
+虽然这些工具会调用 image API、消耗 credit，但用户保护由 preflight 承担：preflight 已经展示完整命令列表、目标图片和 API 调用数。若 broker 再把它们标成 destructive，会形成重复确认。
+
+风险类别的实际设计原则：
+
+- broker 拦截"没有其他用户保护的写操作"
+- preflight 已覆盖的工具不再触发 permission 卡片
+
+按这个原则：
+
+- `generate_image` / `run_batch_generation`：有 preflight → `safe-write`，broker 默认 allow
+- `package_generated_images`：有 preflight → `safe-write`，broker 默认 allow
+- `add_reference_image`：无 preflight → `external-write`，broker 默认 ask
+- `delete_session_record` 等数据销毁：无 preflight → `destructive`，broker 默认 ask
+
 #### Broker 实现
 
 新建 `electron/services/essePermissionBroker.ts`，结构对照 `essePreflightBroker.ts`：
@@ -357,7 +373,7 @@ interface EsseWorkspaceToolCallEvent {
 }
 ```
 
-每个写工具在调 sink 时同时构造 inverse mutator（基于"删除前的 state - 删除后的 state"差异）。reducer 已经是纯函数，提取 inverse 模板很容易：
+原计划是每个写工具在调 sink 时同时构造 inverse mutator（基于"删除前的 state - 删除后的 state"差异）。这套 per-tool inverse 设计可行，但 v1.1 实际实现选择了后文的完整 state 快照方案，避免在收尾阶段维护多套逆向 reducer。
 
 - `restore_session_record` → 反向 `restore_session_record(previousRecordIndex)` 或 `restore_original`
 - `delete_session_record` → 反向 `appendRecord(removedPath, atIndex)`
@@ -382,7 +398,7 @@ interface PersistedUndoEntry {
 }
 ```
 
-inverse 不能存函数闭包（要持久化）。改成 descriptor + replay：
+inverse 不能存函数闭包（要持久化）。原计划的 per-tool descriptor 如下；v1.1 实际落地的 `SerializableUndoDescriptor` 仅保留 `restore-workspace` 快照描述符：
 
 ```ts
 type SerializableUndoDescriptor =
@@ -397,6 +413,20 @@ type SerializableUndoDescriptor =
 ```
 
 `applyUndoDescriptor(state, descriptor)` 是新的纯函数，把 descriptor 翻译成 state mutation。
+
+#### 实现选择：完整 state 快照而非 per-tool inverse
+
+v1.1 实际实现采用简化方案：每条 undo entry 保存调用前的完整 workspace state（sessions + selectedSessionId + referenceImages + projectImageCount），undo 时直接替换为这个快照。
+
+取舍说明：
+
+- ✅ 实现简单，所有 reducer 自动支持 undo，不用维护多种 per-tool 逆操作
+- ⚠️ 存储膨胀：大项目里单条 entry 可能达到数百 KB，50 条上限可能让项目 SQLite 增长到数十 MB
+- ⚠️ undo 会回退中间发生的其他工作区写入（手动 UI 操作、非可逆 Esse 写入等）
+
+防御：ProjectMutationSink 维护 revision。Undo entry 记录写入后的 `sinkRevisionAfter`；undo 时如果检测到目标 undo entry 与当前 revision 之间存在额外工作区写入，会在工具结果里透传 `⚠️` 警告，让模型和用户知道这次撤销可能影响中间操作。该警告不阻断 undo。
+
+如果未来生产观察到存储或语义问题，再考虑改成 per-tool inverse 或 diff-only 方案。
 
 #### Undo 工具
 
@@ -1289,7 +1319,7 @@ LLM eval（新增场景）：
 
 - **broker 切 ask 让 Esse 体验变碎**。v1 的"流畅多步执行"印象会被打破，特别是模型连续调多个 destructive 工具时用户要点多次。缓解：(1) `targetKey` 让同 session 同操作本 turn 只问一次；(2) "本次会话允许"选项让用户在了解 Esse 意图后批量授权；(3) safe-write 默认仍 allow，常见操作（restore / rename / reorder）不打断。
 - **Undo 不能恢复物理操作**。generate_image / package / delete_unreferenced 不可逆，用户预期可能不一致。对策：undo 工具 description 明确写出哪些不可逆；undo 返回结果里报告"跳过 N 个不可逆操作"。
-- **Undo 日志膨胀项目快照**。50 条上限够覆盖单次会话，但每条 inverseDescriptor 可能含完整 session 快照（merge 还原），约 1-5KB/条。50 条上限下最多 250KB，可接受；继续增长需要单独表存储而不是塞 project_state JSON。
+- **Undo 日志膨胀项目快照**。v1.1 实际采用完整 workspace state 快照作为 inverseDescriptor。小项目可接受，但 100 张图项目里单条 entry 可能达到数百 KB，50 条上限可能让 SQLite 增长到数十 MB。当前通过 50 条 FIFO 控制上限，并用 sink revision 提示中间写入风险；如果生产中存储或语义成本过高，v1.2 再切换到 per-tool inverse 或 diff-only。
 - **Preflight modify 让模型"以为"自己提交了 prompt A，实际执行 B**。日志和后续 chat 必须明确显示"用户修改后执行：prompt 改为 B"；模型在下一轮 turn 看到的 reply 也应该反映修改。否则模型可能基于错误前提继续推理。
 - **add_reference_image 的"turn-内路径"约束依赖 SendEsseMessageRequest.referenceImagePaths 的完整性**。如果该字段在 IPC 传输中被裁剪或某些 case 漏传，工具会拒绝合法操作。需要在 IPC 边界加 schema 校验，并在工具失败时给出明确 hint。
 - **全新生成 session 的 filePath 语义改变会影响现有代码 assumption**。许多地方（getCurrentImagePath、SessionPanel 缩略图渲染、`generation:generate-image` IPC handler 的 imagePath 传参）默认 filePath 是"原图"语义。改成"全新生成 session 的 filePath = 第一张生成图"后，所有读 filePath 的位置都要 audit 是否仍正确——多数应该自然正确（filePath 是有效图片路径就行），但 mode="edit" 走 imageSessionAgent 直接生成时，如果用户对全新生成 session 触发 edit，imagePath 会传第一张生成图，这是对的；要重点测 `getCurrentImagePath` 的所有 caller。

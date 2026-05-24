@@ -788,6 +788,7 @@ function parseUndoLog(value: string | null): PersistedUndoEntry[] | undefined {
       typeof item.id === "string" &&
       typeof item.summary === "string" &&
       typeof item.toolName === "string" &&
+      (item.sinkRevisionAfter === undefined || typeof item.sinkRevisionAfter === "number") &&
       (item.undone === undefined || typeof item.undone === "boolean") &&
       isRestoreWorkspaceUndoDescriptor(item.inverseDescriptor)
   );

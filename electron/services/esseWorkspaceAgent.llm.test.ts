@@ -221,6 +221,43 @@ function createRealLlmWorkspaceEvalScenarios(): RealLlmWorkspaceEvalScenario[] {
       })
     },
     {
+      assert: (result) => {
+        expect(result.trace).toContain("undo_last_actions");
+        const undoCall = result.toolCalls.find((call) => call.toolName === "undo_last_actions");
+        expect(undoCall?.text).toContain("⚠️");
+        if (!/可能影响|中间|其他|回退/.test(result.reply)) {
+          throw new Error(`undo warning was not reflected in reply; reply=${result.reply}; calls=${JSON.stringify(result.toolCalls)}`);
+        }
+        expect(result.persisted.sessions[0]?.fileName).toBe("sess_1.jpg");
+      },
+      name: "reports undo interleaving warnings",
+      prepare: async () => ({
+        input: {
+          initialSnapshot: createSnapshot({
+            esseUndoLog: [
+              {
+                affectedSessionIds: ["sess_1"],
+                createdAt: "2026-05-24T00:00:00.000Z",
+                id: "undo_llm_warning_1",
+                inverseDescriptor: {
+                  kind: "restore-workspace",
+                  projectImageCount: 1,
+                  selectedSessionId: "sess_1",
+                  sessions: [createSession("sess_1")]
+                },
+                sinkRevisionAfter: 0,
+                summary: "已重命名为 hero.jpg。",
+                toolName: "rename_session"
+              }
+            ],
+            sessions: [createSession("sess_1", { fileName: "hero.jpg" })]
+          }),
+          seedRevisionCount: 1,
+          userTask: "撤销刚才那步"
+        }
+      })
+    },
+    {
       assert: async (result, prepared) => {
         expect(result.trace).toContain("scan_unreferenced_files");
         expect(result.trace).toContain("delete_unreferenced_files");
@@ -246,6 +283,7 @@ function createRealLlmWorkspaceEvalScenarios(): RealLlmWorkspaceEvalScenario[] {
 
 interface RealLlmWorkspaceEvalInput {
   initialSnapshot: ProjectSnapshot;
+  seedRevisionCount?: number;
   userTask: string;
 }
 
@@ -272,6 +310,9 @@ async function runRealLlmWorkspaceEval(input: RealLlmWorkspaceEvalInput): Promis
       return persisted;
     }
   });
+  for (let index = 0; index < (input.seedRevisionCount ?? 0); index += 1) {
+    await sink.apply((state) => state);
+  }
   const workspaceToolRuntime = createProjectSnapshotWorkspaceRuntime({
     executeImagePreflightTool: async (request) => {
       imageExecutionCount += request.commands.length;

@@ -242,6 +242,7 @@ export interface PersistedUndoEntry {
   createdAt: string;
   id: string;
   inverseDescriptor: SerializableUndoDescriptor;
+  sinkRevisionAfter?: number;
   summary: string;
   toolName: string;
   undone?: boolean;

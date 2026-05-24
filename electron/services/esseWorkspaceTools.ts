@@ -16,7 +16,10 @@ import type { DeleteUnreferencedFileResult, UnreferencedFileCandidate } from "./
 export type EsseWorkspaceState = ProjectSnapshot;
 
 export interface EsseWorkspaceToolRuntime {
-  applyMutation: (mutator: (state: EsseWorkspaceState) => { result: WorkspaceMutationResult; state: EsseWorkspaceState }) => Promise<{
+  applyMutation: (
+    mutator: (state: EsseWorkspaceState) => { result: WorkspaceMutationResult; state: EsseWorkspaceState },
+    options?: { countRevision?: boolean }
+  ) => Promise<{
     result: WorkspaceMutationResult;
     state: EsseWorkspaceState;
   }>;
@@ -26,6 +29,7 @@ export interface EsseWorkspaceToolRuntime {
   executeImagePreflightTool?: (request: EsseImagePreflightExecutionRequest) => Promise<WorkspaceMutationResult>;
   executePackagePreflightTool?: (request: EssePackagePreflightExecutionRequest) => Promise<WorkspaceMutationResult>;
   getState: () => EsseWorkspaceState;
+  getSinkRevision?: () => number;
   getTurnReferenceImagePaths?: () => string[];
   getTurnBudget?: () => EsseTurnBudget | undefined;
   memoryStore?: EsseMemoryStore;
@@ -446,7 +450,10 @@ function createUndoLastActionsTool(runtime: EsseWorkspaceToolRuntime): BatchImag
       }
 
       const count = Math.min(10, Math.max(1, readInteger(params.count) || 1));
-      const mutation = await runtime.applyMutation((state) => undoLastActions(state, count));
+      const mutation = await runtime.applyMutation(
+        (state) => undoLastActions(state, count, runtime.getSinkRevision?.()),
+        { countRevision: false }
+      );
       if (!mutation.result.ok) {
         return toolError(mutation.result.reason, mutation.result.detail, mutation.result.suggestedNext);
       }
@@ -551,7 +558,7 @@ function createPackageGeneratedImagesTool(runtime: EsseWorkspaceToolRuntime): Ba
   return {
     name: "package_generated_images",
     label: "打包生成图",
-    risk: "external-write",
+    risk: "safe-write",
     requiresPreflight: true,
     description:
       "Package generated images into a zip file on the desktop. Use this when the user asks to package, export, zip, or put generated images on the desktop; do not just say you will package them. Calling this tool is what creates the preflight confirmation card; never ask for confirmation in plain text instead. Use sessionIds only from list_sessions; omit sessionIds to package all generated images.",
@@ -577,7 +584,7 @@ function createPackageGeneratedImagesTool(runtime: EsseWorkspaceToolRuntime): Ba
         return toolError("preflight unavailable", undefined, "package_generated_images must be executed through an Esse preflight runtime.");
       }
 
-      const permission = await requestWorkspaceToolPermission(runtime, { label: "打包生成图", name: "package_generated_images", requiresPreflight: true, risk: "external-write" }, params);
+      const permission = await requestWorkspaceToolPermission(runtime, { label: "打包生成图", name: "package_generated_images", requiresPreflight: true, risk: "safe-write" }, params);
       if (permission) {
         return permission;
       }
@@ -1080,6 +1087,7 @@ function reversibleMutationTool(options: {
         state: appendUndoEntry(mutation.state, createUndoEntry({
           affectedSessionIds: mutation.result.affectedSessionIds,
           beforeState: state,
+          sinkRevisionAfter: nextSinkRevision(options.runtime),
           summary: mutation.result.summary,
           toolName: options.name
         }))
@@ -1088,7 +1096,11 @@ function reversibleMutationTool(options: {
   });
 }
 
-function undoLastActions(state: EsseWorkspaceState, count: number): { result: WorkspaceMutationResult; state: EsseWorkspaceState } {
+function undoLastActions(
+  state: EsseWorkspaceState,
+  count: number,
+  currentSinkRevision: number | undefined
+): { result: WorkspaceMutationResult; state: EsseWorkspaceState } {
   const entries = [...(state.esseUndoLog ?? [])].reverse().filter((entry) => !entry.undone).slice(0, count);
   if (!entries.length) {
     return fail(state, "nothing to undo", undefined, "There are no reversible workspace actions to undo.");
@@ -1111,10 +1123,11 @@ function undoLastActions(state: EsseWorkspaceState, count: number): { result: Wo
     }
   }
 
+  const revisionWarning = formatUndoRevisionWarning(entries, currentSinkRevision);
   return ok(
     nextState,
     [...affectedSessionIds],
-    `已撤销 ${entries.length} 个操作：${undoneSummaries.join("；")}`
+    `${revisionWarning ?? ""}已撤销 ${entries.length} 个操作：${undoneSummaries.join("；")}`
   );
 }
 
@@ -1128,6 +1141,7 @@ function appendUndoEntry(state: EsseWorkspaceState, entry: PersistedUndoEntry): 
 function createUndoEntry(params: {
   affectedSessionIds: string[];
   beforeState: EsseWorkspaceState;
+  sinkRevisionAfter?: number;
   summary: string;
   toolName: string;
 }): PersistedUndoEntry {
@@ -1136,9 +1150,37 @@ function createUndoEntry(params: {
     createdAt: new Date().toISOString(),
     id: `undo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     inverseDescriptor: createRestoreWorkspaceDescriptor(params.beforeState),
+    ...(params.sinkRevisionAfter !== undefined ? { sinkRevisionAfter: params.sinkRevisionAfter } : {}),
     summary: params.summary,
     toolName: params.toolName
   };
+}
+
+function nextSinkRevision(runtime: EsseWorkspaceToolRuntime): number | undefined {
+  const currentRevision = runtime.getSinkRevision?.();
+  return currentRevision === undefined ? undefined : currentRevision + 1;
+}
+
+function formatUndoRevisionWarning(entries: PersistedUndoEntry[], currentSinkRevision: number | undefined): string | undefined {
+  if (currentSinkRevision === undefined) {
+    return undefined;
+  }
+
+  const chronologicalEntries = [...entries].reverse();
+  const revisions = chronologicalEntries.map((entry) => entry.sinkRevisionAfter);
+  if (revisions.some((revision) => revision === undefined)) {
+    return undefined;
+  }
+
+  const firstRevision = revisions[0]!;
+  const latestRelevantRevision = Math.max(currentSinkRevision, revisions.at(-1)!);
+  const observedRevisionSpan = latestRelevantRevision - firstRevision;
+  const expectedRevisionSpan = revisions.length - 1;
+  const extraRevisionCount = Math.max(0, observedRevisionSpan - expectedRevisionSpan);
+
+  return extraRevisionCount > 0
+    ? `⚠️ 撤销期间检测到 ${extraRevisionCount} 个中间工作区写入可能也被回退。`
+    : undefined;
 }
 
 function createRestoreWorkspaceDescriptor(state: EsseWorkspaceState): SerializableUndoDescriptor {

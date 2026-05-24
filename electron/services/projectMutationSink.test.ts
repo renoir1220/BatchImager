@@ -51,9 +51,28 @@ describe("ProjectMutationSink", () => {
         throw new Error("boom");
       })
     ).rejects.toThrow("boom");
+    expect(sink.getRevision()).toBe(0);
     await expect(sink.apply((current) => ({ value: current.value + 1 }))).resolves.toEqual({ value: 1 });
 
     expect(broadcasts).toEqual([1]);
+    expect(sink.getRevision()).toBe(1);
+  });
+
+  test("increments revisions for committed mutations unless explicitly skipped", async () => {
+    let state = { value: 0 };
+    const sink = new ProjectMutationSink<typeof state>({
+      applyTransaction: async (mutator) => {
+        state = mutator(state);
+        return state;
+      }
+    });
+
+    expect(sink.getRevision()).toBe(0);
+    await sink.apply((current) => ({ value: current.value + 1 }));
+    expect(sink.getRevision()).toBe(1);
+    await sink.apply((current) => ({ value: current.value + 1 }), { countRevision: false });
+    expect(sink.getRevision()).toBe(1);
+    expect(state).toEqual({ value: 2 });
   });
 
   test("commits mutations and reports telemetry when broadcast fails", async () => {

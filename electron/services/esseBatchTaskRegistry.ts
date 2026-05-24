@@ -27,6 +27,10 @@ export class EsseBatchTaskRegistry {
   private readonly tasksById = new Map<string, RegisteredBatchTask>();
   private readonly retryCountsByBatchId = new Map<string, Map<string, number>>();
 
+  getRetryBatchCount(): number {
+    return this.retryCountsByBatchId.size;
+  }
+
   register(request: RegisterEsseBatchTaskRequest): { itemCount: number; ok: true } | { ok: false; reason: string } {
     if (this.tasksById.has(request.batchTaskId)) {
       return { ok: false, reason: "batch task already registered" };
@@ -52,6 +56,7 @@ export class EsseBatchTaskRegistry {
 
     if (controllersBySessionId.size === 0) {
       this.tasksById.delete(request.batchTaskId);
+      this.retryCountsByBatchId.delete(request.batchTaskId);
     }
 
     return { itemCount: controllersBySessionId.size, ok: true };
@@ -133,6 +138,7 @@ export class EsseBatchTaskRegistry {
       canceledCount += 1;
     }
     this.tasksById.delete(batchTaskId);
+    this.retryCountsByBatchId.delete(batchTaskId);
     return { canceledCount };
   }
 
@@ -179,6 +185,7 @@ export class EsseBatchTaskRegistry {
   private deleteTaskIfDrained(task: RegisteredBatchTask): void {
     if (task.controllersBySessionId.size === 0) {
       this.tasksById.delete(task.batchTaskId);
+      this.retryCountsByBatchId.delete(task.batchTaskId);
     }
   }
 }
