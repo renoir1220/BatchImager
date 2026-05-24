@@ -1,4 +1,4 @@
-import type { EsseBatchTaskCardData, EssePreflightRequest } from "../../electron/ipcTypes";
+import type { EsseBatchTaskCardData, EssePermissionRequest, EssePreflightRequest } from "../../electron/ipcTypes";
 
 export type ProjectManagerMessageRole = "user" | "assistant" | "error" | "context";
 export type BatchPlanStatus = "draft" | "running" | "completed" | "failed" | "paused";
@@ -11,6 +11,8 @@ export interface ProjectManagerMessage {
   batchTask?: EsseBatchTaskCardData;
   contextType?: "esse-batch-task" | "esse-tool-call";
   planId?: string;
+  permissionDecision?: "pending" | "allow-once" | "allow-session" | "deny";
+  permissionRequest?: EssePermissionRequest;
   preflightDecision?: "pending" | "execute" | "cancel";
   preflightRequest?: EssePreflightRequest;
   referenceFilePaths?: string[];

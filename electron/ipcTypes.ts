@@ -196,6 +196,8 @@ export interface ProjectManagerMessage {
   batchTask?: EsseBatchTaskCardData;
   contextType?: "esse-batch-task" | "esse-tool-call";
   planId?: string;
+  permissionDecision?: "pending" | "allow-once" | "allow-session" | "deny";
+  permissionRequest?: EssePermissionRequest;
   referenceFilePaths?: string[];
 }
 
@@ -304,6 +306,34 @@ export interface EssePreflightResponse {
 }
 
 export interface EssePreflightResponseAck {
+  accepted: boolean;
+}
+
+export type EssePermissionRisk = "read" | "safe-write" | "destructive" | "external-write";
+
+export interface EssePermissionPayload {
+  affectedDisplayLabel?: string;
+  affectedFileName?: string;
+  label: string;
+  params: Record<string, unknown>;
+  requiresPreflight: boolean;
+  risk: EssePermissionRisk;
+  targetKey?: string;
+  toolName: string;
+}
+
+export interface EssePermissionRequest {
+  payload: EssePermissionPayload;
+  requestId: string;
+}
+
+export interface EssePermissionResponse {
+  decision: "allow-once" | "allow-session" | "deny";
+  reason?: string;
+  requestId: string;
+}
+
+export interface EssePermissionResponseAck {
   accepted: boolean;
 }
 

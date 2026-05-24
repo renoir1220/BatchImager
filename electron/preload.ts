@@ -30,6 +30,9 @@ import type {
   EssePreflightResponseAck,
   SendChatMessageRequest,
   SendChatMessageResponse,
+  EssePermissionRequest,
+  EssePermissionResponse,
+  EssePermissionResponseAck,
   SendEsseMessageRequest,
   SendEsseMessageResponse
 } from "./ipcTypes";
@@ -71,6 +74,8 @@ const api = {
     ipcRenderer.invoke("esse:send-message", request),
   respondEssePreflight: async (response: EssePreflightResponse): Promise<EssePreflightResponseAck> =>
     ipcRenderer.invoke("esse:preflight-response", response),
+  respondEssePermission: async (response: EssePermissionResponse): Promise<EssePermissionResponseAck> =>
+    ipcRenderer.invoke("esse:permission-response", response),
   getLogs: async (): Promise<AppLogEntry[]> => ipcRenderer.invoke("logs:list"),
   setRunningWorkCount: (count: number): void => {
     ipcRenderer.send("app:set-running-work-count", count);
@@ -105,6 +110,14 @@ const api = {
 
     return () => {
       ipcRenderer.removeListener("esse:preflight-request", handler);
+    };
+  },
+  subscribeEssePermissionRequests: (listener: (request: EssePermissionRequest) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, request: EssePermissionRequest) => listener(request);
+    ipcRenderer.on("esse:permission-request", handler);
+
+    return () => {
+      ipcRenderer.removeListener("esse:permission-request", handler);
     };
   },
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),

@@ -60,6 +60,8 @@ import type {
   AppLogEntry,
   ChatReferenceImage,
   EsseAgentHistoryMessage,
+  EssePermissionRequest,
+  EssePermissionResponse,
   EssePreflightRequest,
   EssePreflightResponse,
   ProjectListEntry,
@@ -227,6 +229,23 @@ export function App() {
         projectManagerStateRef.current,
         request,
         createMessageId("esse-preflight")
+      );
+      projectManagerStateRef.current = nextState;
+      setProjectManagerState(nextState);
+      persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.batchImager?.subscribeEssePermissionRequests?.((request) => {
+      const nextState = appendEssePermissionMessage(
+        projectManagerStateRef.current,
+        request,
+        createMessageId("esse-permission")
       );
       projectManagerStateRef.current = nextState;
       setProjectManagerState(nextState);
@@ -717,6 +736,18 @@ export function App() {
     }
 
     const nextState = markEssePreflightDecision(projectManagerStateRef.current, requestId, decision);
+    projectManagerStateRef.current = nextState;
+    setProjectManagerState(nextState);
+    persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
+  }
+
+  async function handleResolveEssePermission(requestId: string, decision: EssePermissionResponse["decision"]): Promise<void> {
+    const result = await window.batchImager?.respondEssePermission({ requestId, decision });
+    if (!result?.accepted) {
+      return;
+    }
+
+    const nextState = markEssePermissionDecision(projectManagerStateRef.current, requestId, decision);
     projectManagerStateRef.current = nextState;
     setProjectManagerState(nextState);
     persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
@@ -1417,6 +1448,9 @@ export function App() {
               onOpenImagePreview={handleOpenChatImagePreview}
               onRetryBatchTaskFailed={handleRetryEsseBatchTaskFailed}
               onRetryBatchTaskItem={handleRetryEsseBatchTaskItem}
+              onResolvePermission={(requestId, decision) => {
+                void handleResolveEssePermission(requestId, decision);
+              }}
               onResolvePreflight={(requestId, decision) => {
                 void handleResolveEssePreflight(requestId, decision);
               }}
@@ -1621,6 +1655,29 @@ function appendEssePreflightMessage(
   };
 }
 
+function appendEssePermissionMessage(
+  state: ProjectManagerState,
+  request: EssePermissionRequest,
+  messageId: string
+): ProjectManagerState {
+  return {
+    ...state,
+    conversation: {
+      ...state.conversation,
+      messages: [
+        ...state.conversation.messages,
+        {
+          content: "",
+          id: messageId,
+          permissionDecision: "pending",
+          permissionRequest: request,
+          role: "context"
+        }
+      ]
+    }
+  };
+}
+
 function markEssePreflightDecision(
   state: ProjectManagerState,
   requestId: string,
@@ -1635,6 +1692,27 @@ function markEssePreflightDecision(
           ? {
               ...message,
               preflightDecision: decision
+            }
+          : message
+      )
+    }
+  };
+}
+
+function markEssePermissionDecision(
+  state: ProjectManagerState,
+  requestId: string,
+  decision: Exclude<ProjectManagerMessage["permissionDecision"], "pending" | undefined>
+): ProjectManagerState {
+  return {
+    ...state,
+    conversation: {
+      ...state.conversation,
+      messages: state.conversation.messages.map((message) =>
+        message.permissionRequest?.requestId === requestId
+          ? {
+              ...message,
+              permissionDecision: decision
             }
           : message
       )

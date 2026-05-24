@@ -1,4 +1,11 @@
-import type { BatchPlanReferenceImage, EssePreflightCommand, EssePreflightPayload, PersistedImageSession, ProjectSnapshot } from "../ipcTypes";
+import type {
+  BatchPlanReferenceImage,
+  EssePermissionPayload,
+  EssePreflightCommand,
+  EssePreflightPayload,
+  PersistedImageSession,
+  ProjectSnapshot
+} from "../ipcTypes";
 import type { AgentToolResult, BatchImagerAgentTool, BatchImagerAgentToolRisk } from "./batchImagerAgentTools";
 import type { EsseMemoryCategory, EsseMemoryStore } from "./esseMemoryStore";
 import type { ProjectImageMetadataResult } from "./projectImageMetadata";
@@ -42,13 +49,7 @@ export type EssePreflightDecision =
   | { decision: "execute" }
   | { decision: "cancel"; detail?: string };
 
-export interface EsseWorkspacePermissionRequest {
-  label: string;
-  params: Record<string, unknown>;
-  requiresPreflight: boolean;
-  risk: BatchImagerAgentToolRisk;
-  toolName: string;
-}
+export type EsseWorkspacePermissionRequest = EssePermissionPayload;
 
 export type EsseWorkspacePermissionDecision =
   | { decision: "allow" }
@@ -909,6 +910,7 @@ async function requestWorkspaceToolPermission(
   }
 
   const decision = await runtime.requestPermission({
+    ...derivePermissionContext(tool.name, params),
     label: tool.label,
     params,
     requiresPreflight: tool.requiresPreflight,
@@ -920,6 +922,22 @@ async function requestWorkspaceToolPermission(
   }
 
   return toolError("permission denied", decision.reason, decision.suggestedNext);
+}
+
+function derivePermissionContext(toolName: string, params: Record<string, unknown>): Pick<EsseWorkspacePermissionRequest, "affectedDisplayLabel" | "affectedFileName" | "targetKey"> {
+  const target = params.target && typeof params.target === "object" ? params.target as Record<string, unknown> : undefined;
+  const sessionId = readString(params.sessionId) || readString(target?.sessionId);
+  const displayLabel = readString(params.displayLabel);
+  const fileName = readString(params.fileName) || readString(target?.fileName);
+  const referenceImageId = readString(params.referenceImageId);
+  const memoryId = readString(params.memoryId);
+  const targetKey = sessionId || referenceImageId || memoryId || fileName || "global";
+
+  return {
+    ...(displayLabel ? { affectedDisplayLabel: displayLabel } : {}),
+    ...(fileName ? { affectedFileName: fileName } : {}),
+    targetKey: `${toolName}:${targetKey}`
+  };
 }
 
 function mutationTool(options: {

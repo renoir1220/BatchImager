@@ -40,6 +40,7 @@ function renderProjectPlanPanelWithState(
       onRetryBatchTaskItem={vi.fn()}
       onExecutePlan={vi.fn()}
       onOpenImagePreview={vi.fn()}
+      onResolvePermission={vi.fn()}
       onResolvePreflight={vi.fn()}
       onSendMessage={onSendMessage}
       onStopWork={vi.fn()}
@@ -187,6 +188,7 @@ describe("ProjectPlanPanel plan cards", () => {
           onRetryBatchTaskItem={vi.fn()}
           onExecutePlan={vi.fn()}
           onOpenImagePreview={vi.fn()}
+          onResolvePermission={vi.fn()}
           onResolvePreflight={vi.fn()}
           onSendMessage={vi.fn()}
           onStopWork={vi.fn()}
@@ -208,6 +210,7 @@ describe("ProjectPlanPanel plan cards", () => {
           onRetryBatchTaskItem={vi.fn()}
           onExecutePlan={vi.fn()}
           onOpenImagePreview={vi.fn()}
+          onResolvePermission={vi.fn()}
           onResolvePreflight={vi.fn()}
           onSendMessage={vi.fn()}
           onStopWork={vi.fn()}
@@ -272,6 +275,7 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
         onRetryBatchTaskItem={vi.fn()}
         onExecutePlan={vi.fn()}
         onOpenImagePreview={vi.fn()}
+        onResolvePermission={vi.fn()}
         onResolvePreflight={onResolvePreflight}
         onSendMessage={vi.fn()}
         onStopWork={vi.fn()}
@@ -331,6 +335,7 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
         onRetryBatchTaskItem={vi.fn()}
         onExecutePlan={vi.fn()}
         onOpenImagePreview={vi.fn()}
+        onResolvePermission={vi.fn()}
         onResolvePreflight={vi.fn()}
         onSendMessage={vi.fn()}
         onStopWork={vi.fn()}
@@ -414,6 +419,7 @@ describe("ProjectPlanPanel Esse batch task cards", () => {
         onRetryBatchTaskItem={onRetryBatchTaskItem}
         onExecutePlan={vi.fn()}
         onOpenImagePreview={vi.fn()}
+        onResolvePermission={vi.fn()}
         onResolvePreflight={vi.fn()}
         onSendMessage={vi.fn()}
         onStopWork={vi.fn()}
@@ -435,6 +441,65 @@ describe("ProjectPlanPanel Esse batch task cards", () => {
     expect(onCancelBatchTaskAll).toHaveBeenCalledWith("batch_1");
     expect(onRetryBatchTaskItem).toHaveBeenCalledWith("batch_1", "sess_2");
     expect(onRetryBatchTaskFailed).toHaveBeenCalledWith("batch_1");
+  });
+});
+
+describe("ProjectPlanPanel Esse permission cards", () => {
+  test("shows a permission card and emits allow or deny decisions", async () => {
+    const user = userEvent.setup();
+    const onResolvePermission = vi.fn();
+
+    renderWithBatchImager(
+      <ProjectPlanPanel
+        activityLogs={[]}
+        imageSessions={[]}
+        isCreatingPlan={false}
+        projectManagerState={{
+          conversation: {
+            id: "conversation-1",
+            messages: [
+              {
+                content: "",
+                id: "permission-1",
+                permissionDecision: "pending",
+                permissionRequest: {
+                  payload: {
+                    affectedDisplayLabel: "img-2",
+                    affectedFileName: "hero.jpg",
+                    label: "删除图片",
+                    params: { sessionId: "sess_2" },
+                    requiresPreflight: false,
+                    risk: "destructive",
+                    targetKey: "delete_session:sess_2",
+                    toolName: "delete_session"
+                  },
+                  requestId: "permission-request-1"
+                },
+                role: "context"
+              }
+            ]
+          },
+          plans: []
+        }}
+        onCopyImage={vi.fn()}
+        onCancelBatchTaskAll={vi.fn()}
+        onCancelBatchTaskItem={vi.fn()}
+        onRetryBatchTaskFailed={vi.fn()}
+        onRetryBatchTaskItem={vi.fn()}
+        onExecutePlan={vi.fn()}
+        onOpenImagePreview={vi.fn()}
+        onResolvePermission={onResolvePermission}
+        onResolvePreflight={vi.fn()}
+        onSendMessage={vi.fn()}
+        onStopWork={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("region", { name: "Esse 操作确认" })).toBeInTheDocument();
+    expect(screen.getByText("高风险操作")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "本次会话允许" }));
+    expect(onResolvePermission).toHaveBeenCalledWith("permission-request-1", "allow-session");
   });
 });
 

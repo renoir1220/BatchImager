@@ -18,6 +18,7 @@ import type {
   SaveProjectSnapshotRequest,
   SendChatMessageRequest,
   SendEsseMessageRequest,
+  EssePermissionResponse,
   EssePreflightResponse,
   ProjectSnapshot
 } from "./ipcTypes";
@@ -28,6 +29,8 @@ import { EsseBatchTaskRegistry } from "./services/esseBatchTaskRegistry";
 import { createEsseImagePreflightExecutor, retryEsseBatchTaskItem } from "./services/esseImagePreflightExecutor";
 import { createEsseMemoryStore } from "./services/esseMemoryStore";
 import { createEssePackagePreflightExecutor } from "./services/essePackagePreflightExecutor";
+import { EssePermissionBroker } from "./services/essePermissionBroker";
+import { DEFAULT_ESSE_PERMISSION_POLICY } from "./services/essePermissionPolicy";
 import { createProjectSnapshotWorkspaceRuntime } from "./services/esseWorkspaceRuntime";
 import { EssePreflightBroker } from "./services/essePreflightBroker";
 import { createImageGenerationExecutor, type ImageGenerationExecutor } from "./services/imageGenerationService";
@@ -68,6 +71,7 @@ let inFlightGenerationCount = 0;
 let rendererRunningWorkCount = 0;
 const projectSnapshotSinkRegistry = new ProjectMutationSinkRegistry<ProjectSnapshot>();
 const esseBatchTaskRegistry = new EsseBatchTaskRegistry();
+const essePermissionBroker = new EssePermissionBroker();
 const essePreflightBroker = new EssePreflightBroker();
 
 function createWindow(): void {
@@ -418,6 +422,7 @@ function registerIpc(appLogger: AppLogger): void {
 
     try {
       const result = await withCancelableOperation(request.operationId, async (signal) => {
+        const permissionAllowList = new Set<string>();
         const workspaceToolRuntime = createProjectSnapshotWorkspaceRuntime({
           executeImagePreflightTool: createEsseImagePreflightExecutor({
             batchTaskRegistry: esseBatchTaskRegistry,
@@ -431,6 +436,12 @@ function registerIpc(appLogger: AppLogger): void {
           initialSnapshot: await openProject(projectDirectory),
           memoryStore: createEsseMemoryStore(path.join(app.getPath("userData"), "esse-memory.md")),
           recordToolCalls: true,
+          requestPermission: (payload) =>
+            essePermissionBroker.request(event.sender, payload, {
+              policy: DEFAULT_ESSE_PERMISSION_POLICY,
+              sessionAllowList: permissionAllowList,
+              signal
+            }),
           requestPreflight: (payload) => essePreflightBroker.request(event.sender, payload, { signal }),
           getTurnReferenceImagePaths: () => request.referenceImagePaths ?? [],
           sink: getProjectSnapshotSink(projectDirectory)
@@ -459,6 +470,11 @@ function registerIpc(appLogger: AppLogger): void {
   ipcMain.handle("esse:preflight-response", (_event, response: EssePreflightResponse) => {
     assertEssePreflightResponse(response);
     return { accepted: essePreflightBroker.respond(response) };
+  });
+
+  ipcMain.handle("esse:permission-response", (_event, response: EssePermissionResponse) => {
+    assertEssePermissionResponse(response);
+    return { accepted: essePermissionBroker.respond(response) };
   });
 
   ipcMain.handle("esse:batch-task-cancel-item", (_event, request: CancelEsseBatchTaskItemRequest) => {
@@ -933,6 +949,19 @@ function assertEssePreflightResponse(response: EssePreflightResponse): void {
     (response.detail !== undefined && typeof response.detail !== "string")
   ) {
     throw new Error("Invalid Esse preflight response");
+  }
+}
+
+function assertEssePermissionResponse(response: EssePermissionResponse): void {
+  if (
+    typeof response !== "object" ||
+    response === null ||
+    typeof response.requestId !== "string" ||
+    !response.requestId.trim() ||
+    (response.decision !== "allow-once" && response.decision !== "allow-session" && response.decision !== "deny") ||
+    (response.reason !== undefined && typeof response.reason !== "string")
+  ) {
+    throw new Error("Invalid Esse permission response");
   }
 }
 

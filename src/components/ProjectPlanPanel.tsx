@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import type { DragEvent, FormEvent, KeyboardEvent, MouseEvent } from "react";
-import type { AppLogEntry, EssePreflightRequest, EssePreflightResponse } from "../../electron/ipcTypes";
+import type { AppLogEntry, EssePermissionRequest, EssePermissionResponse, EssePreflightRequest, EssePreflightResponse } from "../../electron/ipcTypes";
 import type {
   BatchPlan,
   BatchPlanReferenceImage,
@@ -43,6 +43,7 @@ interface ProjectPlanPanelProps {
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
   onRetryBatchTaskFailed: (batchTaskId: string) => void;
   onRetryBatchTaskItem: (batchTaskId: string, sessionId: string) => void;
+  onResolvePermission: (requestId: string, decision: EssePermissionResponse["decision"]) => void;
   onResolvePreflight: (requestId: string, decision: EssePreflightResponse["decision"]) => void;
   onSendMessage: (content: string, outputSize?: string, referenceImagePaths?: string[], persona?: EssePersona) => void;
   onStopWork: () => void;
@@ -66,6 +67,7 @@ export function ProjectPlanPanel({
   onOpenImagePreview,
   onRetryBatchTaskFailed,
   onRetryBatchTaskItem,
+  onResolvePermission,
   onResolvePreflight,
   onSendMessage,
   onStopWork
@@ -237,6 +239,13 @@ export function ProjectPlanPanel({
                       onResolve={onResolvePreflight}
                     />
                   ) : null}
+                  {message.permissionRequest ? (
+                    <EssePermissionCard
+                      decision={message.permissionDecision ?? "pending"}
+                      request={message.permissionRequest}
+                      onResolve={onResolvePermission}
+                    />
+                  ) : null}
                   {message.batchTask ? (
                     <EsseBatchTaskCard
                       batchTask={message.batchTask}
@@ -392,6 +401,53 @@ function EssePreflightCard({
   );
 }
 
+function EssePermissionCard({
+  decision,
+  onResolve,
+  request
+}: {
+  decision: NonNullable<ProjectManagerState["conversation"]["messages"][number]["permissionDecision"]>;
+  onResolve: (requestId: string, decision: EssePermissionResponse["decision"]) => void;
+  request: EssePermissionRequest;
+}) {
+  const isPending = decision === "pending";
+  const affected = [request.payload.affectedDisplayLabel, request.payload.affectedFileName].filter(Boolean).join(" / ");
+
+  return (
+    <section className={`esse-preflight-card esse-permission-card ${decision}`} aria-label="Esse 操作确认">
+      <header>
+        <strong>Esse 请求确认</strong>
+        <span>{formatPermissionRiskLabel(request.payload.risk)}</span>
+      </header>
+      <div className="esse-preflight-command-list">
+        <div className="esse-preflight-command">
+          <span>{request.payload.label}</span>
+          <strong>{request.payload.toolName}</strong>
+          {affected ? <em>{affected}</em> : null}
+          <p>{formatPermissionDescription(request)}</p>
+        </div>
+      </div>
+      <footer>
+        {isPending ? (
+          <>
+            <button className="toolbar-button primary" type="button" onClick={() => onResolve(request.requestId, "allow-once")}>
+              允许一次
+            </button>
+            <button className="toolbar-button" type="button" onClick={() => onResolve(request.requestId, "allow-session")}>
+              本次会话允许
+            </button>
+            <button className="toolbar-button" type="button" onClick={() => onResolve(request.requestId, "deny")}>
+              拒绝
+            </button>
+          </>
+        ) : (
+          <span>{formatPermissionDecision(decision)}</span>
+        )}
+      </footer>
+    </section>
+  );
+}
+
 function EsseBatchTaskCard({
   batchTask,
   imageSessions,
@@ -510,6 +566,38 @@ function formatPreflightCommandMode(mode: EssePreflightRequest["payload"]["comma
     return "编辑";
   }
   return "文件";
+}
+
+function formatPermissionRiskLabel(risk: EssePermissionRequest["payload"]["risk"]): string {
+  if (risk === "destructive") {
+    return "高风险操作";
+  }
+  if (risk === "external-write") {
+    return "外部写入";
+  }
+  return "工作区修改";
+}
+
+function formatPermissionDescription(request: EssePermissionRequest): string {
+  const params = summarizePermissionParams(request.payload.params);
+  return params ? `Esse 想执行这个操作：${params}` : "Esse 想执行这个操作。";
+}
+
+function summarizePermissionParams(params: Record<string, unknown>): string {
+  const visibleEntries = Object.entries(params)
+    .filter(([_key, value]) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
+    .slice(0, 3);
+  return visibleEntries.map(([key, value]) => `${key}=${String(value)}`).join("，");
+}
+
+function formatPermissionDecision(decision: Exclude<ProjectManagerState["conversation"]["messages"][number]["permissionDecision"], "pending" | undefined>): string {
+  if (decision === "allow-once") {
+    return "已允许一次";
+  }
+  if (decision === "allow-session") {
+    return "本次会话已允许";
+  }
+  return "已拒绝";
 }
 
 function PlanCard({
