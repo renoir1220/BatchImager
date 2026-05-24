@@ -1,4 +1,5 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, net, protocol } from "electron";
+import { existsSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -62,6 +63,8 @@ import { ensureProjectThumbnails } from "./services/projectThumbnails";
 import { normalizePathForComparison } from "./services/pathUtils";
 
 const IMAGE_PROTOCOL = "batchimager-file";
+const APP_ICON_LIGHT_PATH = path.join(app.getAppPath(), "src", "assets", "app-icons", "batchimager-esse-os26-light.png");
+const APP_ICON_DARK_PATH = path.join(app.getAppPath(), "src", "assets", "app-icons", "batchimager-esse-os26-dark.png");
 const MACOS_TRAFFIC_LIGHT_POSITION = { x: 16, y: 16 };
 const activeOperationControllers = new Map<string, AbortController>();
 let logger: AppLogger | undefined;
@@ -73,14 +76,20 @@ const projectSnapshotSinkRegistry = new ProjectMutationSinkRegistry<ProjectSnaps
 const esseBatchTaskRegistry = new EsseBatchTaskRegistry();
 const essePermissionBroker = new EssePermissionBroker();
 const essePreflightBroker = new EssePreflightBroker();
+let appIconThemeListenerRegistered = false;
 
 function createWindow(): void {
+  const appIcon = loadAppIconForTheme();
+  applyAppIcon(appIcon);
+  registerAppIconThemeListener();
+
   const mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1024,
     minHeight: 700,
     title: "BatchImager",
+    icon: appIcon,
     backgroundColor: "#f4f4f2",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     trafficLightPosition: process.platform === "darwin" ? MACOS_TRAFFIC_LIGHT_POSITION : undefined,
@@ -113,6 +122,43 @@ function createWindow(): void {
 
     confirmedRunningWorkClose = true;
   });
+}
+
+function loadAppIconForTheme(): Electron.NativeImage | undefined {
+  const preferredPath = nativeTheme.shouldUseDarkColors ? APP_ICON_DARK_PATH : APP_ICON_LIGHT_PATH;
+  const fallbackPath = nativeTheme.shouldUseDarkColors ? APP_ICON_LIGHT_PATH : APP_ICON_DARK_PATH;
+  const iconPath = existsSync(preferredPath) ? preferredPath : existsSync(fallbackPath) ? fallbackPath : undefined;
+  if (!iconPath) {
+    return undefined;
+  }
+
+  const image = nativeImage.createFromPath(iconPath);
+  return image.isEmpty() ? undefined : image;
+}
+
+function applyAppIcon(icon: Electron.NativeImage | undefined): void {
+  if (!icon) {
+    return;
+  }
+
+  if (process.platform === "darwin") {
+    app.dock?.setIcon(icon);
+  }
+
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.setIcon(icon);
+  }
+}
+
+function registerAppIconThemeListener(): void {
+  if (appIconThemeListenerRegistered) {
+    return;
+  }
+
+  nativeTheme.on("updated", () => {
+    applyAppIcon(loadAppIconForTheme());
+  });
+  appIconThemeListenerRegistered = true;
 }
 
 function registerImageProtocol(): void {
