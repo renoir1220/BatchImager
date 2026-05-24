@@ -123,7 +123,7 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
     {
       assert: ({ preflightPayloads, prompt, trace }) => {
         expect(trace).toEqual(["list_sessions", "run_batch_generation"]);
-        expect(prompt).toContain("多张、全部、这批、批量处理同一类任务时先 list_sessions，再用 run_batch_generation");
+        expect(prompt).toContain("编辑现有工作区图片时先 list_sessions");
         expect(prompt).not.toContain("/project/images");
         expect(preflightPayloads).toEqual([
           {
@@ -172,6 +172,75 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
         }
       ],
       userTask: "把左侧第一张和第二张批量处理成手持展示姿势，保留主体"
+    },
+    {
+      assert: ({ preflightPayloads, prompt, result, trace }) => {
+        expect(result.reply).toBe("已提交 4 个鲜花图生成任务，会在后台完成。");
+        expect(trace).toEqual(["run_batch_generation"]);
+        expect(prompt).toContain("全新生成 N 张图");
+        expect(prompt).toContain("不要说“已经生成完成”");
+        expect(preflightPayloads).toEqual([
+          {
+            commands: [
+              {
+                mode: "generate",
+                prompt: "鲜花电商主图，明亮自然光，干净背景，构图精致",
+                target: { fileName: "flower-1.png", type: "new" }
+              },
+              {
+                mode: "generate",
+                prompt: "鲜花电商主图，浅色场景，柔和阴影，适合商品展示",
+                target: { fileName: "flower-2.png", type: "new" }
+              },
+              {
+                mode: "generate",
+                prompt: "鲜花电商主图，白底高质感，花束居中，细节清晰",
+                target: { fileName: "flower-3.png", type: "new" }
+              },
+              {
+                mode: "generate",
+                prompt: "鲜花电商主图，春日氛围，清爽明亮，适合首页展示",
+                target: { fileName: "flower-4.png", type: "new" }
+              }
+            ],
+            estimatedApiCalls: 4,
+            tool: "run_batch_generation"
+          }
+        ]);
+      },
+      id: "new-image-batch-generation-skips-list-sessions",
+      initialSnapshot: createSnapshot({ sessions: [] }),
+      reply: "已提交 4 个鲜花图生成任务，会在后台完成。",
+      script: [
+        {
+          tool: "run_batch_generation",
+          params: {
+            commands: [
+              {
+                mode: "generate",
+                prompt: "鲜花电商主图，明亮自然光，干净背景，构图精致",
+                target: { fileName: "flower-1.png", type: "new" }
+              },
+              {
+                mode: "generate",
+                prompt: "鲜花电商主图，浅色场景，柔和阴影，适合商品展示",
+                target: { fileName: "flower-2.png", type: "new" }
+              },
+              {
+                mode: "generate",
+                prompt: "鲜花电商主图，白底高质感，花束居中，细节清晰",
+                target: { fileName: "flower-3.png", type: "new" }
+              },
+              {
+                mode: "generate",
+                prompt: "鲜花电商主图，春日氛围，清爽明亮，适合首页展示",
+                target: { fileName: "flower-4.png", type: "new" }
+              }
+            ]
+          }
+        }
+      ],
+      userTask: "生成 4 张鲜花图"
     },
     {
       assert: ({ preflightPayloads, result, trace }) => {
