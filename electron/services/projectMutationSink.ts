@@ -1,6 +1,7 @@
 export interface ProjectMutationSinkOptions<TState> {
   applyTransaction: (mutator: (current: TState) => TState) => Promise<TState>;
   broadcast?: (state: TState) => void;
+  onBroadcastError?: (error: unknown, state: TState) => void;
 }
 
 export class ProjectMutationSink<TState> {
@@ -11,7 +12,11 @@ export class ProjectMutationSink<TState> {
   apply(mutator: (current: TState) => TState): Promise<TState> {
     const next = this.chain.then(async () => {
       const state = await this.options.applyTransaction(mutator);
-      this.options.broadcast?.(state);
+      try {
+        this.options.broadcast?.(state);
+      } catch (error) {
+        this.options.onBroadcastError?.(error, state);
+      }
       return state;
     });
 

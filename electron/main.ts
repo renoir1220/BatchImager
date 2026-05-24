@@ -464,7 +464,17 @@ function getProjectSnapshotSink(projectDirectory: string) {
           sessions: next.sessions
         };
       }),
-    broadcast: broadcastProjectSnapshot
+    broadcast: broadcastProjectSnapshot,
+    onBroadcastError: (error, snapshot) => {
+      logger?.warn("Project snapshot broadcast failed", {
+        context: "project-mutation-sink",
+        data: {
+          imageCount: snapshot.sessions.length,
+          projectDirectory: snapshot.project.directory
+        },
+        error
+      });
+    }
   });
 }
 
