@@ -20,6 +20,7 @@ import type {
 import { createAppLogger, type AppLogger } from "./services/appLogger";
 import { createBlankGenerationSeed } from "./services/blankGenerationSeed";
 import { runEsseAgentTurn } from "./services/esseAgent";
+import { EsseBatchTaskRegistry } from "./services/esseBatchTaskRegistry";
 import { createEsseImagePreflightExecutor } from "./services/esseImagePreflightExecutor";
 import { createEssePackagePreflightExecutor } from "./services/essePackagePreflightExecutor";
 import { createProjectSnapshotWorkspaceRuntime } from "./services/esseWorkspaceRuntime";
@@ -61,6 +62,7 @@ let confirmedRunningWorkClose = false;
 let inFlightGenerationCount = 0;
 let rendererRunningWorkCount = 0;
 const projectSnapshotSinkRegistry = new ProjectMutationSinkRegistry<ProjectSnapshot>();
+const esseBatchTaskRegistry = new EsseBatchTaskRegistry();
 const essePreflightBroker = new EssePreflightBroker();
 
 function createWindow(): void {
@@ -412,8 +414,10 @@ function registerIpc(appLogger: AppLogger): void {
       const result = await withCancelableOperation(request.operationId, async (signal) => {
         const workspaceToolRuntime = createProjectSnapshotWorkspaceRuntime({
           executeImagePreflightTool: createEsseImagePreflightExecutor({
+            batchTaskRegistry: esseBatchTaskRegistry,
             generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger, signal),
-            projectDirectory
+            projectDirectory,
+            signal
           }),
           executePackagePreflightTool: createEssePackagePreflightExecutor({
             desktopDirectory: app.getPath("desktop"),
@@ -519,7 +523,8 @@ function createProjectImageGenerationExecutor(
   const generateImage = createImageGenerationExecutor(config, { logger: appLogger });
 
   return async (request) => {
-    throwIfAborted(signal);
+    const linkedSignal = linkAbortSignals(signal, request.signal);
+    throwIfAborted(linkedSignal.signal);
     inFlightGenerationCount += 1;
     await startGenerationJob(projectDirectory, {
       imagePath: request.mode === "edit" ? request.imagePath : undefined,
@@ -531,13 +536,13 @@ function createProjectImageGenerationExecutor(
     });
 
     try {
-      throwIfAborted(signal);
+      throwIfAborted(linkedSignal.signal);
       const result = await generateImage({
         ...request,
-        ...(signal ? { signal } : {}),
+        ...(linkedSignal.signal ? { signal: linkedSignal.signal } : {}),
         onRemoteImage: (event) => markGenerationJobRemoteReceived(projectDirectory, event)
       });
-      throwIfAborted(signal);
+      throwIfAborted(linkedSignal.signal);
       await markGenerationJobCompleted(projectDirectory, {
         outputPath: result.outputPath,
         sessionId: request.sessionId
@@ -550,8 +555,42 @@ function createProjectImageGenerationExecutor(
       });
       throw error;
     } finally {
+      linkedSignal.cleanup();
       inFlightGenerationCount = Math.max(0, inFlightGenerationCount - 1);
     }
+  };
+}
+
+function linkAbortSignals(
+  ...signals: Array<AbortSignal | undefined>
+): { cleanup: () => void; signal?: AbortSignal } {
+  const activeSignals = signals.filter((current): current is AbortSignal => Boolean(current));
+  if (activeSignals.length <= 1) {
+    return { cleanup: () => undefined, signal: activeSignals[0] };
+  }
+
+  const controller = new AbortController();
+  const abortLinkedSignal = () => {
+    controller.abort();
+  };
+  const cleanupCallbacks: Array<() => void> = [];
+  for (const activeSignal of activeSignals) {
+    if (activeSignal.aborted) {
+      abortLinkedSignal();
+      continue;
+    }
+
+    activeSignal.addEventListener("abort", abortLinkedSignal, { once: true });
+    cleanupCallbacks.push(() => activeSignal.removeEventListener("abort", abortLinkedSignal));
+  }
+
+  return {
+    cleanup: () => {
+      for (const cleanup of cleanupCallbacks) {
+        cleanup();
+      }
+    },
+    signal: controller.signal
   };
 }
 
