@@ -122,7 +122,7 @@ describe("project plan UI wiring", () => {
   });
 
   test("Esse final replies update the latest project-manager snapshot after workspace tool broadcasts", () => {
-    const app = readProjectFile("src/App.tsx");
+    const app = readProjectFile("src/App.tsx").replace(/\r\n/g, "\n");
     const sendEsseBody = app.match(
       /async function handleSendEsseMessage\([\s\S]*?\): Promise<void> \{(?<body>[\s\S]*?)\n  \}/
     )?.groups?.body ?? "";

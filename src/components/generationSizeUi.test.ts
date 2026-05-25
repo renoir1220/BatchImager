@@ -40,7 +40,7 @@ describe("generation size UI wiring", () => {
   });
 
   test("selected ratio icon uses a refined tinted active state", () => {
-    const styles = readProjectFile("src/styles.css");
+    const styles = readProjectFile("src/styles.css").replace(/\r\n/g, "\n");
     const selectedRule = styles.match(/\.generation-ratio-option\.selected\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? "";
     const hoverRule = styles.match(/\.generation-size-current:hover:not\(:disabled\)\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? "";
     const selectedIconRule = styles.match(/\.generation-ratio-option\.selected \.ratio-icon::before,\n\.generation-size-current \.ratio-icon::before\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? "";

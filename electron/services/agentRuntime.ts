@@ -26,6 +26,7 @@ export interface CodingAgentSession {
       messages?: unknown[];
     };
   };
+  getLastAssistantError?: () => string | undefined;
   getLastAssistantText?: () => string | undefined;
   messages?: unknown[];
   abort?: () => Promise<void>;
@@ -57,6 +58,7 @@ export interface CreateAgentRuntimeOptions extends BuildAgentSessionDescriptorOp
 export interface AgentRuntime {
   descriptor: AgentSessionDescriptor;
   dispose: () => void;
+  getLastAssistantError?: () => string | undefined;
   getLastAssistantText: () => string | undefined;
   abort: () => Promise<void>;
   prompt: (text: string) => Promise<void>;
@@ -222,6 +224,7 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       subscriptions.clear();
       session.dispose?.();
     },
+    getLastAssistantError: () => getLastAssistantError(session),
     getLastAssistantText: () => getLastAssistantText(session),
     abort: async () => {
       await session.abort?.();
@@ -239,6 +242,16 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   };
 }
 
+function getLastAssistantError(session: CodingAgentSession): string | undefined {
+  const directError = session.getLastAssistantError?.();
+
+  if (isNonEmptyString(directError)) {
+    return directError;
+  }
+
+  return extractLastAssistantError(session.messages) ?? extractLastAssistantError(session.agent?.state?.messages);
+}
+
 function getLastAssistantText(session: CodingAgentSession): string | undefined {
   const directText = session.getLastAssistantText?.();
 
@@ -247,6 +260,27 @@ function getLastAssistantText(session: CodingAgentSession): string | undefined {
   }
 
   return extractLastAssistantText(session.messages) ?? extractLastAssistantText(session.agent?.state?.messages);
+}
+
+function extractLastAssistantError(messages: unknown[] | undefined): string | undefined {
+  if (!Array.isArray(messages)) {
+    return undefined;
+  }
+
+  for (const message of [...messages].reverse()) {
+    if (!isAssistantMessageRecord(message)) {
+      continue;
+    }
+
+    const stopReason = getStringField(message, "stopReason");
+    const errorMessage = getStringField(message, "errorMessage") ?? extractErrorMessage(message.error);
+
+    if (errorMessage && (stopReason === "error" || !extractContentText(message.content).trim())) {
+      return errorMessage;
+    }
+  }
+
+  return undefined;
 }
 
 function extractLastAssistantText(messages: unknown[] | undefined): string | undefined {
@@ -270,7 +304,11 @@ function extractLastAssistantText(messages: unknown[] | undefined): string | und
 }
 
 function isAssistantMessage(value: unknown): value is { content: unknown; role: "assistant" } {
-  return Boolean(value && typeof value === "object" && "role" in value && value.role === "assistant" && "content" in value);
+  return isAssistantMessageRecord(value) && "content" in value;
+}
+
+function isAssistantMessageRecord(value: unknown): value is Record<string, unknown> & { role: "assistant" } {
+  return Boolean(value && typeof value === "object" && "role" in value && value.role === "assistant");
 }
 
 function extractContentText(value: unknown): string {
@@ -287,6 +325,23 @@ function extractContentText(value: unknown): string {
   }
 
   return "";
+}
+
+function extractErrorMessage(value: unknown): string | undefined {
+  if (isNonEmptyString(value)) {
+    return value;
+  }
+
+  if (value && typeof value === "object" && "message" in value && isNonEmptyString(value.message)) {
+    return value.message;
+  }
+
+  return undefined;
+}
+
+function getStringField(value: Record<string, unknown>, field: string): string | undefined {
+  const fieldValue = value[field];
+  return isNonEmptyString(fieldValue) ? fieldValue : undefined;
 }
 
 function isNonEmptyString(value: unknown): value is string {

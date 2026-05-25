@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   buildAgentSessionDescriptor,
+  createAgentRuntime,
   loadCodingAgentSdk,
   resetAgentRuntimeWarmupForTests,
   type CodingAgentSdk,
@@ -192,5 +193,49 @@ describe("agentRuntime", () => {
     );
 
     expect(runtime.getLastAssistantText()).toBe("{\"reply\":\"我会重新生成。\"}");
+  });
+
+  test("reads the last assistant SDK error when the final assistant message has no text", async () => {
+    const runtime = await createAgentRuntime({
+      llmConfig: {
+        apiKey: "test-key",
+        baseUrl: "https://api.tu-zi.com/coding",
+        model: "gpt-5.5"
+      },
+      model: "gpt-5.5",
+      projectDirectory: "C:\\BatchImagerProjects\\project-1",
+      sdk: {
+        AuthStorage: {
+          create: () => ({})
+        },
+        ModelRegistry: {
+          create: () => {
+            const models = new Map<string, unknown>();
+            return {
+              find: (_provider, modelId) => models.get(modelId),
+              registerProvider: (_providerName, config) => {
+                const providerModels = config.models as Array<{ id: string }>;
+                for (const model of providerModels) {
+                  models.set(model.id, model);
+                }
+              }
+            };
+          }
+        },
+        createAgentSession: async () => ({
+          session: {
+            messages: [
+              { content: [{ text: "你好", type: "text" }], role: "user" },
+              { content: [], errorMessage: "Provider returned no choices", role: "assistant", stopReason: "error" }
+            ],
+            prompt: async () => undefined,
+            subscribe: () => () => undefined
+          }
+        })
+      },
+      sessionId: "esse-agent"
+    });
+
+    expect(runtime.getLastAssistantError?.()).toBe("Provider returned no choices");
   });
 });

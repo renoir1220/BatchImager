@@ -99,6 +99,8 @@ describe("esseAgent", () => {
 
     expect(capturedPrompt).toContain("工作区工具模式");
     expect(capturedPrompt).toContain("禁止用 bash/sqlite 查询 project.sqlite");
+    expect(capturedPrompt).toContain("调用 generate_image、run_batch_generation 或 package_generated_images 会立刻在界面插入确认卡，并挂起当前 turn 等待用户选择执行、修改或取消。");
+    expect(capturedPrompt).toContain("决定调用这些工具后，不要先输出追问、旧方案已取消、请确认后我再执行等自然语言");
     expect(capturedPrompt).not.toMatch(/\bplan\b|imageRequests/);
   });
 
@@ -158,6 +160,26 @@ describe("esseAgent", () => {
     );
 
     expect(result).toEqual({ reply: '{"reply":"旧 JSON 不应该再被解析成对象。","imageRequests":[{"prompt":"x"}]}' });
+  });
+
+  test("surfaces the SDK assistant error when Esse finishes without assistant text", async () => {
+    await expect(
+      runEsseAgentTurn(
+        {
+          messages: [{ role: "user", content: "你好" }],
+          sessions: []
+        },
+        createEsseTestConfig(),
+        "C:/project",
+        {
+          createRuntime: async () =>
+            createFakeEsseRuntime({
+              getLastAssistantError: () => "Provider returned no choices",
+              getLastAssistantText: () => ""
+            })
+        }
+      )
+    ).rejects.toThrow("Esse 模型调用失败：Provider returned no choices");
   });
 
   test("does not call the runtime when the user references a missing attachment", async () => {
@@ -691,6 +713,7 @@ function createTestProjectMetadata(): ProjectSnapshot["project"] {
 
 function createFakeEsseRuntime(
   options: {
+    getLastAssistantError?: () => string | undefined;
     getLastAssistantText?: () => string;
     onPrompt?: (prompt: string) => void | Promise<void>;
     subscribe?: (listener: (event: unknown) => void) => () => void;
@@ -706,6 +729,7 @@ function createFakeEsseRuntime(
       sessionId: "esse-agent"
     },
     dispose: () => undefined,
+    getLastAssistantError: options.getLastAssistantError ?? (() => undefined),
     getLastAssistantText: options.getLastAssistantText ?? (() => "收到。"),
     prompt: async (prompt) => {
       await options.onPrompt?.(prompt);

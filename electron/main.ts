@@ -87,6 +87,7 @@ import { normalizePathForComparison } from "./services/pathUtils";
 
 const IMAGE_PROTOCOL = "batchimager-file";
 const APP_ICON_PATH = path.join(app.getAppPath(), "src", "assets", "app-icons", "batchimager-esse-os26-light.png");
+const APP_ICON_WINDOWS_PATH = path.join(app.getAppPath(), "src", "assets", "app-icons", "batchimager-windows.ico");
 const MACOS_TRAFFIC_LIGHT_POSITION = { x: 16, y: 16 };
 const DEFAULT_WINDOW_MARGIN = 0;
 const activeOperationControllers = new Map<string, AbortController>();
@@ -106,6 +107,9 @@ const essePreflightBroker = new EssePreflightBroker();
 
 app.setName("Esse");
 app.setPath("userData", path.join(app.getPath("appData"), "BatchImager"));
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.batchimager.desktop");
+}
 
 function createWindow(): void {
   const appIcon = loadAppIcon();
@@ -133,7 +137,7 @@ function createWindow(): void {
     mainWindow.maximize();
   }
 
-  const devServerUrl = process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5173";
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:15173";
 
   if (app.isPackaged) {
     void mainWindow.loadFile(path.join(__dirname, "../dist/index.html"));
@@ -240,11 +244,13 @@ function isWindowBoundsVisible(bounds: Electron.Rectangle): boolean {
 }
 
 function loadAppIcon(): Electron.NativeImage | undefined {
-  if (!existsSync(APP_ICON_PATH)) {
+  const iconPath = process.platform === "win32" ? APP_ICON_WINDOWS_PATH : APP_ICON_PATH;
+
+  if (!existsSync(iconPath)) {
     return undefined;
   }
 
-  const image = nativeImage.createFromPath(APP_ICON_PATH);
+  const image = nativeImage.createFromPath(iconPath);
   return image.isEmpty() ? undefined : image;
 }
 

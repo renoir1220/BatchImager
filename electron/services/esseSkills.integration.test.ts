@@ -135,7 +135,8 @@ async function createFixtureProject() {
 }
 
 async function installSkillDependencies(skillDirectory: string): Promise<void> {
-  await execFilePromise("npm", ["install", "--omit=dev", "--ignore-scripts"], { cwd: skillDirectory });
+  const npm = getNpmInvocation(["install", "--omit=dev", "--ignore-scripts"]);
+  await execFilePromise(npm.command, npm.args, { cwd: skillDirectory });
 }
 
 async function runNodeScript(scriptPath: string, args: string[]): Promise<void> {
@@ -155,6 +156,14 @@ function execFilePromise(command: string, args: string[], options: { cwd: string
     child.stdout?.resume();
     child.stderr?.resume();
   });
+}
+
+function getNpmInvocation(args: string[]): { args: string[]; command: string } {
+  if (process.platform !== "win32") {
+    return { args, command: "npm" };
+  }
+
+  return { args: ["/d", "/s", "/c", "npm.cmd", ...args], command: "cmd.exe" };
 }
 
 async function readXlsxRows(skillDirectory: string, xlsxPath: string): Promise<Array<Record<string, unknown>>> {

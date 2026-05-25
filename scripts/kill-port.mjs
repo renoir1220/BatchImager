@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 
-const port = Number(process.argv[2] ?? 5173);
+const port = Number(process.argv[2] ?? 15173);
 
 if (!Number.isInteger(port) || port <= 0 || port > 65535) {
   console.error(`[kdev] Invalid port: ${process.argv[2]}`);

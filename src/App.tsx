@@ -865,7 +865,7 @@ export function App() {
       }
       const errorState = appendProjectManagerError(
         projectManagerStateRef.current,
-        error instanceof Error ? error.message : "Esse 处理失败",
+        getEsseDisplayErrorMessage(error),
         createMessageId("esse-error")
       );
       setProjectManagerState(errorState);
@@ -1890,6 +1890,14 @@ function appendProjectManagerError(state: ProjectManagerState, content: string, 
       ]
     }
   };
+}
+
+function getEsseDisplayErrorMessage(error: unknown): string {
+  if (!(error instanceof Error) || !error.message) {
+    return "Esse 处理失败";
+  }
+
+  return error.message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i, "").trim() || "Esse 处理失败";
 }
 
 function upsertProjectManagerAssistantMessage(

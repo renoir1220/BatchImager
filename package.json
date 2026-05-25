@@ -4,8 +4,8 @@
   "description": "Desktop workspace for batch AI product image generation.",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"tsc -p tsconfig.node.json --watch\" \"wait-on http://127.0.0.1:5173 dist-electron/main.js && electron .\"",
-    "kdev": "node scripts/kill-port.mjs 5173 && npm run dev",
+    "dev": "concurrently -k \"vite --host 127.0.0.1 --port 15173 --strictPort\" \"tsc -p tsconfig.node.json --watch\" \"wait-on http://127.0.0.1:15173 dist-electron/main.js && electron .\"",
+    "kdev": "node scripts/kill-port.mjs 15173 && npm run dev",
     "build": "tsc -p tsconfig.node.json && vite build",
     "eval:esse": "vitest run electron/services/esseWorkspaceAgentEvaluation.test.ts electron/services/esseWorkspaceRuntime.test.ts electron/services/esseImagePreflightExecutor.test.ts electron/services/essePackagePreflightExecutor.test.ts electron/services/essePreflightBroker.test.ts electron/services/projectUnreferencedFiles.test.ts src/domain/projectWorkspaceAgentEvaluation.test.ts",
     "eval:esse:llm": "node scripts/run-esse-llm-eval.mjs",
@@ -64,6 +64,9 @@
         "dmg",
         "zip"
       ]
+    },
+    "win": {
+      "icon": "src/assets/app-icons/batchimager-windows.ico"
     }
   },
   "devDependencies": {

@@ -1026,6 +1026,17 @@ describe("esseWorkspaceRuntime", () => {
     expect(preflightPayloads[0].commands[1]).toMatchObject({ mode: "generate", size: "2048x1152", target: { fileName: "scene.png", type: "new" } });
   });
 
+  test("describes generation preflight tools as UI-blocking confirmation cards before execution", () => {
+    const tools = toolsByName(createEsseWorkspaceTools(createProjectSnapshotWorkspaceRuntime({
+      initialSnapshot: createSnapshot(),
+      sink: createNoopSink()
+    })));
+
+    expect(tools.get("generate_image")?.description).toContain("the UI will show a confirmation card and this turn will wait");
+    expect(tools.get("run_batch_generation")?.description).toContain("the UI will show a confirmation card and this turn will wait");
+    expect(tools.get("package_generated_images")?.description).toContain("the UI will show a confirmation card and this turn will wait");
+  });
+
   test("includes explicit workspace references in image preflight payloads", async () => {
     const preflightPayloads: EssePreflightPayload[] = [];
     const runtime = createProjectSnapshotWorkspaceRuntime({

@@ -53,7 +53,7 @@ export async function installSkillFromGit(options: InstallSkillFromGitOptions): 
 
 function inferSkillDirectoryName(gitUrl: string): string | undefined {
   const withoutQuery = gitUrl.split(/[?#]/)[0] ?? "";
-  const lastSegment = withoutQuery.replace(/\/+$/, "").split("/").pop()?.replace(/\.git$/i, "");
+  const lastSegment = withoutQuery.replace(/[\\/]+$/, "").split(/[\\/]/).pop()?.replace(/\.git$/i, "");
   const cleaned = lastSegment?.trim().replace(/[^a-zA-Z0-9._-]/g, "-").replace(/^-+|-+$/g, "");
   return cleaned || undefined;
 }

@@ -463,6 +463,36 @@ describe("App image preview behavior", () => {
     expect(screen.queryByText("我先拆成两个任务")).not.toBeInTheDocument();
   });
 
+  test("shows a clean Esse error message when Electron wraps the IPC failure", async () => {
+    const user = userEvent.setup();
+    const snapshot = makeProjectSnapshot();
+
+    renderWithBatchImager(<App />, {
+      createProject: vi.fn().mockResolvedValue(makeProjectSnapshot([])),
+      getLogs: vi.fn().mockResolvedValue([]),
+      importImages: vi.fn().mockResolvedValue(snapshot),
+      listProjects: vi.fn().mockResolvedValue([]),
+      saveProjectSnapshot: vi.fn().mockResolvedValue(snapshot),
+      sendEsseMessage: vi.fn().mockRejectedValue(
+        new Error("Error invoking remote method 'esse:send-message': Error: Esse 模型调用失败：Provider returned no choices")
+      ),
+      setRunningWorkCount: vi.fn(),
+      subscribeEssePermissionRequests: vi.fn().mockReturnValue(() => undefined),
+      subscribeEssePreflightRequests: vi.fn().mockReturnValue(() => undefined),
+      subscribeLogs: vi.fn().mockReturnValue(() => undefined),
+      subscribeProjectSnapshotUpdates: vi.fn().mockReturnValue(() => undefined),
+      subscribeProjectThumbnailUpdates: vi.fn().mockReturnValue(() => undefined)
+    });
+
+    await user.click(screen.getAllByRole("button", { name: "导入图片" })[0]);
+    await user.click(screen.getByRole("tab", { name: "Esse" }));
+    await user.type(screen.getByRole("textbox", { name: "Esse 输入" }), "你好");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("Esse 模型调用失败：Provider returned no choices")).toBeInTheDocument();
+    expect(screen.queryByText(/Error invoking remote method/)).not.toBeInTheDocument();
+  });
+
 });
 
 function makeProjectSnapshot(sessions = [makeSession()]): ProjectSnapshot {

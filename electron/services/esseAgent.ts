@@ -174,6 +174,21 @@ export async function runEsseAgentTurn(
 
       const content = runtime.getLastAssistantText()?.trim();
       if (!content) {
+        const assistantError = runtime.getLastAssistantError?.()?.trim();
+        if (assistantError) {
+          const safeAssistantError = sanitizeAssistantError(assistantError);
+          deps.logger?.warn("Esse agent returned assistant error without text", {
+            context,
+            data: {
+              assistantError: safeAssistantError,
+              customToolCount: workspaceTools.length,
+              reusedRuntime: !isFreshRuntime
+            },
+            publicMessage: "Esse 调用模型失败。"
+          });
+          throw new Error(`Esse 模型调用失败：${safeAssistantError}`);
+        }
+
         throw new Error("Esse 未返回有效回复");
       }
       if (content !== streamState.lastContent) {
@@ -467,6 +482,8 @@ function buildWorkspaceToolPromptSections(): string[] {
     "可用读工具：get_project_overview / list_sessions / get_session_records / read_image_metadata / list_reference_images / list_remembered_preferences / scan_unreferenced_files。",
     "可用写工具：restore_session_record / restore_original / rename_session / reorder_sessions / set_session_prompt / add_blank_session / add_reference_image / remove_reference_image / remember_user_preference / forget_user_preference / undo_last_actions / split_session / duplicate_session / delete_session_record / delete_session / merge_sessions / delete_unreferenced_files。",
     "生成与文件工具：generate_image / run_batch_generation / package_generated_images。它们每次都会先弹 preflight 卡片让用户确认；生成类确认后会提交后台生成任务，打包类确认后才写桌面 zip。",
+    "调用 generate_image、run_batch_generation 或 package_generated_images 会立刻在界面插入确认卡，并挂起当前 turn 等待用户选择执行、修改或取消。",
+    "决定调用这些工具后，不要先输出追问、旧方案已取消、请确认后我再执行等自然语言；直接调用工具，让确认卡承担交互。如果确实缺少会导致执行错误的关键信息，就先自然追问且不要调用生成/打包工具。",
     "生成结果永远新增到左侧工作区，不写回原图。generate_image/run_batch_generation 的 target.type 必须用 'new'；基于已有工作区图生成时用 target.sourceSessionId，基于本轮点击/粘贴图片生成时用 referenceImageIds。",
     "preflight 卡片只能由这些工具触发；不要先用文字说“请确认后我就执行”。用户已经要求执行时，直接调用工具，让工具产生确认卡片。",
     "工作流要求：",
@@ -536,6 +553,11 @@ function publishAssistantMessageUpdate(
 
   state.lastContent = content;
   onAssistantMessageUpdate(content);
+}
+
+function sanitizeAssistantError(error: string): string {
+  const redacted = error.replace(/(sk|sess|key)-[A-Za-z0-9_-]{16,}/gi, "$1-[已隐藏]");
+  return redacted.length > 1000 ? `${redacted.slice(0, 1000)}...` : redacted;
 }
 
 function isPiEventType(event: unknown, type: string): boolean {
