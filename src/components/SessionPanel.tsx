@@ -1,4 +1,5 @@
-import { FormEvent, KeyboardEvent, MouseEvent, useMemo, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, MouseEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { DragEvent } from "react";
 import type { AppLogEntry } from "../../electron/ipcTypes";
 import type { ImageSession } from "../types/image";
 import {
@@ -14,6 +15,7 @@ import { MessageActions } from "./MessageActions";
 import { shouldSubmitComposerOnEnter } from "./composerKeyEvents";
 import { useAutoScrollToThreadEnd } from "./useAutoScrollToThreadEnd";
 import { usePastedReferenceImages } from "./usePastedReferenceImages";
+import { hasWorkspaceImageDrag, readWorkspaceImageDragPayload } from "./workspaceImageDrag";
 
 interface SessionPanelProps {
   activityLogs: AppLogEntry[];
@@ -35,7 +37,9 @@ export function SessionPanel({
   const [message, setMessage] = useState("");
   const [selectedSize, setSelectedSize] = useState("");
   const [customSize, setCustomSize] = useState("");
+  const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const pastedReferences = usePastedReferenceImages();
   const canSend = Boolean(
     selectedSession &&
@@ -52,6 +56,9 @@ export function SessionPanel({
     [currentActivityLog?.message, selectedSession]
   );
   useAutoScrollToThreadEnd(threadRef, threadContentSignature);
+  useLayoutEffect(() => {
+    resizeComposerTextarea(composerTextareaRef.current);
+  }, [message]);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
@@ -86,6 +93,58 @@ export function SessionPanel({
     }
   }
 
+  function handleReferenceDragEnter(event: DragEvent<HTMLDivElement>): void {
+    if (!selectedSession || !hasReferenceDragData(event.dataTransfer)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsReferenceDragActive(true);
+  }
+
+  function handleReferenceDragOver(event: DragEvent<HTMLDivElement>): void {
+    if (!selectedSession || !hasReferenceDragData(event.dataTransfer)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleReferenceDragLeave(event: DragEvent<HTMLDivElement>): void {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      return;
+    }
+
+    setIsReferenceDragActive(false);
+  }
+
+  function handleReferenceDrop(event: DragEvent<HTMLDivElement>): void {
+    if (!selectedSession) {
+      return;
+    }
+
+    const payload = readWorkspaceImageDragPayload(event.dataTransfer);
+
+    if (payload) {
+      event.preventDefault();
+      setIsReferenceDragActive(false);
+      pastedReferences.addReferenceImagePath(payload.imagePath, payload.fileName);
+      return;
+    }
+
+    const files = Array.from(event.dataTransfer.files);
+
+    if (files.length === 0) {
+      return;
+    }
+
+    event.preventDefault();
+    setIsReferenceDragActive(false);
+    void pastedReferences.addReferenceFiles(files);
+  }
+
   function handleImageContextMenu(event: MouseEvent, imagePath: string): void {
     event.preventDefault();
     onCopyImage(imagePath);
@@ -108,7 +167,14 @@ export function SessionPanel({
   }
 
   return (
-    <div className="session-tab-panel" aria-label="当前图片会话">
+    <div
+      className={`session-tab-panel ${isReferenceDragActive ? "reference-drag-active" : ""}`}
+      aria-label="当前图片会话"
+      onDragEnter={handleReferenceDragEnter}
+      onDragLeave={handleReferenceDragLeave}
+      onDragOver={handleReferenceDragOver}
+      onDrop={handleReferenceDrop}
+    >
       {selectedSession ? (
         <>
           <div className="session-thread" ref={threadRef}>
@@ -181,7 +247,7 @@ export function SessionPanel({
                       </div>
                     ) : null}
                   </div>
-                  <MessageActions content={chatMessage.content} />
+                  <MessageActions content={chatMessage.content} referenceFilePaths={chatMessage.referenceFilePaths} />
                 </div>
               ))
             )}
@@ -200,16 +266,20 @@ export function SessionPanel({
                 onRemove={pastedReferences.removeReferenceImage}
               />
               <textarea
+                ref={composerTextareaRef}
                 value={message}
                 placeholder="和模型说明你想怎样处理这张图... 可直接粘贴参考图"
-                onChange={(event) => setMessage(event.target.value)}
+                onChange={(event) => {
+                  setMessage(event.target.value);
+                  resizeComposerTextarea(event.currentTarget);
+                }}
                 onKeyDown={handleComposerKeyDown}
               />
               <div className="composer-toolbar">
                 <GenerationSizeControl
                   customValue={customSize}
                   idPrefix="session"
-                  label="生成比例："
+                  label="生成尺寸："
                   selectedValue={selectedSize}
                   onCustomValueChange={setCustomSize}
                   onSelectedValueChange={setSelectedSize}
@@ -233,8 +303,25 @@ function getFileName(filePath: string): string {
   return filePath.slice(lastSlash + 1);
 }
 
+function resizeComposerTextarea(textarea: HTMLTextAreaElement | null): void {
+  if (!textarea) {
+    return;
+  }
+
+  const computedStyle = window.getComputedStyle(textarea);
+  const maxHeight = Number.parseFloat(computedStyle.maxHeight);
+  textarea.style.height = "auto";
+  const nextHeight = Number.isFinite(maxHeight) ? Math.min(textarea.scrollHeight, maxHeight) : textarea.scrollHeight;
+  textarea.style.height = `${nextHeight}px`;
+  textarea.style.overflowY = textarea.scrollHeight > nextHeight ? "auto" : "hidden";
+}
+
 function isDeletedGeneratedImageMessage(message: ImageSession["chatMessages"][number]): boolean {
   return message.contextType === "generated-image" && !message.generatedFilePath;
+}
+
+function hasReferenceDragData(dataTransfer: DataTransfer): boolean {
+  return hasWorkspaceImageDrag(dataTransfer) || Array.from(dataTransfer.types).includes("Files");
 }
 
 function getSessionThreadContentSignature(session: ImageSession | null, activityMessage?: string): string {

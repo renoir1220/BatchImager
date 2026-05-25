@@ -291,15 +291,14 @@ describe("image sessions", () => {
     expect(getSessionGenerationSourcePath(chosen[0])).toBe("C:/shots/IMG_0001.JPG");
   });
 
-  it("toggles the workspace cell between original and current image without changing the generation source", () => {
+  it("keeps the workspace cell on the current generated image even if a stale original-display flag exists", () => {
     const sessions = applyGeneratedImageResult(createTestImageSessions(["C:/shots/IMG_0001.JPG"]), "img-1", "C:/generated/out.png");
 
     const showingOriginal = toggleSessionListImageSource(sessions, "img-1");
-    const showingCurrentAgain = toggleSessionListImageSource(showingOriginal, "img-1");
 
-    expect(getSessionDisplayPath(showingOriginal[0])).toBe("C:/shots/IMG_0001.JPG");
+    expect(showingOriginal[0].showOriginalInList).toBe(true);
+    expect(getSessionDisplayPath(showingOriginal[0])).toBe("C:/generated/out.png");
     expect(getSessionGenerationSourcePath(showingOriginal[0])).toBe("C:/generated/out.png");
-    expect(getSessionDisplayPath(showingCurrentAgain[0])).toBe("C:/generated/out.png");
   });
 
   it("moves one image session before another without changing session state", () => {

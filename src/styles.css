@@ -58,6 +58,10 @@ textarea {
   background: var(--chat-surface);
 }
 
+.app-shell.startup {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .app-toolbar {
   grid-column: 1;
   grid-row: 1;
@@ -449,12 +453,13 @@ textarea {
 
 .empty-workspace {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-rows: minmax(70px, 0.24fr) auto 24px minmax(0, 1fr);
   justify-items: center;
-  align-items: center;
-  gap: 18px;
+  align-items: start;
+  gap: 0;
   height: 100%;
-  padding: 30px;
+  min-height: 0;
+  padding: 24px 40px 24px;
   background: var(--chat-surface);
   outline: 1px solid transparent;
   outline-offset: -8px;
@@ -466,12 +471,19 @@ textarea {
   outline-offset: -8px;
 }
 
-.empty-copy {
+.empty-primary {
   grid-row: 2;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+}
+
+.empty-copy {
   display: grid;
   gap: 7px;
   text-align: center;
   color: #72736c;
+  font-size: 14px;
 }
 
 .empty-copy strong {
@@ -480,33 +492,50 @@ textarea {
   font-weight: 650;
 }
 
-.startup-projects {
-  grid-row: 3;
-  display: grid;
-  width: min(720px, 100%);
-  gap: 14px;
+.empty-startup-command {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.startup-actions {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  width: fit-content;
-  justify-self: center;
-  border: 1px solid color-mix(in oklch, var(--divider), #ffffff 12%);
-  border-radius: 22px;
-  padding: 6px 7px 6px 6px;
-  background: var(--chat-surface);
-  box-shadow: 0 8px 22px rgb(36 38 32 / 6%);
-  color: #686862;
-  font-size: 12px;
+.empty-inline-action {
+  height: 28px;
+  border: 1px solid color-mix(in oklch, var(--blue), white 62%);
+  border-radius: 999px;
+  padding: 0 12px;
+  background: color-mix(in oklch, var(--blue), white 94%);
+  color: var(--blue);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1;
+  box-shadow: 0 7px 16px rgb(31 111 242 / 10%);
+  transition: background-color 130ms ease, border-color 130ms ease, color 130ms ease, transform 130ms ease;
+}
+
+.empty-inline-action:hover {
+  border-color: color-mix(in oklch, var(--blue), white 42%);
+  background: color-mix(in oklch, var(--blue), white 89%);
+  color: color-mix(in oklch, var(--blue), black 10%);
+  transform: translateY(-1px);
+}
+
+.empty-inline-action:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--blue), white 34%);
+  outline-offset: 2px;
 }
 
 .recent-projects {
+  grid-row: 4;
   display: grid;
-  gap: 8px;
-  width: 100%;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(1220px, 100%);
+  height: 100%;
+  min-height: 0;
+  gap: 10px;
+  color: #686862;
+  font-size: 12px;
 }
 
 .recent-projects header {
@@ -520,50 +549,75 @@ textarea {
 .recent-projects header strong {
   color: #30302c;
   font-size: 13px;
+  font-weight: 620;
 }
 
 .recent-project-list {
+  --recent-project-row-height: 166px;
+  --recent-project-thumb-size: 108px;
   display: grid;
-  overflow: hidden;
-  border: 1px solid color-mix(in oklch, var(--divider), #ffffff 18%);
-  border-radius: 16px;
-  background: var(--chat-surface);
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  grid-auto-rows: var(--recent-project-row-height);
+  gap: 8px;
+  align-content: start;
+  min-height: 0;
+  max-height: 100%;
+  padding: 1px 2px 2px 1px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .recent-project-row {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklch, var(--divider), #ffffff 4%);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(36 38 32 / 4%);
+  transition: border-color 130ms ease, box-shadow 130ms ease, transform 130ms ease;
+}
+
+.recent-project-open {
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
-  gap: 10px;
-  align-items: center;
+  grid-template-rows: var(--recent-project-thumb-size) auto;
+  gap: 6px;
+  align-items: start;
+  width: 100%;
+  height: 100%;
   min-width: 0;
   border: 0;
-  border-bottom: 1px solid #e0e0da;
-  padding: 9px 10px;
+  padding: 8px;
   background: transparent;
   color: inherit;
   cursor: pointer;
   text-align: left;
 }
 
-.recent-project-row:last-child {
-  border-bottom: 0;
-}
-
-.recent-project-row:hover {
-  background: color-mix(in oklch, var(--blue), white 96%);
+.recent-project-row:hover,
+.recent-project-row:focus-within {
+  border-color: color-mix(in oklch, var(--blue), white 70%);
+  box-shadow: 0 9px 22px rgb(36 38 32 / 9%);
+  transform: translateY(-1px);
 }
 
 .recent-project-thumbs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  justify-self: center;
   gap: 1px;
   overflow: hidden;
-  border-radius: 8px;
+  width: var(--recent-project-thumb-size);
+  height: var(--recent-project-thumb-size);
+  border-radius: 6px;
   background: var(--divider);
 }
 
 .recent-project-thumb {
-  aspect-ratio: 1 / 1;
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
   background: #deded8;
 }
@@ -578,10 +632,11 @@ textarea {
 .recent-project-info {
   display: grid;
   min-width: 0;
-  gap: 4px;
+  gap: 3px;
+  line-height: 1.24;
 }
 
-.recent-project-info strong,
+.recent-project-info .recent-project-name,
 .recent-project-info span {
   min-width: 0;
   overflow: hidden;
@@ -589,9 +644,10 @@ textarea {
   white-space: nowrap;
 }
 
-.recent-project-info strong {
+.recent-project-name {
   color: #292925;
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 400;
 }
 
 .recent-project-info span,
@@ -602,7 +658,7 @@ textarea {
 
 .recent-project-empty {
   border: 1px solid color-mix(in oklch, var(--divider), #ffffff 18%);
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 13px 12px;
   background: var(--chat-surface);
 }
@@ -697,6 +753,18 @@ textarea {
   background: var(--danger);
 }
 
+.recent-project-row .recent-project-delete-button {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.recent-project-row:hover .recent-project-delete-button,
+.recent-project-row:focus-within .recent-project-delete-button,
+.recent-project-row .recent-project-delete-button.confirming {
+  opacity: 0.9;
+  pointer-events: auto;
+}
+
 .trash-icon {
   display: block;
   width: 16px;
@@ -775,22 +843,6 @@ textarea {
   background: rgb(20 20 18 / 68%);
 }
 
-.source-pill {
-  position: absolute;
-  right: 38px;
-  top: 8px;
-  display: grid;
-  place-items: center;
-  min-width: 20px;
-  height: 20px;
-  border-radius: 999px;
-  padding: 0 5px;
-  background: rgb(20 20 18 / 62%);
-  color: white;
-  font-size: 11px;
-  line-height: 1;
-}
-
 .spinner-ring {
   width: 12px;
   height: 12px;
@@ -798,6 +850,44 @@ textarea {
   border-top-color: #ffffff;
   border-radius: 50%;
   animation: spin 1s linear infinite;
+}
+
+.workspace-image-context-menu {
+  position: fixed;
+  z-index: 30;
+  display: grid;
+  min-width: 142px;
+  overflow: hidden;
+  border: 1px solid rgb(0 0 0 / 10%);
+  border-radius: 8px;
+  padding: 5px;
+  background: rgb(255 255 252 / 96%);
+  box-shadow: 0 12px 32px rgb(24 25 21 / 16%);
+}
+
+.workspace-image-context-menu button {
+  border: 0;
+  border-radius: 6px;
+  padding: 7px 10px;
+  background: transparent;
+  color: #2f332e;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.workspace-image-context-menu button:hover,
+.workspace-image-context-menu button:focus-visible {
+  outline: none;
+  background: color-mix(in oklch, var(--blue), white 92%);
+  color: var(--blue);
+}
+
+.workspace-image-context-menu button.danger:hover,
+.workspace-image-context-menu button.danger:focus-visible {
+  background: color-mix(in oklch, var(--danger), white 92%);
+  color: var(--danger);
 }
 
 .session-panel {
@@ -907,6 +997,8 @@ textarea {
   grid-template-rows: minmax(0, 1fr) auto;
 }
 
+.session-tab-panel.reference-drag-active .session-thread,
+.session-tab-panel.reference-drag-active .session-composer,
 .project-plan-panel.reference-drag-active .project-manager-thread,
 .project-plan-panel.reference-drag-active .session-composer {
   outline: 2px solid color-mix(in oklch, var(--blue), white 34%);
@@ -1127,6 +1219,51 @@ textarea {
   stroke-width: 1.5;
 }
 
+.inline-reference-message {
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.inline-message-reference {
+  display: inline-grid;
+  grid-template-columns: 24px auto;
+  align-items: center;
+  gap: 5px;
+  max-width: 138px;
+  height: 28px;
+  margin: 0 3px;
+  border: 1px solid color-mix(in oklch, var(--divider), #8f9288 12%);
+  border-radius: 6px;
+  padding: 1px 6px 1px 2px;
+  background: #fff;
+  color: #343631;
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.inline-message-reference:hover {
+  border-color: color-mix(in oklch, var(--blue), #ffffff 18%);
+}
+
+.inline-message-reference img {
+  display: block;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.inline-message-reference span {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thread-image-group,
 .thread-image-card {
   display: grid;
@@ -1289,6 +1426,58 @@ textarea {
   background: color-mix(in oklch, var(--green), white 96%);
 }
 
+.esse-batch-task-card-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.esse-batch-task-card header strong {
+  min-width: 0;
+  word-break: keep-all;
+}
+
+.esse-batch-task-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #66665f;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.esse-batch-task-all-cancel,
+.esse-inline-action {
+  border: 0;
+  border-radius: 5px;
+  padding: 2px 4px;
+  background: transparent;
+  color: #66665f;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.esse-batch-task-all-cancel:hover,
+.esse-inline-action:hover {
+  background: rgb(0 0 0 / 5%);
+  color: #3f3f39;
+}
+
+.esse-status-spinner {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  border: 2px solid color-mix(in oklch, var(--green), white 80%);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
 .esse-bash-card {
   display: grid;
   gap: 7px;
@@ -1395,6 +1584,52 @@ textarea {
   line-height: 1.45;
 }
 
+.esse-command-preview-strip {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 1px;
+}
+
+.esse-command-preview {
+  position: relative;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklch, var(--blue), white 68%);
+  border-radius: 6px;
+  padding: 0;
+  background: #fff;
+  cursor: pointer;
+}
+
+.esse-command-preview.reference {
+  border-color: color-mix(in oklch, var(--green), white 62%);
+}
+
+.esse-command-preview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.esse-command-preview span {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  max-width: calc(100% - 4px);
+  border-radius: 4px;
+  padding: 1px 3px;
+  background: rgb(30 30 26 / 72%);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.1;
+}
+
 .esse-preflight-command label,
 .esse-preflight-command textarea {
   grid-column: 1 / -1;
@@ -1432,7 +1667,7 @@ textarea {
 
 .esse-batch-task-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto minmax(86px, auto);
   align-items: center;
   gap: 6px;
   border-top: 1px solid color-mix(in oklch, var(--green), white 82%);
@@ -1444,8 +1679,7 @@ textarea {
 }
 
 .esse-batch-task-name,
-.esse-batch-task-item strong,
-.esse-batch-task-item em {
+.esse-batch-task-item strong {
   min-width: 0;
   overflow: hidden;
   font-size: 12px;
@@ -1454,8 +1688,21 @@ textarea {
 }
 
 .esse-batch-task-item em {
+  min-width: 0;
+  overflow: hidden;
   color: #66665f;
+  font-size: 12px;
   font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.esse-batch-task-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  min-width: 0;
 }
 
 .esse-batch-task-item.failed em {
@@ -1730,6 +1977,7 @@ textarea {
 }
 
 .generation-size-control {
+  position: relative;
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
@@ -1750,6 +1998,25 @@ textarea {
   color: #777a72;
 }
 
+.generation-size-heading-icon {
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.generation-size-heading-icon:hover:not(:disabled),
+.generation-size-heading-icon[aria-expanded="true"] {
+  background: color-mix(in oklch, var(--blue), white 94%);
+  color: #2d5eb8;
+}
+
+.generation-size-heading-icon:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 .composer-tool-icon svg {
   display: block;
   width: 16px;
@@ -1761,46 +2028,139 @@ textarea {
   stroke-width: 1.55;
 }
 
-.generation-size-tiles {
+.generation-size-current {
   display: inline-flex;
   align-items: center;
-  gap: 1px;
-}
-
-.generation-size-tile {
-  display: inline-grid;
-  place-items: center;
-  width: 24px;
+  gap: 3px;
   height: 24px;
+  min-width: 68px;
   border: 1px solid transparent;
   border-radius: 999px;
-  padding: 0;
+  padding: 0 6px 0 3px;
   background: transparent;
   color: #6f746c;
   cursor: pointer;
+  font-size: 11px;
   line-height: 1;
 }
 
-.generation-size-tile:hover:not(:disabled) {
+.generation-size-current:hover:not(:disabled) {
   border-color: transparent;
   background: color-mix(in oklch, var(--blue), white 94%);
   color: #2d5eb8;
 }
 
-.generation-size-tile.selected {
-  border-color: color-mix(in oklch, var(--blue), white 58%);
-  background: color-mix(in oklch, var(--blue), white 91%);
+.generation-size-current:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.generation-size-popover {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 14;
+  width: 244px;
+  border: 1px solid color-mix(in oklch, var(--divider), #8f9288 4%);
+  border-radius: 14px;
+  padding: 8px;
+  background: var(--chat-surface);
+  box-shadow: 0 14px 34px rgb(30 32 27 / 14%);
+}
+
+.generation-size-popover header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 1px 7px;
+}
+
+.generation-size-popover header strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.generation-size-popover header button,
+.generation-resolution-tabs button,
+.generation-ratio-option {
+  border: 1px solid color-mix(in oklch, var(--divider), #8f9288 6%);
+  background: rgb(255 255 252 / 72%);
+  color: #343631;
+  cursor: pointer;
+}
+
+.generation-size-popover header button {
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+.generation-resolution-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 3px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgb(238 239 232 / 72%);
+}
+
+.generation-resolution-tabs button {
+  height: 25px;
+  border-color: transparent;
+  border-radius: 8px;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.generation-ratio-grid {
+  display: grid;
+  gap: 4px;
+  margin-top: 7px;
+}
+
+.generation-ratio-option {
+  display: grid;
+  grid-template-columns: 25px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  border-radius: 10px;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.generation-ratio-option > span:last-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.generation-ratio-option strong {
+  font-size: 12px;
+}
+
+.generation-ratio-option em {
+  color: #7d8178;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.generation-size-popover button:hover,
+.generation-size-popover button.selected,
+.generation-ratio-option.selected {
+  border-color: color-mix(in oklch, var(--blue), white 70%);
+  background: color-mix(in oklch, var(--blue), white 94%);
   color: var(--blue);
 }
 
-.generation-size-tile.selected .ratio-icon::before {
-  border-color: var(--blue);
-  background: color-mix(in oklch, var(--blue), white 88%);
-}
-
-.generation-size-tile:disabled {
-  cursor: default;
-  opacity: 0.5;
+.generation-ratio-option.selected .ratio-icon::before,
+.generation-size-current .ratio-icon::before {
+  border-color: currentColor;
+  background: color-mix(in oklch, var(--blue), white 90%);
 }
 
 .os-select-trigger {
@@ -1959,6 +2319,11 @@ textarea {
   height: 10px;
 }
 
+.ratio-icon-square::before {
+  width: 14px;
+  height: 14px;
+}
+
 .ratio-icon-portrait::before {
   width: 10px;
   height: 17px;
@@ -1975,11 +2340,92 @@ textarea {
 .session-composer textarea {
   grid-column: 1 / -1;
   min-height: 52px;
-  max-height: 112px;
+  max-height: 104px;
   padding: 3px 5px 0;
   line-height: 1.45;
   outline: none;
+  overflow-y: hidden;
   resize: none;
+}
+
+.inline-composer-shell {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.inline-reference-composer {
+  min-height: 52px;
+  max-height: 104px;
+  overflow-y: auto;
+  padding: 3px 5px 0;
+  color: #2d2d2a;
+  font-size: 13px;
+  line-height: 1.55;
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.inline-reference-composer:empty::before {
+  content: attr(data-placeholder);
+  color: #8d9187;
+  pointer-events: none;
+}
+
+.inline-reference-chip {
+  display: inline-grid;
+  grid-template-columns: 22px auto 14px;
+  align-items: center;
+  gap: 4px;
+  max-width: 132px;
+  height: 26px;
+  margin: 0 2px;
+  border: 1px solid color-mix(in oklch, var(--divider), #8f9288 12%);
+  border-radius: 6px;
+  padding: 1px 3px 1px 2px;
+  background: #fff;
+  color: #363832;
+  cursor: grab;
+  line-height: 1;
+  vertical-align: middle;
+  user-select: none;
+}
+
+.inline-reference-chip:active {
+  cursor: grabbing;
+}
+
+.inline-reference-chip img {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.inline-reference-label {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-reference-remove {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  background: rgb(20 20 18 / 58%);
+  color: #fff;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
 }
 
 .composer-reference-panel {
@@ -2001,7 +2447,7 @@ textarea {
   border-radius: 5px;
 }
 
-.reference-strip.compact .reference-thumb span {
+.reference-strip.compact .reference-remove-button {
   width: 16px;
   height: 16px;
   font-size: 12px;
@@ -2381,6 +2827,16 @@ textarea {
   object-fit: cover;
 }
 
+.reference-thumb-preview {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.reference-remove-button,
 .reference-thumb span {
   position: absolute;
   top: 3px;
@@ -2393,6 +2849,11 @@ textarea {
   background: rgb(20 20 18 / 66%);
   color: #fff;
   line-height: 1;
+}
+
+.reference-remove-button {
+  border: 0;
+  padding: 0;
 }
 
 .reference-drop {
@@ -2524,8 +2985,8 @@ textarea {
 .settings-dialog {
   position: relative;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  width: min(620px, calc(100vw - 64px));
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(820px, calc(100vw - 64px));
   max-height: min(720px, calc(100vh - 64px));
   min-height: 0;
   overflow: hidden;
@@ -2535,22 +2996,34 @@ textarea {
   box-shadow: 0 18px 52px rgb(0 0 0 / 20%);
 }
 
+.settings-body {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  min-height: 0;
+}
+
 .settings-tabs {
-  display: flex;
-  gap: 6px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--divider);
-  background: #fbfbfa;
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  min-height: 0;
+  border-right: 1px solid var(--divider);
+  padding: 10px 8px;
+  background: #f4f4f1;
 }
 
 .settings-tab {
-  height: 26px;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 30px;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
   color: #555750;
-  padding: 0 12px;
+  padding: 0 9px;
   cursor: pointer;
+  text-align: left;
 }
 
 .settings-tab[aria-selected="true"] {
@@ -2558,6 +3031,12 @@ textarea {
   background: #ffffff;
   color: #242522;
   box-shadow: 0 1px 3px rgb(0 0 0 / 6%);
+}
+
+.settings-content {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .settings-header {
@@ -2579,7 +3058,8 @@ textarea {
 .settings-group-title span,
 .settings-field span,
 .settings-path,
-.settings-note {
+.settings-note,
+.settings-help {
   color: #686862;
   font-size: 12px;
 }
@@ -2619,14 +3099,28 @@ textarea {
   gap: 10px;
 }
 
-.settings-field input {
+.settings-field input,
+.settings-field select,
+.settings-field textarea {
   width: 100%;
-  height: 30px;
   border: 1px solid #ccccc5;
   border-radius: 6px;
-  padding: 0 9px;
   background: #ffffff;
   color: #242522;
+}
+
+.settings-field input,
+.settings-field select {
+  height: 30px;
+  padding: 0 9px;
+}
+
+.settings-field textarea {
+  min-height: 66px;
+  max-height: 112px;
+  padding: 7px 9px;
+  line-height: 1.45;
+  resize: vertical;
 }
 
 .settings-inline-form {
@@ -2636,8 +3130,86 @@ textarea {
   gap: 8px;
 }
 
+.settings-profile-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.settings-profile-tab {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid color-mix(in oklch, var(--divider), #8f9288 6%);
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: #fff;
+  color: #343631;
+  cursor: pointer;
+  text-align: left;
+}
+
+.settings-profile-tab[aria-checked="true"] {
+  border-color: color-mix(in oklch, var(--blue), white 52%);
+  background: color-mix(in oklch, var(--blue), white 94%);
+}
+
+.settings-profile-tab strong,
+.settings-profile-tab span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-profile-tab strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.settings-profile-tab span {
+  color: #686862;
+  font-size: 11px;
+}
+
+.settings-profile-editor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.settings-profile-name-field {
+  max-width: 320px;
+}
+
+.settings-api-card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid color-mix(in oklch, var(--divider), #ffffff 5%);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgb(255 255 255 / 72%);
+}
+
+.settings-api-card .settings-group-title h4 {
+  margin: 0;
+  color: #30302c;
+  font-size: 13px;
+  font-weight: 650;
+}
+
 .settings-skills-panel {
   gap: 10px;
+}
+
+.settings-memory-panel {
+  gap: 10px;
+}
+
+.settings-help {
+  margin: 0;
+  line-height: 1.5;
 }
 
 .skill-list {
@@ -2709,6 +3281,74 @@ textarea {
 .settings-empty {
   color: #777a72;
   font-size: 12px;
+}
+
+.memory-add-form {
+  display: grid;
+  gap: 9px;
+}
+
+.memory-content-field {
+  align-items: start;
+}
+
+.memory-form-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.memory-conflict {
+  display: grid;
+  gap: 4px;
+  border: 1px solid color-mix(in oklch, var(--amber), white 72%);
+  border-radius: 7px;
+  padding: 8px 9px;
+  background: color-mix(in oklch, var(--amber), white 94%);
+  color: #5d4321;
+  font-size: 12px;
+}
+
+.memory-list {
+  display: grid;
+  gap: 12px;
+}
+
+.memory-category {
+  display: grid;
+  gap: 0;
+}
+
+.memory-category h4 {
+  margin: 0;
+  border-bottom: 1px solid var(--divider);
+  padding: 0 0 6px;
+  color: #30302c;
+  font-size: 12px;
+}
+
+.memory-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  border-bottom: 1px solid var(--divider);
+  padding: 8px 0;
+}
+
+.memory-id {
+  color: #777a72;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.memory-row p {
+  min-width: 0;
+  margin: 0;
+  color: #343631;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
 }
 
 .skill-diagnostics {
@@ -2784,7 +3424,9 @@ textarea {
   white-space: pre-wrap;
 }
 
-.settings-field input:focus {
+.settings-field input:focus,
+.settings-field select:focus,
+.settings-field textarea:focus {
   border-color: color-mix(in oklch, var(--blue), white 36%);
   outline: 2px solid color-mix(in oklch, var(--blue), white 78%);
 }

@@ -53,6 +53,18 @@ describe("agentCommandPolicy", () => {
     expect(policy.checkCommand(`Remove-Item -Recurse "${path.join(projectDirectory, "dist")}"`).allowed).toBe(true);
   });
 
+  test.each([
+    "sqlite3 project.sqlite \".tables\"",
+    `sqlite3 "${path.join(projectDirectory, "project.sqlite")}" "select * from image_sessions"`,
+    "echo ok && sqlite3 project.sqlite \"select id from image_sessions\""
+  ])("denies sqlite inspection of BatchImager project state: %s", (command) => {
+    const decision = policy.checkCommand(command);
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain("项目数据库");
+    expect(decision.suggestion).toContain("list_sessions");
+  });
+
   test("allows pipelines whose every segment is safe", () => {
     expect(policy.checkCommand("git status --short | grep modified").allowed).toBe(true);
     expect(policy.checkCommand("npm run build && npm test").allowed).toBe(true);

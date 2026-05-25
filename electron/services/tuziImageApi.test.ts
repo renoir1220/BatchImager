@@ -295,6 +295,51 @@ describe("tuziImageApi", () => {
     expect(result.requestSize).toBe("2048x2048");
   });
 
+  test("omits auto quality for AA gpt-image-2 fixed-quality aliases", async () => {
+    await generateImageFromPrompt(
+      {
+        prompt: "生成一张春日咖啡馆插画",
+        sessionId: "esse-image-1",
+        size: "1024x1024"
+      },
+      {
+        apiKey: "local-test-key",
+        baseUrl: "https://api.aiflow321.cn",
+        model: "AA-gpt-image-2-medium",
+        outputDirectory: "C:\\generated",
+        size: "auto"
+      },
+      {
+        fetch: async (url, init) => {
+          if (String(url).endsWith("/v1/images/generations")) {
+            expect(JSON.parse(String(init?.body))).toEqual({
+              model: "AA-gpt-image-2-medium",
+              prompt: "生成一张春日咖啡馆插画",
+              response_format: "url",
+              size: "1024x1024"
+            });
+
+            return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from([4, 5, 6]).toString("base64") }] }), {
+              headers: { "content-type": "application/json" },
+              status: 200
+            });
+          }
+
+          return new Response(null, { status: 404 });
+        },
+        makeNow: () => new Date("2026-05-21T13:00:00.000Z"),
+        mkdir: async () => undefined,
+        prepareImage: async () => {
+          throw new Error("prompt-only generation must not prepare an edit input");
+        },
+        readFile: async () => {
+          throw new Error("prompt-only generation must not read a source image");
+        },
+        writeFile: async () => undefined
+      }
+    );
+  });
+
   test("notifies recovery tracking when a remote generated image url is available before download", async () => {
     const remoteEvents: Array<{ remoteUrl?: string; requestSize: string; sessionId: string }> = [];
 

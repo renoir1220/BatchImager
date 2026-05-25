@@ -173,14 +173,14 @@ function createListReferenceImagesTool(runtime: EsseWorkspaceToolRuntime): Batch
     risk: "read",
     requiresPreflight: false,
     description:
-      "List all reference images registered on the current project. Returns id, label, and fileName for each. Use before passing referenceImageIds to generate_image or run_batch_generation.",
+      "List reference images registered on the current project, plus any images attached in this turn. Turn attachments are temporary and can be passed directly as referenceImageIds such as turn-ref-1; do not add them to the project unless the user explicitly asks to save/register them.",
     parameters: emptyParameters(),
     async execute() {
       const referenceImages = runtime.getState().referenceImages ?? [];
-      const safeReferenceImages = referenceImages.map((referenceImage) => formatReferenceImage(referenceImage));
+      const safeReferenceImages = [...referenceImages, ...getTurnReferenceImages(runtime)].map((referenceImage) => formatReferenceImage(referenceImage));
 
       if (!safeReferenceImages.length) {
-        return toolOk("项目当前没有参考图。", { referenceImages: [] });
+        return toolOk("项目当前没有参考图，本轮也没有附件参考图。", { referenceImages: [] });
       }
 
       return toolOk(
@@ -635,7 +635,7 @@ function createGenerateImageTool(runtime: EsseWorkspaceToolRuntime): BatchImager
     risk: "safe-write",
     requiresPreflight: true,
     description:
-      "Generate or edit a single image through the image API. Use this for requests such as background removal, watermark removal, white-background product images, restyling, or creating a new image. Call list_sessions first when targeting an existing workspace image. This always requires a preflight confirmation before execution. Use mode='edit' only with target.type='existing'. Only pass size when the user clearly requested a concrete size, 2K/4K, square, orientation, or aspect ratio.",
+      "Generate or edit a single image through the image API. Use this for requests such as background removal, watermark removal, white-background product images, restyling, or creating a new image. This always requires a preflight confirmation before execution. Image results are always added as new workspace images: use target.type='new'. For a new result based on an existing workspace image, use mode='edit' with target.type='new' and target.sourceSessionId; the tool will create/copy the new session after the user approves. Do not call duplicate_session just to prepare generation. If the user wants another workspace image or a turn attachment used as a visual reference, pass its id in referenceImageIds. referenceImageIds is the exact API upload order. When multiple images have different roles, also pass referenceImageNames with the same length/order and write the prompt using those local names, not user-facing 【图片N】 labels. Only pass size when the user clearly requested a concrete size, 2K/4K, square, orientation, or aspect ratio; omit size to keep the source image or first reference image ratio.",
     parameters: imageGenerationParameters(),
     async execute(_toolCallId, params) {
       const commandResult = normalizeImagePreflightCommand(runtime.getState(), params);
@@ -663,7 +663,7 @@ function createRunBatchGenerationTool(runtime: EsseWorkspaceToolRuntime): BatchI
     risk: "safe-write",
     requiresPreflight: true,
     description:
-      "Run multiple image generation/edit commands. Use for multi-image, batch, all, or 'this set' requests after calling list_sessions to resolve current stable session ids. This always requires one preflight card before execution. Every command must explicitly set mode='edit' or mode='generate'; there is no default mode.",
+      "Run multiple image generation/edit commands. Use for multi-image, batch, all, or 'this set' requests. This always requires one preflight card before execution. Every command must explicitly set mode='edit' or mode='generate'; there is no default mode. Image results are always added as new workspace images: use target.type='new'. For new results based on existing workspace images, use mode='edit' with target.type='new' and target.sourceSessionId for each source image; the tool will create/copy the target sessions after approval. Do not call duplicate_session just to prepare generation. If the user wants a workspace image or turn attachment used as a visual reference, pass its id in each command's referenceImageIds. referenceImageIds is the exact API upload order. When multiple images have different roles, also pass referenceImageNames with the same length/order and write each prompt using those local names, not user-facing 【图片N】 labels. Omit size unless the user explicitly requests a size or ratio; without size each command keeps its source/first-reference ratio.",
     parameters: batchGenerationParameters(),
     async execute(_toolCallId, params) {
       const rawCommands = Array.isArray(params.commands) ? params.commands : [];
@@ -806,7 +806,7 @@ function createListSessionsTool(runtime: EsseWorkspaceToolRuntime): BatchImagerA
     risk: "read",
     requiresPreflight: false,
     description:
-      "List all image sessions in the current BatchImager project. Use before workspace writes. Returns stable id and displayLabel; always pass stable id to later tools.",
+      "List all image sessions in the current BatchImager project. Use before workspace writes. Returns stable id, displayLabel, and referenceImageId. Always pass stable session id to target tools. When a workspace image must be sent to the image API as a visual reference, pass its referenceImageId in referenceImageIds; mentioning an image in prompt text is not enough.",
     parameters: emptyParameters(),
     async execute() {
       const state = runtime.getState();
@@ -817,7 +817,8 @@ function createListSessionsTool(runtime: EsseWorkspaceToolRuntime): BatchImagerA
           fileName: session.fileName,
           generatedRecordCount: session.generatedFilePaths?.length ?? 0,
           id: session.id,
-          isSelected: session.id === state.selectedSessionId
+          isSelected: session.id === state.selectedSessionId,
+          referenceImageId: getWorkspaceReferenceImageId(session.id)
         }))
       });
     }
@@ -1359,9 +1360,11 @@ async function executePreflightImageTool(
     return toolError("preflight unavailable", undefined, "image API tools must be executed through an Esse preflight runtime.");
   }
 
+  const referenceImages = collectPreflightReferenceImages(runtime, request.commands);
   const payload: EssePreflightPayload = {
     commands: request.commands,
     estimatedApiCalls: request.commands.length,
+    ...(referenceImages ? { referenceImages } : {}),
     tool: request.tool
   };
   const decision = await runtime.requestPreflight(payload);
@@ -1412,7 +1415,7 @@ function validateModifiedPreflightCommands(
         ok: false,
         reason: "invalid modified preflight commands",
         detail: `modified command ${index + 1} changed its target.`,
-        suggestedNext: "Only prompt, mode, size, and referenceImageIds may be changed in preflight modify."
+        suggestedNext: "Only prompt, mode, size, referenceImageIds, and referenceImageNames may be changed in preflight modify."
       };
     }
 
@@ -1431,6 +1434,24 @@ function validateModifiedPreflightCommands(
         reason: "invalid modified preflight commands",
         detail: `modified command ${index + 1} has empty prompt.`,
         suggestedNext: "Provide a non-empty prompt."
+      };
+    }
+
+    const referenceImageIds = modifiedCommand.referenceImageIds ?? [];
+    const referenceImageNames = modifiedCommand.referenceImageNames ?? [];
+    const referenceNamingResult = validateReferenceImageNamesForPrompt(referenceImageIds, referenceImageNames, modifiedCommand.prompt ?? "");
+    if (!referenceNamingResult.ok) {
+      return {
+        ...referenceNamingResult,
+        detail: `modified command ${index + 1}: ${referenceNamingResult.reason}`
+      };
+    }
+    if (referenceImageNames.length && referenceImageNames.length !== referenceImageIds.length) {
+      return {
+        ok: false,
+        reason: "invalid modified preflight commands",
+        detail: `modified command ${index + 1} has mismatched referenceImageNames.`,
+        suggestedNext: "Provide one referenceImageNames entry for each referenceImageIds entry, in the same order."
       };
     }
   }
@@ -1469,28 +1490,65 @@ function normalizeImagePreflightCommand(
     return {
       ok: false,
       reason: "target is required",
-      suggestedNext: "use target.type='existing' with a stable sessionId, or target.type='new'."
+      suggestedNext: "use target.type='new'. For new results based on an existing image, include target.sourceSessionId; for clicked images, include referenceImageIds and referenceImageNames that match the prompt roles."
     };
   }
-  if (mode === "edit" && target.type !== "existing") {
+  if (mode === "edit" && target.type === "new" && !target.sourceSessionId) {
     return {
       ok: false,
-      reason: "edit mode requires an existing target",
-      suggestedNext: "use target.type='existing' for edits, or mode='generate' for new images."
+      reason: "edit mode with a new target requires sourceSessionId",
+      suggestedNext: "use target.type='new' with sourceSessionId for a new image based on an existing workspace image."
+    };
+  }
+  if (target.type === "new" && target.sourceSessionId && mode !== "edit") {
+    return {
+      ok: false,
+      reason: "new target with sourceSessionId requires edit mode",
+      suggestedNext: "use mode='edit' with target.type='new' and sourceSessionId so the source image is sent to the edit API."
     };
   }
 
   const referenceImageIds = readStringArray(params.referenceImageIds);
+  const referenceImageNames = readStringArray(params.referenceImageNames);
   const size = readString(params.size);
+  const referenceNamingResult = validateReferenceImageNamesForPrompt(referenceImageIds, referenceImageNames, prompt);
+  if (!referenceNamingResult.ok) {
+    return referenceNamingResult;
+  }
+  if (referenceImageNames.length && referenceImageNames.length !== referenceImageIds.length) {
+    return {
+      ok: false,
+      reason: "referenceImageNames must match referenceImageIds",
+      suggestedNext: "provide one local name for each referenceImageIds entry, in the same order."
+    };
+  }
 
   if (target.type === "new") {
+    const sourceSessionIndex = target.sourceSessionId
+      ? state.sessions.findIndex((session) => session.id === target.sourceSessionId)
+      : -1;
+    if (target.sourceSessionId && sourceSessionIndex < 0) {
+      return {
+        ok: false,
+        reason: "source session not found",
+        detail: `no session with id ${target.sourceSessionId}`,
+        suggestedNext: "call list_sessions to list current ids."
+      };
+    }
+
     return {
       command: {
+        ...(sourceSessionIndex >= 0 ? { displayLabel: `img-${sourceSessionIndex + 1}` } : {}),
         mode,
         prompt,
         ...(referenceImageIds.length ? { referenceImageIds } : {}),
+        ...(referenceImageNames.length ? { referenceImageNames } : {}),
         ...(size ? { size } : {}),
-        target: { type: "new", ...(target.fileName ? { fileName: target.fileName } : {}) }
+        target: {
+          type: "new",
+          ...(target.fileName ? { fileName: target.fileName } : {}),
+          ...(target.sourceSessionId ? { sourceSessionId: target.sourceSessionId } : {})
+        }
       },
       ok: true
     };
@@ -1509,17 +1567,48 @@ function normalizeImagePreflightCommand(
   return {
     command: {
       displayLabel: `img-${sessionIndex + 1}`,
-      mode,
+      mode: "edit",
       prompt,
       ...(referenceImageIds.length ? { referenceImageIds } : {}),
+      ...(referenceImageNames.length ? { referenceImageNames } : {}),
       ...(size ? { size } : {}),
-      target: { sessionId: target.sessionId, type: "existing" }
+      target: { sourceSessionId: target.sessionId, type: "new" }
     },
     ok: true
   };
 }
 
-function readTarget(value: unknown): { fileName?: string; type: "new" } | { sessionId: string; type: "existing" } | undefined {
+function validateReferenceImageNamesForPrompt(
+  referenceImageIds: string[],
+  referenceImageNames: string[],
+  prompt: string
+): { ok: true } | Extract<WorkspaceMutationResult, { ok: false }> {
+  if (referenceImageIds.length <= 1) {
+    return { ok: true };
+  }
+
+  if (referenceImageNames.length !== referenceImageIds.length) {
+    return {
+      ok: false,
+      reason: "referenceImageNames required for multi-image references",
+      suggestedNext:
+        "For multi-image commands, provide one local name for each referenceImageIds entry, then write the prompt using those names."
+    };
+  }
+
+  if (/【图片\d+】/.test(prompt)) {
+    return {
+      ok: false,
+      reason: "prompt must use local image names",
+      suggestedNext:
+        "Replace user-facing labels like 【图片1】 with referenceImageNames such as 场景图、目标植物、大小参考."
+    };
+  }
+
+  return { ok: true };
+}
+
+function readTarget(value: unknown): { fileName?: string; sourceSessionId?: string; type: "new" } | { sessionId: string; type: "existing" } | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
   }
@@ -1527,7 +1616,8 @@ function readTarget(value: unknown): { fileName?: string; type: "new" } | { sess
   const target = value as Record<string, unknown>;
   if (target.type === "new") {
     const fileName = readString(target.fileName);
-    return { type: "new", ...(fileName ? { fileName } : {}) };
+    const sourceSessionId = readString(target.sourceSessionId);
+    return { type: "new", ...(fileName ? { fileName } : {}), ...(sourceSessionId ? { sourceSessionId } : {}) };
   }
   if (target.type === "existing") {
     const sessionId = readString(target.sessionId);
@@ -1712,7 +1802,7 @@ function duplicateSession(state: EsseWorkspaceState, params: { fileName?: string
       sessions: state.sessions.flatMap((session, index) => (index === sourceIndex ? [session, duplicate] : [session]))
     },
     [params.sessionId, newSessionId],
-    `已复制 ${source.fileName}。`
+    `已复制 ${source.fileName}。新副本是 img-${sourceIndex + 2}，sessionId=${newSessionId}。`
   );
 }
 
@@ -1763,7 +1853,15 @@ function getCurrentImageSource(session: PersistedImageSession): "generated" | "o
     return "generated";
   }
 
-  return session.generatedFilePath && !session.showOriginalInList ? "generated" : "original";
+  return session.generatedFilePath ? "generated" : "original";
+}
+
+function getCurrentImagePath(session: PersistedImageSession): string {
+  return session.generatedFilePath ?? session.filePath;
+}
+
+function getWorkspaceReferenceImageId(sessionId: string): string {
+  return `workspace-ref-${sessionId}`;
 }
 
 function basenameFromPath(filePath: string): string {
@@ -1776,6 +1874,59 @@ function formatReferenceImage(referenceImage: BatchPlanReferenceImage): { fileNa
     id: referenceImage.id,
     label: referenceImage.label
   };
+}
+
+function collectPreflightReferenceImages(
+  runtime: EsseWorkspaceToolRuntime,
+  commands: EssePreflightCommand[]
+): BatchPlanReferenceImage[] | undefined {
+  const requestedIds = new Set(commands.flatMap((command) => command.referenceImageIds ?? []));
+  if (requestedIds.size === 0) {
+    return undefined;
+  }
+
+  const byId = new Map<string, BatchPlanReferenceImage>();
+  for (const referenceImage of runtime.getState().referenceImages ?? []) {
+    byId.set(referenceImage.id, referenceImage);
+  }
+  for (const plan of runtime.getState().projectManagerState?.plans ?? []) {
+    for (const referenceImage of plan.referenceImages ?? []) {
+      byId.set(referenceImage.id, referenceImage);
+    }
+  }
+  for (const message of runtime.getState().projectManagerState?.conversation.messages ?? []) {
+    for (const referenceImage of message.batchTask?.referenceImages ?? []) {
+      byId.set(referenceImage.id, referenceImage);
+    }
+  }
+  for (const workspaceReferenceImage of getWorkspaceReferenceImages(runtime.getState())) {
+    byId.set(workspaceReferenceImage.id, workspaceReferenceImage);
+  }
+  for (const turnReferenceImage of getTurnReferenceImages(runtime)) {
+    byId.set(turnReferenceImage.id, turnReferenceImage);
+  }
+
+  const referenceImages = [...requestedIds]
+    .map((id) => byId.get(id))
+    .filter((referenceImage): referenceImage is BatchPlanReferenceImage => Boolean(referenceImage));
+
+  return referenceImages.length ? referenceImages : undefined;
+}
+
+function getTurnReferenceImages(runtime: EsseWorkspaceToolRuntime): BatchPlanReferenceImage[] {
+  return (runtime.getTurnReferenceImagePaths?.() ?? []).map((filePath, index) => ({
+    filePath,
+    id: `turn-ref-${index + 1}`,
+    label: `本轮参考图 ${index + 1}`
+  }));
+}
+
+function getWorkspaceReferenceImages(state: EsseWorkspaceState): BatchPlanReferenceImage[] {
+  return state.sessions.map((session, index) => ({
+    filePath: getCurrentImagePath(session),
+    id: getWorkspaceReferenceImageId(session.id),
+    label: `图${index + 1} ${session.fileName}`
+  }));
 }
 
 function isSupportedReferenceImagePath(filePath: string): boolean {
@@ -1828,16 +1979,28 @@ function imageGenerationParameters(): Record<string, unknown> {
   return {
     type: "object",
     properties: {
-      mode: { type: "string", enum: ["edit", "generate"], description: "Explicit generation mode." },
+      mode: { type: "string", enum: ["edit", "generate"], description: "Explicit generation mode. Use edit with target.sourceSessionId for existing workspace sources; use generate with referenceImageIds for clicked/attached turn-ref sources." },
       prompt: { type: "string", description: "Image generation prompt." },
-      referenceImageIds: { type: "array", items: { type: "string" }, description: "Optional reference image ids." },
-      size: { type: "string", description: "Optional explicit output size. Omit unless the user clearly requested it." },
+      referenceImageIds: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Optional visual reference image ids. Use project reference ids from list_reference_images, turn-ref-N for current-turn attachments, or workspace referenceImageId values from list_sessions. This array is the exact API upload order. Prompt text that mentions 图N does not attach that image or change its role."
+      },
+      referenceImageNames: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Optional local names for the uploaded images, in the same order and same length as referenceImageIds, such as ['场景图','目标植物','大小参考']. Use these names in the prompt so the API sees an unambiguous image-role mapping without relying on user-facing 【图片N】 labels."
+      },
+      size: { type: "string", description: "Optional explicit output size. Omit unless the user clearly requested it; omitted size keeps the source or first reference image ratio." },
       target: {
         type: "object",
         properties: {
           fileName: { type: "string", description: "Optional file name for target.type='new'." },
-          sessionId: { type: "string", description: "Stable session id for target.type='existing'." },
-          type: { type: "string", enum: ["existing", "new"] }
+          sessionId: { type: "string", description: "Legacy stable session id for target.type='existing'. The tool converts this to a new target so image results do not overwrite the source." },
+          sourceSessionId: { type: "string", description: "Stable source session id for target.type='new' when the new image should be based on an existing workspace image. The tool creates/copies the target session after approval." },
+          type: { type: "string", enum: ["existing", "new"], description: "Output target. Use new; existing is accepted only as a legacy alias and is converted to new+sourceSessionId." }
         },
         required: ["type"],
         additionalProperties: false

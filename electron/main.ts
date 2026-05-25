@@ -1,19 +1,23 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, net, protocol, shell } from "electron";
-import { existsSync } from "node:fs";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol, screen, shell } from "electron";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { appendFile, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type {
   AddEsseSkillPathRequest,
+  AddEsseMemoryRequest,
   CancelOperationRequest,
   CancelEsseBatchTaskAllRequest,
   CancelEsseBatchTaskItemRequest,
   CopyImageToClipboardRequest,
   CreatePlaceholderImageRequest,
+  DeleteProjectRequest,
+  ExportImagesRequest,
   GenerateImageRequest,
   InstallEsseSkillFromGitRequest,
   ImportProjectImagesRequest,
   OpenProjectRequest,
+  RemoveEsseMemoryRequest,
   RemoveEsseSkillRequest,
   RetryEsseBatchTaskFailedRequest,
   RetryEsseBatchTaskItemRequest,
@@ -38,7 +42,7 @@ import { createBlankGenerationSeed } from "./services/blankGenerationSeed";
 import { runEsseAgentTurn } from "./services/esseAgent";
 import { EsseBatchTaskRegistry } from "./services/esseBatchTaskRegistry";
 import { createEsseImagePreflightExecutor, retryEsseBatchTaskItem } from "./services/esseImagePreflightExecutor";
-import { createEsseMemoryStore } from "./services/esseMemoryStore";
+import { createEsseMemoryStore, type EsseMemoryStore } from "./services/esseMemoryStore";
 import { createEssePackagePreflightExecutor } from "./services/essePackagePreflightExecutor";
 import { EssePermissionBroker } from "./services/essePermissionBroker";
 import { DEFAULT_ESSE_PERMISSION_POLICY } from "./services/essePermissionPolicy";
@@ -59,7 +63,7 @@ import { configureLocalConfig, getApiSettingsSnapshot, loadTuziConfig, loadTuziL
 import { saveReferenceImageToDirectory } from "./services/localImageStorage";
 import { runImageSessionAgent, warmupImageSessionAgentDependencies } from "./services/imageSessionAgent";
 import { getSharedAgentRuntimeRegistry } from "./services/agentRuntimeRegistry";
-import { listProjectCards } from "./services/projectList";
+import { deleteProject, listProjectCards } from "./services/projectList";
 import { rememberProjectDirectory } from "./services/projectIndex";
 import {
   markGenerationJobCompleted,
@@ -82,14 +86,15 @@ import { ensureProjectThumbnails } from "./services/projectThumbnails";
 import { normalizePathForComparison } from "./services/pathUtils";
 
 const IMAGE_PROTOCOL = "batchimager-file";
-const APP_ICON_LIGHT_PATH = path.join(app.getAppPath(), "src", "assets", "app-icons", "batchimager-esse-os26-light.png");
-const APP_ICON_DARK_PATH = path.join(app.getAppPath(), "src", "assets", "app-icons", "batchimager-esse-os26-dark.png");
+const APP_ICON_PATH = path.join(app.getAppPath(), "src", "assets", "app-icons", "batchimager-esse-os26-light.png");
 const MACOS_TRAFFIC_LIGHT_POSITION = { x: 16, y: 16 };
+const DEFAULT_WINDOW_MARGIN = 0;
 const activeOperationControllers = new Map<string, AbortController>();
 let logger: AppLogger | undefined;
 let activeProjectDirectory: string | undefined;
 let esseSkillLoader: EsseSkillLoader | undefined;
 let esseSkillSettings: EsseSkillSettings = { disabledSkills: [], skillPaths: [] };
+let esseMemoryStore: EsseMemoryStore | undefined;
 let builtInSkillsReady: Promise<void> | undefined;
 let confirmedRunningWorkClose = false;
 let inFlightGenerationCount = 0;
@@ -98,19 +103,20 @@ const projectSnapshotSinkRegistry = new ProjectMutationSinkRegistry<ProjectSnaps
 const esseBatchTaskRegistry = new EsseBatchTaskRegistry();
 const essePermissionBroker = new EssePermissionBroker();
 const essePreflightBroker = new EssePreflightBroker();
-let appIconThemeListenerRegistered = false;
+
+app.setName("Esse");
+app.setPath("userData", path.join(app.getPath("appData"), "BatchImager"));
 
 function createWindow(): void {
-  const appIcon = loadAppIconForTheme();
+  const appIcon = loadAppIcon();
   applyAppIcon(appIcon);
-  registerAppIconThemeListener();
+  const windowState = loadWindowState();
 
   const mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
+    ...windowState.bounds,
     minWidth: 1024,
     minHeight: 700,
-    title: "BatchImager",
+    title: "Esse",
     icon: appIcon,
     backgroundColor: "#f4f4f2",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
@@ -123,6 +129,10 @@ function createWindow(): void {
     }
   });
 
+  if (windowState.isMaximized) {
+    mainWindow.maximize();
+  }
+
   const devServerUrl = process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5173";
 
   if (app.isPackaged) {
@@ -133,6 +143,7 @@ function createWindow(): void {
 
   mainWindow.on("close", (event) => {
     if (confirmedRunningWorkClose || getRunningWorkCount() === 0) {
+      saveWindowState(mainWindow);
       return;
     }
 
@@ -143,18 +154,97 @@ function createWindow(): void {
     }
 
     confirmedRunningWorkClose = true;
+    saveWindowState(mainWindow);
   });
 }
 
-function loadAppIconForTheme(): Electron.NativeImage | undefined {
-  const preferredPath = nativeTheme.shouldUseDarkColors ? APP_ICON_DARK_PATH : APP_ICON_LIGHT_PATH;
-  const fallbackPath = nativeTheme.shouldUseDarkColors ? APP_ICON_LIGHT_PATH : APP_ICON_DARK_PATH;
-  const iconPath = existsSync(preferredPath) ? preferredPath : existsSync(fallbackPath) ? fallbackPath : undefined;
-  if (!iconPath) {
+interface WindowState {
+  bounds: Electron.Rectangle;
+  isMaximized?: boolean;
+}
+
+function loadWindowState(): WindowState {
+  const savedState = readSavedWindowState();
+  if (savedState && isWindowBoundsVisible(savedState.bounds)) {
+    return savedState;
+  }
+
+  const workArea = screen.getPrimaryDisplay().workArea;
+  return {
+    bounds: {
+      height: Math.max(700, workArea.height - DEFAULT_WINDOW_MARGIN * 2),
+      width: Math.max(1024, workArea.width - DEFAULT_WINDOW_MARGIN * 2),
+      x: workArea.x + DEFAULT_WINDOW_MARGIN,
+      y: workArea.y + DEFAULT_WINDOW_MARGIN
+    }
+  };
+}
+
+function readSavedWindowState(): WindowState | null {
+  try {
+    const parsed = JSON.parse(readFileSync(getWindowStateFilePath(), "utf8")) as Partial<WindowState>;
+    if (!isValidWindowBounds(parsed.bounds)) {
+      return null;
+    }
+
+    return {
+      bounds: parsed.bounds,
+      ...(parsed.isMaximized ? { isMaximized: true } : {})
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveWindowState(window: BrowserWindow): void {
+  const state: WindowState = {
+    bounds: window.isMaximized() ? window.getNormalBounds() : window.getBounds(),
+    ...(window.isMaximized() ? { isMaximized: true } : {})
+  };
+
+  try {
+    mkdirSync(path.dirname(getWindowStateFilePath()), { recursive: true });
+    writeFileSync(getWindowStateFilePath(), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  } catch (error) {
+    logger?.warn("Window state save failed", { error });
+  }
+}
+
+function getWindowStateFilePath(): string {
+  return path.join(app.getPath("userData"), "window-state.json");
+}
+
+function isValidWindowBounds(bounds: unknown): bounds is Electron.Rectangle {
+  return Boolean(
+    bounds &&
+      typeof bounds === "object" &&
+      typeof (bounds as Partial<Electron.Rectangle>).x === "number" &&
+      typeof (bounds as Partial<Electron.Rectangle>).y === "number" &&
+      typeof (bounds as Partial<Electron.Rectangle>).width === "number" &&
+      typeof (bounds as Partial<Electron.Rectangle>).height === "number" &&
+      (bounds as Partial<Electron.Rectangle>).width! >= 1024 &&
+      (bounds as Partial<Electron.Rectangle>).height! >= 700
+  );
+}
+
+function isWindowBoundsVisible(bounds: Electron.Rectangle): boolean {
+  return screen.getAllDisplays().some((display) => {
+    const area = display.workArea;
+    return (
+      bounds.x < area.x + area.width &&
+      bounds.x + bounds.width > area.x &&
+      bounds.y < area.y + area.height &&
+      bounds.y + bounds.height > area.y
+    );
+  });
+}
+
+function loadAppIcon(): Electron.NativeImage | undefined {
+  if (!existsSync(APP_ICON_PATH)) {
     return undefined;
   }
 
-  const image = nativeImage.createFromPath(iconPath);
+  const image = nativeImage.createFromPath(APP_ICON_PATH);
   return image.isEmpty() ? undefined : image;
 }
 
@@ -170,17 +260,6 @@ function applyAppIcon(icon: Electron.NativeImage | undefined): void {
   for (const window of BrowserWindow.getAllWindows()) {
     window.setIcon(icon);
   }
-}
-
-function registerAppIconThemeListener(): void {
-  if (appIconThemeListenerRegistered) {
-    return;
-  }
-
-  nativeTheme.on("updated", () => {
-    applyAppIcon(loadAppIconForTheme());
-  });
-  appIconThemeListenerRegistered = true;
 }
 
 function registerImageProtocol(): void {
@@ -280,6 +359,26 @@ function registerIpc(appLogger: AppLogger): void {
     appLogger.info("Project renamed", {
       data: { projectDirectory: request.directory },
       publicMessage: "项目已重命名。"
+    });
+
+    return entries;
+  });
+
+  ipcMain.handle("project:delete", async (_event, request: DeleteProjectRequest) => {
+    assertDeleteProjectRequest(request);
+    const entries = await deleteProject({
+      ...getProjectListOptions(),
+      projectDirectory: request.directory
+    });
+
+    if (activeProjectDirectory && normalizePathForComparison(activeProjectDirectory) === normalizePathForComparison(request.directory)) {
+      getSharedAgentRuntimeRegistry().invalidateAll();
+      activeProjectDirectory = undefined;
+    }
+
+    appLogger.info("Project deleted", {
+      data: { projectDirectory: request.directory },
+      publicMessage: "项目已删除。"
     });
 
     return entries;
@@ -442,6 +541,45 @@ function registerIpc(appLogger: AppLogger): void {
     };
   });
 
+  ipcMain.handle("esse:memory-list", async () => buildEsseMemorySnapshot());
+
+  ipcMain.handle("esse:memory-add", async (_event, request: AddEsseMemoryRequest) => {
+    assertAddEsseMemoryRequest(request);
+    const store = getEsseMemoryStore();
+    const result = await store.add({
+      category: request.category,
+      content: request.content
+    });
+    const snapshot = await buildEsseMemorySnapshot();
+    if ("conflictsWith" in result) {
+      return {
+        conflict: {
+          conflictsWith: result.conflictsWith,
+          similarity: result.similarity,
+          suggestedNext: result.suggestedNext
+        },
+        snapshot
+      };
+    }
+    appLogger.info("Esse memory added", {
+      data: { category: result.category, id: result.id },
+      publicMessage: "全局记忆已保存。"
+    });
+    return { snapshot };
+  });
+
+  ipcMain.handle("esse:memory-remove", async (_event, request: RemoveEsseMemoryRequest) => {
+    assertRemoveEsseMemoryRequest(request);
+    const result = await getEsseMemoryStore().remove(request.id);
+    if (result.removed) {
+      appLogger.info("Esse memory removed", {
+        data: { category: result.removed.category, id: result.removed.id },
+        publicMessage: "全局记忆已删除。"
+      });
+    }
+    return buildEsseMemorySnapshot();
+  });
+
   ipcMain.handle("generation:generate-image", async (_event, request: GenerateImageRequest) => {
     assertGenerateImageRequest(request);
 
@@ -498,6 +636,23 @@ function registerIpc(appLogger: AppLogger): void {
     return { ok: true };
   });
 
+  ipcMain.handle("images:export", async (_event, request: ExportImagesRequest) => {
+    assertExportImagesRequest(request);
+
+    const result = await packageGeneratedImages({
+      desktopDirectory: app.getPath("desktop"),
+      fileName: request.fileName ?? "Esse-导出图片.zip",
+      imagePaths: request.imagePaths
+    });
+
+    appLogger.info("Workspace images exported", {
+      data: { imageCount: request.imagePaths.length, outputPath: result.outputPath },
+      publicMessage: `已导出 ${request.imagePaths.length} 张图片。`
+    });
+
+    return { outputPath: result.outputPath };
+  });
+
   ipcMain.handle("images:create-placeholder", async (_event, request: CreatePlaceholderImageRequest) => {
     assertCreatePlaceholderImageRequest(request);
     const outputDirectory = getProjectGeneratedDirectory(requireActiveProjectDirectory());
@@ -516,7 +671,7 @@ function registerIpc(appLogger: AppLogger): void {
     return { filePath };
   });
 
-  ipcMain.handle("chat:send-message", async (_event, request: SendChatMessageRequest) => {
+  ipcMain.handle("chat:send-message", async (ipcEvent, request: SendChatMessageRequest) => {
     assertSendChatMessageRequest(request);
 
     appLogger.info("Chat IPC received", {
@@ -530,8 +685,15 @@ function registerIpc(appLogger: AppLogger): void {
         const llmConfig = loadTuziLlmConfig();
         const generateImage = createProjectImageGenerationExecutor(requireActiveProjectDirectory(), appLogger, signal);
         return await runImageSessionAgent(request, llmConfig, requireActiveProjectDirectory(), {
-          generateImage: (toolRequest) =>
-            toolRequest.mode === "generate"
+          generateImage: (toolRequest) => {
+            ipcEvent.sender.send("chat:image-generation-started", {
+              prompt: toolRequest.prompt,
+              ...(toolRequest.referenceImagePaths?.length ? { referenceImagePaths: toolRequest.referenceImagePaths } : {}),
+              sessionId: toolRequest.sessionId,
+              sourceImagePath: toolRequest.imagePath
+            });
+
+            return toolRequest.mode === "generate"
               ? generateImage({
                   imagePath: toolRequest.imagePath,
                   mode: "generate",
@@ -540,7 +702,8 @@ function registerIpc(appLogger: AppLogger): void {
                   sessionId: toolRequest.sessionId,
                   ...(toolRequest.size ? { size: toolRequest.size } : {})
                 })
-              : generateImage({ ...toolRequest, mode: "edit" }),
+              : generateImage({ ...toolRequest, mode: "edit" });
+          },
           logger: appLogger,
           signal
         });
@@ -548,6 +711,7 @@ function registerIpc(appLogger: AppLogger): void {
 
       return {
         assistantMessage: result.content,
+        generationMode: result.generatedMode,
         generatedImagePath: result.generatedImage?.outputPath,
         remoteUrl: result.generatedImage?.remoteUrl,
         sessionId: request.sessionId
@@ -604,7 +768,7 @@ function registerIpc(appLogger: AppLogger): void {
             packageGeneratedImages
           }),
           initialSnapshot: await openProject(projectDirectory),
-          memoryStore: createEsseMemoryStore(path.join(app.getPath("userData"), "esse-memory.md")),
+          memoryStore: getEsseMemoryStore(),
           recordToolCalls: true,
           requestPermission: (payload) =>
             essePermissionBroker.request(event.sender, payload, {
@@ -620,6 +784,12 @@ function registerIpc(appLogger: AppLogger): void {
         return await runEsseAgentTurn(request, loadTuziLlmConfig(), projectDirectory, {
           bashTool,
           logger: appLogger,
+          onAssistantMessageUpdate: (content) => {
+            event.sender.send("esse:assistant-message-update", {
+              content,
+              ...(request.operationId ? { operationId: request.operationId } : {})
+            });
+          },
           signal,
           skillLoader,
           workspaceToolRuntime
@@ -1011,6 +1181,15 @@ function getEsseSkillSettingsPath(): string {
   return path.join(app.getPath("userData"), "esse-settings.json");
 }
 
+function getEsseMemoryFilePath(): string {
+  return path.join(app.getPath("userData"), "esse-memory.md");
+}
+
+function getEsseMemoryStore(): EsseMemoryStore {
+  esseMemoryStore ??= createEsseMemoryStore(getEsseMemoryFilePath());
+  return esseMemoryStore;
+}
+
 function createAppEsseSkillLoader(options: { includeDisabled?: boolean } = {}): EsseSkillLoader {
   return createEsseSkillLoader({
     agentDir: getEsseSkillsDirectory(),
@@ -1049,6 +1228,15 @@ async function buildEsseSkillsSnapshot(forceReload: boolean) {
       ...skill,
       enabled: !disabled.has(skill.name)
     }))
+  };
+}
+
+async function buildEsseMemorySnapshot() {
+  const store = getEsseMemoryStore();
+  return {
+    categories: ["用户偏好", "默认约束", "工作流惯例"],
+    entries: await store.list(),
+    filePath: store.getFilePath()
   };
 }
 
@@ -1159,10 +1347,32 @@ function assertReadEsseSkillFileRequest(request: ReadEsseSkillFileRequest): void
   }
 }
 
+function assertAddEsseMemoryRequest(request: AddEsseMemoryRequest): void {
+  if (
+    typeof request !== "object" ||
+    request === null ||
+    typeof request.content !== "string" ||
+    !request.content.trim() ||
+    request.content.length > 200 ||
+    (request.category !== undefined && request.category !== "用户偏好" && request.category !== "默认约束" && request.category !== "工作流惯例")
+  ) {
+    throw new Error("Invalid Esse memory add request");
+  }
+}
+
+function assertRemoveEsseMemoryRequest(request: RemoveEsseMemoryRequest): void {
+  if (typeof request !== "object" || request === null || typeof request.id !== "string" || !request.id.trim()) {
+    throw new Error("Invalid Esse memory remove request");
+  }
+}
+
 function assertSaveApiSettingsRequest(request: SaveApiSettingsRequest): void {
   if (
     typeof request !== "object" ||
     request === null ||
+    (request.activeImageApiProfileId !== undefined &&
+      request.activeImageApiProfileId !== "primary" &&
+      request.activeImageApiProfileId !== "secondary") ||
     typeof request.imageBaseUrl !== "string" ||
     !request.imageBaseUrl.trim() ||
     typeof request.imageModel !== "string" ||
@@ -1173,6 +1383,31 @@ function assertSaveApiSettingsRequest(request: SaveApiSettingsRequest): void {
     !request.llmModel.trim() ||
     (request.imageApiKey !== undefined && typeof request.imageApiKey !== "string") ||
     (request.llmApiKey !== undefined && typeof request.llmApiKey !== "string")
+  ) {
+    throw new Error("Invalid API settings request");
+  }
+
+  if (
+    request.imageApiProfiles !== undefined &&
+    (!Array.isArray(request.imageApiProfiles) ||
+      request.imageApiProfiles.length === 0 ||
+      request.imageApiProfiles.some(
+        (profile) =>
+          typeof profile !== "object" ||
+          profile === null ||
+          (profile.id !== "primary" && profile.id !== "secondary") ||
+          typeof profile.name !== "string" ||
+          typeof profile.baseUrl !== "string" ||
+          !profile.baseUrl.trim() ||
+          typeof profile.model !== "string" ||
+          !profile.model.trim() ||
+          typeof profile.llmBaseUrl !== "string" ||
+          !profile.llmBaseUrl.trim() ||
+          typeof profile.llmModel !== "string" ||
+          !profile.llmModel.trim() ||
+          (profile.apiKey !== undefined && typeof profile.apiKey !== "string") ||
+          (profile.llmApiKey !== undefined && typeof profile.llmApiKey !== "string")
+      ))
   ) {
     throw new Error("Invalid API settings request");
   }
@@ -1278,6 +1513,12 @@ function assertRenameProjectRequest(request: RenameProjectRequest): void {
   }
 }
 
+function assertDeleteProjectRequest(request: DeleteProjectRequest): void {
+  if (typeof request !== "object" || request === null || typeof request.directory !== "string" || !request.directory.trim()) {
+    throw new Error("Invalid project delete request");
+  }
+}
+
 function assertEssePreflightResponse(response: EssePreflightResponse): void {
   if (
     typeof response !== "object" ||
@@ -1328,6 +1569,19 @@ function assertSaveReferenceImageRequest(request: SaveReferenceImageRequest): vo
 function assertCopyImageToClipboardRequest(request: CopyImageToClipboardRequest): void {
   if (typeof request !== "object" || request === null || typeof request.imagePath !== "string" || !request.imagePath.trim()) {
     throw new Error("Invalid copy image request");
+  }
+}
+
+function assertExportImagesRequest(request: ExportImagesRequest): void {
+  if (
+    typeof request !== "object" ||
+    request === null ||
+    (request.fileName !== undefined && typeof request.fileName !== "string") ||
+    !Array.isArray(request.imagePaths) ||
+    request.imagePaths.length === 0 ||
+    !request.imagePaths.every((imagePath) => typeof imagePath === "string" && imagePath.trim())
+  ) {
+    throw new Error("Invalid export images request");
   }
 }
 

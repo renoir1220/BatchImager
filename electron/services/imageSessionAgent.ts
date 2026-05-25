@@ -58,6 +58,7 @@ export interface ImageToolRequest {
 
 export interface ImageToolChatResult {
   content: string;
+  generatedMode?: "edit" | "generate";
   generatedImage?: ProductImageResult;
 }
 
@@ -75,8 +76,10 @@ interface ImageSessionAgentDeps {
 interface TurnState {
   generateImage: (request: ImageToolRequest) => Promise<ProductImageResult>;
   imagePath: string;
+  latestUserMessage: string;
   referenceImages: ReferenceImageCandidate[];
   selectedOutputSize: string | undefined;
+  sessionGenerationMode?: "edit" | "generate";
   sessionId: string;
   signal?: AbortSignal;
 }
@@ -93,7 +96,9 @@ export async function runImageSessionAgent(
   const registryKey = buildRegistryKey(projectDirectory, input.sessionId);
   const selectedOutputSize = normalizeGenerationSizeValue(input.outputSize);
   const referenceImages = getReferenceImageCandidates(input);
+  const latestUserMessage = getLatestUserMessage(input);
   let generatedImage: ProductImageResult | undefined;
+  let generatedMode: "edit" | "generate" | undefined;
 
   if (
     shouldReportMissingReferenceImage({
@@ -135,13 +140,16 @@ export async function runImageSessionAgent(
   turnStateByKey.set(registryKey, {
     generateImage: async (request) => {
       throwIfAborted(deps.signal);
+      generatedMode = request.mode;
       generatedImage = await deps.generateImage(request);
       throwIfAborted(deps.signal);
       return generatedImage;
     },
     imagePath: input.imagePath,
+    latestUserMessage,
     referenceImages,
     selectedOutputSize,
+    sessionGenerationMode: input.generationMode,
     sessionId: input.sessionId,
     ...(deps.signal ? { signal: deps.signal } : {})
   });
@@ -196,6 +204,7 @@ export async function runImageSessionAgent(
 
       return {
         content,
+        ...(generatedMode ? { generatedMode } : {}),
         ...(generatedImage ? { generatedImage } : {})
       };
     }
@@ -299,13 +308,14 @@ function createGenerateImageTool(options: {
 
       throwIfAborted(signal);
       throwIfAborted(state.signal);
-      const mode = normalizeImageToolMode(params.mode);
-      if (!mode) {
+      const normalizedMode = normalizeImageToolMode(params.mode);
+      if (!normalizedMode) {
         return {
           content: [{ type: "text", text: "generate_image mode must be either 'edit' or 'generate'." }],
           isError: true
         };
       }
+      const mode = chooseCurrentImageToolMode(normalizedMode, state);
 
       await runSharedGenerateImageCore({
         generateImage: state.generateImage,
@@ -366,10 +376,11 @@ function buildFullPrompt(
     "1) 需要生成或修改图片时必须调用 generate_image，不要假装已经生成。",
     "2) 不要在回复中展示本地路径、远端 URL 或下载链接。",
     "3) 不要展示隐藏推理链，只展示用户能理解的计划、进度和结果。",
-    "4) 调用 generate_image 时必须显式选择 mode：保留/改造当前图用 edit；从零创建新图才用 generate。",
-    "5) 当前图片会自动作为 edit 模式的 imagePath 输入，用户不需要重新上传。",
-    "6) 回复要自然：先简短说明你准备做什么；工具完成后总结结果；若只是讨论或澄清，不要强行生成。",
-    "7) 后续每轮我会在 [环境更新] 段告诉你最新的图片路径 / 选中分辨率 / 参考图索引；以最新一轮为准。",
+    "4) 默认编辑当前图片：除非用户明确说“新生成一张 / 从零创建 / 新增一张”，否则 generate_image 必须用 mode:\"edit\"。",
+    "5) 用户没有明确说明编辑对象时，默认对象就是当前图片的最新版本；“把这张图改成漫画风格”和“改为漫画风格”都表示编辑当前图。",
+    "6) 当前图片会自动作为 edit 模式的 imagePath 输入，用户不需要重新上传。",
+    "7) 回复要自然：先简短说明你准备做什么；工具完成后总结结果；若只是讨论或澄清，不要强行生成。",
+    "8) 后续每轮我会在 [环境更新] 段告诉你最新的图片路径 / 选中分辨率 / 参考图索引；以最新一轮为准。",
     "上下文：",
     `- 当前图片路径：${input.imagePath}`
   ];
@@ -390,6 +401,8 @@ function buildFullPrompt(
   }
   if (selectedOutputSize) {
     sections.push(`- 本次用户已选择输出分辨率：${selectedOutputSize}；调用 generate_image 时必须使用这个 size。`);
+  } else {
+    sections.push("- 用户未指定输出分辨率或比例：调用 generate_image 时不要传 size；edit 会按当前输入图的原始比例/尺寸推导。");
   }
 
   if (referenceImages.length) {
@@ -432,7 +445,7 @@ function buildTurnPrompt(
   if (selectedOutputSize) {
     sections.push(`- 本次用户已选择输出分辨率：${selectedOutputSize}；调用 generate_image 时必须使用这个 size。`);
   } else {
-    sections.push("- 用户当前没有选定输出分辨率。");
+    sections.push("- 用户当前没有选定输出分辨率；调用 generate_image 时不要传 size，默认按当前输入图的原始比例/尺寸生成。");
   }
 
   if (referenceImages.length) {
@@ -501,6 +514,18 @@ function selectReferenceImagePaths(value: unknown, referenceImages: ReferenceIma
 
 function normalizeImageToolMode(value: unknown): "edit" | "generate" | undefined {
   return value === "edit" || value === "generate" ? value : undefined;
+}
+
+function chooseCurrentImageToolMode(mode: "edit" | "generate", state: TurnState): "edit" | "generate" {
+  if (mode === "edit" || state.sessionGenerationMode === "generate") {
+    return mode;
+  }
+
+  return hasExplicitNewImageIntent(state.latestUserMessage) ? "generate" : "edit";
+}
+
+function hasExplicitNewImageIntent(message: string): boolean {
+  return /(?:新生成|重新生成一张新|生成一张新|新增|新建|另(?:外)?一张|再(?:来|做|生成)一张|从零|空白|不基于当前|不要基于当前)/.test(message);
 }
 
 function getLatestUserMessage(input: ImageToolChatInput): string {

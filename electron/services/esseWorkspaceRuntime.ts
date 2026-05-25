@@ -28,6 +28,7 @@ interface ProjectSnapshotWorkspaceRuntimeOptions {
     context: {
       applyMutation: EsseWorkspaceToolRuntime["applyMutation"];
       getState: () => ProjectSnapshot;
+      getTurnReferenceImagePaths?: () => string[];
     }
   ) => Promise<WorkspaceMutationResult>;
   executePackagePreflightTool?: (
@@ -91,7 +92,8 @@ export function createProjectSnapshotWorkspaceRuntime(options: ProjectSnapshotWo
           executeImagePreflightTool: (request) =>
             options.executeImagePreflightTool?.(request, {
               applyMutation: (mutator) => runtime.applyMutation(mutator),
-              getState: () => currentSnapshot
+              getState: () => currentSnapshot,
+              ...(options.getTurnReferenceImagePaths ? { getTurnReferenceImagePaths: options.getTurnReferenceImagePaths } : {})
             }) ?? Promise.resolve({ ok: false, reason: "image execution unavailable" })
         }
       : {}),

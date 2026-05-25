@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { unlink } from "node:fs/promises";
 import path from "node:path";
-import type { EssePreflightCommand, PersistedImageSession, ProjectSnapshot } from "../ipcTypes";
+import type { BatchPlanReferenceImage, EssePreflightCommand, PersistedImageSession, ProjectSnapshot } from "../ipcTypes";
 import { createBlankGenerationSeed } from "./blankGenerationSeed";
 import type { ImageGenerationExecutor } from "./imageGenerationService";
 import { getProjectGeneratedDirectory } from "./projectStore";
@@ -23,6 +23,7 @@ export interface CreateEsseImagePreflightExecutorOptions {
 interface EsseImagePreflightExecutionContext {
   applyMutation: EsseWorkspaceToolRuntime["applyMutation"];
   getState: () => ProjectSnapshot;
+  getTurnReferenceImagePaths?: () => string[];
 }
 
 export type EsseBatchTaskRetryResult =
@@ -71,7 +72,7 @@ export function createEsseImagePreflightExecutor(options: CreateEsseImagePreflig
 
     const affectedSessionIds = preparedCommands.map(({ prepared }) => prepared.sessionId);
     const queuedMutation = await context.applyMutation((state) =>
-      appendBatchTaskCardMessage(markSessionsQueued(state, affectedSessionIds).state, {
+      appendBatchTaskCardMessage(appendEsseTaskMessages(markSessionsQueued(state, affectedSessionIds).state, preparedCommands), {
         batchTaskId,
         preparedCommands
       })
@@ -131,7 +132,8 @@ export async function retryEsseBatchTaskItem(
   const prepared = await prepareCommand(command, context, {
     createSeed: options.createSeed ?? createBlankGenerationSeed,
     makeSessionId: options.makeSessionId ?? createSessionId,
-    projectDirectory: options.projectDirectory
+    projectDirectory: options.projectDirectory,
+    reuseExistingTarget: true
   });
   if (!prepared.ok) {
     return { accepted: false, reason: prepared.reason };
@@ -147,7 +149,13 @@ export async function retryEsseBatchTaskItem(
     return { accepted: false, reason: registerResult.reason };
   }
 
-  const mutation = await context.applyMutation((state) => markSessionsQueued(state, [request.sessionId]));
+  const mutation = await context.applyMutation((state) => {
+    const queued = markSessionsQueued(state, [request.sessionId]);
+    return {
+      result: queued.result,
+      state: appendEsseTaskMessages(queued.state, [{ command, prepared }])
+    };
+  });
   if (!mutation.result.ok) {
     return { accepted: false, reason: mutation.result.reason };
   }
@@ -170,7 +178,14 @@ export async function retryEsseBatchTaskItem(
 
 interface PreparedCommand {
   command: EssePreflightCommand;
-  prepared: { blankSeedPath?: string; imagePath: string; ok: true; referenceImagePaths: string[]; sessionId: string };
+  prepared: {
+    blankSeedPath?: string;
+    imagePath: string;
+    ok: true;
+    referenceImages: BatchPlanReferenceImage[];
+    referenceImagePaths: string[];
+    sessionId: string;
+  };
 }
 
 async function runPreparedGeneration(params: {
@@ -188,7 +203,7 @@ async function runPreparedGeneration(params: {
       generateImage: params.options.generateImage,
       imagePath: params.prepared.imagePath,
       mode: params.command.mode ?? "generate",
-      prompt: params.command.prompt ?? "",
+      prompt: buildApiPromptWithReferenceNames(params.command.prompt ?? "", params.command.referenceImageNames),
       referenceImagePaths: params.prepared.referenceImagePaths,
       sessionId: params.prepared.sessionId,
       ...(params.batchController ? { signal: params.batchController.signal } : {}),
@@ -221,9 +236,17 @@ async function prepareCommand(
     createSeed: (input: { outputDirectory: string; sessionId: string; size?: string }) => Promise<string>;
     makeSessionId: () => string;
     projectDirectory: string;
+    reuseExistingTarget?: boolean;
   }
 ): Promise<
-  | { blankSeedPath?: string; imagePath: string; ok: true; referenceImagePaths: string[]; sessionId: string }
+  | {
+      blankSeedPath?: string;
+      imagePath: string;
+      ok: true;
+      referenceImages: BatchPlanReferenceImage[];
+      referenceImagePaths: string[];
+      sessionId: string;
+    }
   | Extract<WorkspaceMutationResult, { ok: false }>
 > {
   if (!command.mode || !command.prompt) {
@@ -231,7 +254,9 @@ async function prepareCommand(
   }
 
   const mode = command.mode;
-  const referenceImagePaths = selectReferenceImagePaths(command.referenceImageIds, context.getState());
+  const referenceImages = selectReferenceImages(command.referenceImageIds, context.getState(), context.getTurnReferenceImagePaths?.() ?? []);
+  const referenceImagePaths = referenceImages.map((referenceImage) => referenceImage.filePath);
+  const sessionId = createUniqueSessionId(context.getState(), options.makeSessionId);
   if (command.target?.type === "existing") {
     const session = context.getState().sessions.find((current) => current.id === command.target?.sessionId);
     if (!session) {
@@ -242,15 +267,72 @@ async function prepareCommand(
         suggestedNext: "call list_sessions to list current ids."
       };
     }
+
+    if (!options.reuseExistingTarget) {
+      const mutation = await context.applyMutation((state) => addNewSessionFromSource(state, {
+        fileName: command.target?.fileName || `生成-${session.fileName}`,
+        sessionId,
+        sourceSessionId: session.id
+      }));
+      if (!mutation.result.ok) {
+        return mutation.result;
+      }
+
+      return {
+        imagePath: mode === "edit" ? getCurrentImagePath(session) : session.filePath,
+        ok: true,
+        referenceImages,
+        referenceImagePaths,
+        sessionId
+      };
+    }
+
     return {
       imagePath: mode === "edit" ? getCurrentImagePath(session) : session.filePath,
       ok: true,
+      referenceImages,
       referenceImagePaths,
       sessionId: session.id
     };
   }
 
-  const sessionId = createUniqueSessionId(context.getState(), options.makeSessionId);
+  if (command.target?.type === "new" && command.target.sourceSessionId) {
+    if (mode !== "edit") {
+      return {
+        ok: false,
+        reason: "new target with sourceSessionId requires edit mode",
+        suggestedNext: "use mode='edit' with target.type='new' and sourceSessionId."
+      };
+    }
+
+    const sourceSession = context.getState().sessions.find((current) => current.id === command.target?.sourceSessionId);
+    if (!sourceSession) {
+      return {
+        ok: false,
+        reason: "source session not found",
+        detail: `no session with id ${command.target.sourceSessionId}`,
+        suggestedNext: "call list_sessions to list current ids."
+      };
+    }
+
+    const mutation = await context.applyMutation((state) => addNewSessionFromSource(state, {
+      fileName: command.target?.fileName || `生成-${sourceSession.fileName}`,
+      sessionId,
+      sourceSessionId: sourceSession.id
+    }));
+    if (!mutation.result.ok) {
+      return mutation.result;
+    }
+
+    return {
+      imagePath: getCurrentImagePath(sourceSession),
+      ok: true,
+      referenceImages,
+      referenceImagePaths,
+      sessionId
+    };
+  }
+
   const seedPath = await options.createSeed({
     outputDirectory: getProjectGeneratedDirectory(options.projectDirectory),
     sessionId,
@@ -270,8 +352,73 @@ async function prepareCommand(
     blankSeedPath: seedPath,
     imagePath: seedPath,
     ok: true,
+    referenceImages,
     referenceImagePaths,
     sessionId
+  };
+}
+
+function buildApiPromptWithReferenceNames(prompt: string, referenceImageNames: string[] | undefined): string {
+  const names = referenceImageNames?.map((name) => name.trim()).filter(Boolean) ?? [];
+  if (!names.length) {
+    return prompt;
+  }
+
+  const lines = names.map((name, index) => `第${index + 1}张 = ${name}`);
+
+  return [`本次上传给图像 API 的图片局部命名：${lines.join("；")}。`, prompt].join("\n");
+}
+
+function addNewSessionFromSource(
+  state: ProjectSnapshot,
+  params: { fileName: string; sessionId: string; sourceSessionId: string }
+): { result: WorkspaceMutationResult; state: ProjectSnapshot } {
+  if (state.sessions.some((session) => session.id === params.sessionId)) {
+    return {
+      result: {
+        ok: false,
+        reason: "sessionId must be unique",
+        suggestedNext: "retry with a new generated session id."
+      },
+      state
+    };
+  }
+
+  const sourceIndex = state.sessions.findIndex((session) => session.id === params.sourceSessionId);
+  const source = state.sessions[sourceIndex];
+  if (!source) {
+    return {
+      result: {
+        ok: false,
+        reason: "source session not found",
+        detail: `no session with id ${params.sourceSessionId}`,
+        suggestedNext: "call list_sessions to list current ids."
+      },
+      state
+    };
+  }
+
+  const session: PersistedImageSession = {
+    chatMessages: [],
+    chatStatus: "idle",
+    fileName: params.fileName,
+    filePath: getCurrentImagePath(source),
+    generationMode: "edit",
+    id: params.sessionId,
+    originatedFromGeneration: true,
+    status: "queued",
+    ...(source.lastPrompt ? { lastPrompt: source.lastPrompt } : {}),
+    showOriginalInList: false
+  };
+
+  return {
+    result: { affectedSessionIds: [params.sessionId], ok: true, summary: "已创建新图副本。" },
+    state: {
+      ...state,
+      project: { ...state.project, imageCount: state.sessions.length + 1 },
+      selectedSessionId: params.sessionId,
+      sessions: state.sessions.flatMap((current, index) => (index === sourceIndex ? [current, session] : [current]))
+    }
   };
 }
 
@@ -383,6 +530,37 @@ function markSessionsQueued(
   };
 }
 
+function appendEsseTaskMessages(state: ProjectSnapshot, preparedCommands: PreparedCommand[]): ProjectSnapshot {
+  return {
+    ...state,
+    sessions: state.sessions.map((session) => {
+      const preparedCommand = preparedCommands.find(({ prepared }) => prepared.sessionId === session.id);
+      if (!preparedCommand) {
+        return session;
+      }
+
+      const prompt = preparedCommand.command.prompt ?? "";
+      const referenceFilePaths = preparedCommand.prepared.referenceImagePaths;
+      const sourceFilePath = preparedCommand.command.mode === "edit" ? preparedCommand.prepared.imagePath : undefined;
+      return {
+        ...session,
+        chatMessages: [
+          ...session.chatMessages,
+          {
+            content: `来自 Esse智能体：${prompt}${referenceFilePaths.length > 0 ? `\n参考图：${referenceFilePaths.length} 张` : ""}`,
+            contextType: "esse-task",
+            id: createMessageId("esse-task"),
+            role: "context",
+            ...(referenceFilePaths.length > 0 ? { referenceFilePaths } : {}),
+            ...(sourceFilePath ? { sourceFilePath } : {})
+          }
+        ],
+        lastPrompt: prompt
+      };
+    })
+  };
+}
+
 function appendBatchTaskCardMessage(
   state: ProjectSnapshot,
   params: { batchTaskId: string; preparedCommands: PreparedCommand[] }
@@ -399,6 +577,7 @@ function appendBatchTaskCardMessage(
   }
 
   const sessionsById = new Map(state.sessions.map((session) => [session.id, session]));
+  const referenceImages = uniqueReferenceImages(params.preparedCommands.flatMap(({ prepared }) => prepared.referenceImages));
   const items = params.preparedCommands.map(({ command, prepared }) => {
     const session = sessionsById.get(prepared.sessionId);
     return {
@@ -427,7 +606,8 @@ function appendBatchTaskCardMessage(
             {
               batchTask: {
                 batchTaskId: params.batchTaskId,
-                items
+                items,
+                ...(referenceImages.length ? { referenceImages } : {})
               },
               content: "",
               contextType: "esse-batch-task",
@@ -483,25 +663,75 @@ function markSessionFailed(
   };
 }
 
-function selectReferenceImagePaths(referenceImageIds: string[] | undefined, state: ProjectSnapshot): string[] {
+function selectReferenceImages(
+  referenceImageIds: string[] | undefined,
+  state: ProjectSnapshot,
+  turnReferenceImagePaths: string[] = []
+): BatchPlanReferenceImage[] {
   if (!referenceImageIds?.length) {
     return [];
   }
 
-  const byId = new Map<string, string>();
+  const byId = new Map<string, BatchPlanReferenceImage>();
   for (const referenceImage of state.referenceImages ?? []) {
-    byId.set(referenceImage.id, referenceImage.filePath);
+    byId.set(referenceImage.id, referenceImage);
   }
 
   for (const plan of state.projectManagerState?.plans ?? []) {
     for (const referenceImage of plan.referenceImages ?? []) {
       if (!byId.has(referenceImage.id)) {
-        byId.set(referenceImage.id, referenceImage.filePath);
+        byId.set(referenceImage.id, referenceImage);
       }
     }
   }
 
-  return [...new Set(referenceImageIds.map((id) => byId.get(id)).filter((filePath): filePath is string => Boolean(filePath)))];
+  for (const message of state.projectManagerState?.conversation.messages ?? []) {
+    for (const referenceImage of message.batchTask?.referenceImages ?? []) {
+      if (!byId.has(referenceImage.id)) {
+        byId.set(referenceImage.id, referenceImage);
+      }
+    }
+  }
+
+  for (const [index, session] of state.sessions.entries()) {
+    const id = getWorkspaceReferenceImageId(session.id);
+    if (!byId.has(id)) {
+      byId.set(id, {
+        filePath: getCurrentImagePath(session),
+        id,
+        label: `图${index + 1} ${session.fileName}`
+      });
+    }
+  }
+
+  for (const [index, filePath] of turnReferenceImagePaths.entries()) {
+    const id = `turn-ref-${index + 1}`;
+    if (!byId.has(id)) {
+      byId.set(id, {
+        filePath,
+        id,
+        label: `本轮参考图 ${index + 1}`
+      });
+    }
+  }
+
+  return uniqueReferenceImages(
+    referenceImageIds.map((id) => byId.get(id)).filter((referenceImage): referenceImage is BatchPlanReferenceImage => Boolean(referenceImage))
+  );
+}
+
+function uniqueReferenceImages(referenceImages: BatchPlanReferenceImage[]): BatchPlanReferenceImage[] {
+  const seen = new Set<string>();
+  const unique: BatchPlanReferenceImage[] = [];
+  for (const referenceImage of referenceImages) {
+    const key = referenceImage.id || referenceImage.filePath;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(referenceImage);
+  }
+  return unique;
 }
 
 function findBatchTaskCardItem(
@@ -523,7 +753,11 @@ function findBatchTaskCardItem(
 }
 
 function getCurrentImagePath(session: PersistedImageSession): string {
-  return session.showOriginalInList ? session.filePath : session.generatedFilePath ?? session.filePath;
+  return session.generatedFilePath ?? session.filePath;
+}
+
+function getWorkspaceReferenceImageId(sessionId: string): string {
+  return `workspace-ref-${sessionId}`;
 }
 
 function appendUnique(paths: string[] | undefined, filePath: string): string[] {

@@ -103,7 +103,8 @@ describe("project plan UI wiring", () => {
 
     expect(app).toContain("executeNewImagePlanCommands");
     expect(app).toContain("selectPlanCommandsForExecution");
-    expect(app).toContain('commandsToRun.filter((command) => command.target === "new")');
+    expect(app).toContain("commandsToRun.map((command) => normalizeProjectPlanCommandForNewResult(command))");
+    expect(app).toContain("sourceSessionId: command.sourceSessionId ?? command.targetSessionId");
     expect(app).toContain("preparedTasks.push");
     expect(app).toContain("await Promise.all");
   });
@@ -120,14 +121,14 @@ describe("project plan UI wiring", () => {
     );
   });
 
-  test("Esse final replies append to the latest project-manager snapshot after workspace tool broadcasts", () => {
+  test("Esse final replies update the latest project-manager snapshot after workspace tool broadcasts", () => {
     const app = readProjectFile("src/App.tsx");
     const sendEsseBody = app.match(
       /async function handleSendEsseMessage\([\s\S]*?\): Promise<void> \{(?<body>[\s\S]*?)\n  \}/
     )?.groups?.body ?? "";
 
-    expect(sendEsseBody).toContain("appendProjectManagerAssistantMessage(\n        projectManagerStateRef.current");
-    expect(sendEsseBody).not.toContain("appendProjectManagerAssistantMessage(\n        nextState");
+    expect(sendEsseBody).toContain("upsertProjectManagerAssistantMessage(\n        projectManagerStateRef.current");
+    expect(sendEsseBody).not.toContain("upsertProjectManagerAssistantMessage(\n        nextState");
     expect(sendEsseBody).toContain("appendProjectManagerError(\n        projectManagerStateRef.current");
   });
 
@@ -191,7 +192,8 @@ describe("project plan UI wiring", () => {
     expect(app).toContain("moveImageSession");
     expect(app).toContain("handleReorderSessions");
     expect(panel).toContain("handleReferenceDrop");
-    expect(panel).toContain("addReferenceImagePath");
+    expect(panel).toContain("insertInlineReference");
+    expect(panel).toContain("InlineReferenceComposer");
     expect(references).toContain("addReferenceImagePath");
   });
 });

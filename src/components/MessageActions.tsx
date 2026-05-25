@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 
 interface MessageActionsProps {
   content: string;
+  referenceFilePaths?: string[];
 }
 
-export function MessageActions({ content }: MessageActionsProps) {
+export function MessageActions({ content, referenceFilePaths = [] }: MessageActionsProps) {
   const [isCopied, setIsCopied] = useState(false);
   const copiedResetTimer = useRef<number | null>(null);
 
@@ -22,7 +23,16 @@ export function MessageActions({ content }: MessageActionsProps) {
     }
 
     try {
-      await navigator.clipboard.writeText(content);
+      if (referenceFilePaths.length > 0 && typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([formatMessageClipboardHtml(content, referenceFilePaths)], { type: "text/html" }),
+            "text/plain": new Blob([content], { type: "text/plain" })
+          })
+        ]);
+      } else {
+        await navigator.clipboard.writeText(content);
+      }
     } catch {
       return;
     }
@@ -54,6 +64,70 @@ export function MessageActions({ content }: MessageActionsProps) {
       </button>
     </div>
   );
+}
+
+function formatMessageClipboardHtml(content: string, referenceFilePaths: string[]): string {
+  const parts = splitContentByImageTokens(content);
+  let html = "";
+
+  for (const part of parts) {
+    if (part.type === "text") {
+      html += escapeHtml(part.text).replace(/\n/g, "<br>");
+      continue;
+    }
+
+    const filePath = referenceFilePaths[part.index - 1];
+    if (!filePath) {
+      html += escapeHtml(part.raw);
+      continue;
+    }
+
+    const fileName = getFileNameFromPath(filePath);
+    html += `<span class="inline-reference-chip" contenteditable="false" data-batchimager-reference-path="${escapeHtmlAttribute(filePath)}" data-batchimager-reference-name="${escapeHtmlAttribute(fileName)}">${escapeHtml(part.raw)}</span>`;
+  }
+
+  return html;
+}
+
+type MessageClipboardPart =
+  | { text: string; type: "text" }
+  | { index: number; raw: string; type: "reference" };
+
+function splitContentByImageTokens(content: string): MessageClipboardPart[] {
+  const parts: MessageClipboardPart[] = [];
+  const pattern = /【图片(\d+)】/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(content)) !== null) {
+    if (match.index > cursor) {
+      parts.push({ text: content.slice(cursor, match.index), type: "text" });
+    }
+    parts.push({ index: Number(match[1]), raw: match[0], type: "reference" });
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor < content.length) {
+    parts.push({ text: content.slice(cursor), type: "text" });
+  }
+
+  return parts;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return escapeHtml(value).replace(/"/g, "&quot;");
+}
+
+function getFileNameFromPath(filePath: string): string {
+  const lastSlash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
+  return filePath.slice(lastSlash + 1) || "reference.png";
 }
 
 function CopyIcon() {

@@ -17,6 +17,11 @@ export interface RememberProjectDirectoryOptions {
   projectDirectory: string;
 }
 
+export interface RemoveProjectDirectoryOptions {
+  indexFilePath: string;
+  projectDirectory: string;
+}
+
 export interface ProjectListEntry {
   directory: string;
   isExternal: boolean;
@@ -32,6 +37,18 @@ export async function rememberProjectDirectory(options: RememberProjectDirectory
   if (!index.projectDirectories.some((directory) => normalizeProjectPath(directory) === normalizedProjectDirectory)) {
     index.projectDirectories.push(projectDirectory);
     await writeProjectIndex(options.indexFilePath, index);
+  }
+}
+
+export async function removeProjectDirectoryFromIndex(options: RemoveProjectDirectoryOptions): Promise<void> {
+  const index = await readProjectIndex(options.indexFilePath);
+  const normalizedProjectDirectory = normalizeProjectPath(options.projectDirectory);
+  const nextProjectDirectories = index.projectDirectories.filter(
+    (directory) => normalizeProjectPath(directory) !== normalizedProjectDirectory
+  );
+
+  if (nextProjectDirectories.length !== index.projectDirectories.length) {
+    await writeProjectIndex(options.indexFilePath, { projectDirectories: nextProjectDirectories });
   }
 }
 

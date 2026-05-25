@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -85,8 +86,33 @@ TUZI_IMAGE_MODEL=gpt-image-2
         TUZI_LLM_MODEL: "llm-model"
       }, "/tmp/api-settings.json")
     ).toEqual({
+      activeImageApiProfileId: "primary",
       configPath: "/tmp/api-settings.json",
       imageApiKeyConfigured: true,
+      imageApiProfiles: [
+        {
+          active: true,
+          apiKeyConfigured: true,
+          baseUrl: "https://image.example",
+          id: "primary",
+          llmApiKeyConfigured: true,
+          llmBaseUrl: "https://llm.example",
+          llmModel: "llm-model",
+          model: "image-model",
+          name: "图像通道 1"
+        },
+        {
+          active: false,
+          apiKeyConfigured: false,
+          baseUrl: "https://api.ourzhishi.top",
+          id: "secondary",
+          llmApiKeyConfigured: false,
+          llmBaseUrl: "https://api.tu-zi.com/coding",
+          llmModel: "gpt-5.5",
+          model: "gpt-image-2",
+          name: "图像通道 2"
+        }
+      ],
       imageBaseUrl: "https://image.example",
       imageModel: "image-model",
       llmApiKeyConfigured: true,
@@ -109,6 +135,7 @@ TUZI_IMAGE_MODEL=gpt-image-2
     });
 
     expect(getApiSettingsSnapshot()).toMatchObject({
+      activeImageApiProfileId: "primary",
       imageApiKeyConfigured: true,
       imageBaseUrl: "https://image.example",
       imageModel: "gpt-image-2",
@@ -117,4 +144,73 @@ TUZI_IMAGE_MODEL=gpt-image-2
       llmModel: "gpt-5.5"
     });
   });
+
+  test("persists and resolves two switchable image API profiles", async () => {
+    tempDirectory = await mkdtemp(path.join(os.tmpdir(), "batchimager-config-"));
+    configureLocalConfig({ userConfigDirectory: tempDirectory });
+
+    await saveApiSettings({
+      activeImageApiProfileId: "secondary",
+      imageApiProfiles: [
+        {
+          apiKey: "old-key",
+          baseUrl: "https://api.ourzhishi.top",
+          id: "primary",
+          llmApiKey: "old-llm-key",
+          llmBaseUrl: "https://old-llm.example",
+          llmModel: "old-llm-model",
+          model: "gpt-image-2",
+          name: "旧通道"
+        },
+        {
+          apiKey: "aiflow-key",
+          baseUrl: "https://api.aiflow321.cn",
+          id: "secondary",
+          llmApiKey: "aiflow-llm-key",
+          llmBaseUrl: "https://aiflow-llm.example",
+          llmModel: "aiflow-llm-model",
+          model: "AA-gpt-image-2-medium",
+          name: "Aiflow 中档"
+        }
+      ],
+      imageApiKey: undefined,
+      imageBaseUrl: "https://api.aiflow321.cn",
+      imageModel: "AA-gpt-image-2-medium",
+      llmBaseUrl: "https://llm.example",
+      llmModel: "gpt-5.5"
+    });
+
+    expect(getApiSettingsSnapshot()).toMatchObject({
+      activeImageApiProfileId: "secondary",
+      imageApiKeyConfigured: true,
+      imageBaseUrl: "https://api.aiflow321.cn",
+      imageModel: "AA-gpt-image-2-medium",
+      imageApiProfiles: [
+        expect.objectContaining({ active: false, id: "primary", name: "旧通道" }),
+        expect.objectContaining({
+          active: true,
+          id: "secondary",
+          llmBaseUrl: "https://aiflow-llm.example",
+          llmModel: "aiflow-llm-model",
+          name: "Aiflow 中档"
+        })
+      ],
+      llmBaseUrl: "https://aiflow-llm.example",
+      llmModel: "aiflow-llm-model"
+    });
+    expect(resolveTuziConfig(loadPersistedApiSettingsForTest(), "C:\\BatchImager\\generated")).toMatchObject({
+      apiKey: "aiflow-key",
+      baseUrl: "https://api.aiflow321.cn",
+      model: "AA-gpt-image-2-medium"
+    });
+    expect(resolveTuziLlmConfig(loadPersistedApiSettingsForTest())).toEqual({
+      apiKey: "aiflow-llm-key",
+      baseUrl: "https://aiflow-llm.example",
+      model: "aiflow-llm-model"
+    });
+  });
 });
+
+function loadPersistedApiSettingsForTest(): Record<string, string> {
+  return JSON.parse(readFileSync(path.join(tempDirectory!, "api-settings.json"), "utf8")) as Record<string, string>;
+}

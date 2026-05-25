@@ -170,7 +170,7 @@ export function BatchDialog({ imageCount, onClose, onGenerate }: BatchDialogProp
         customValue={customSize}
         disabled={isSavingReference}
         idPrefix="batch"
-        label="生成比例："
+        label="生成尺寸："
         selectedValue={selectedSize}
         onCustomValueChange={setCustomSize}
         onSelectedValueChange={setSelectedSize}

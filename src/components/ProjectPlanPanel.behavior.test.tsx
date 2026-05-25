@@ -6,6 +6,7 @@ import { describe, expect, test, vi } from "vitest";
 import type { BatchPlan, ProjectManagerState, WorkerReport } from "../types/projectManager";
 import type { ImageSession } from "../types/image";
 import { renderWithBatchImager } from "../test/renderWithBatchImager";
+import type { PreviewImage } from "./ImagePreviewDialog";
 import { ProjectPlanPanel } from "./ProjectPlanPanel";
 
 const EMPTY_PROJECT_MANAGER_STATE: ProjectManagerState = {
@@ -27,7 +28,10 @@ function renderProjectPlanPanelWithState(
   onSendMessage = vi.fn(),
   imageSessions: ImageSession[] = [],
   overrides: {
+    isCreatingPlan?: boolean;
     onStopWork?: () => void;
+    onOpenImagePreview?: (title: string, images: PreviewImage[], initialPath: string) => void;
+    queuedWorkspaceReferences?: { fileName: string; filePath: string; id: string }[];
     showFileInFolder?: (request: { filePath: string }) => Promise<{ ok: true }>;
   } = {}
 ): ReturnType<typeof vi.fn> {
@@ -35,7 +39,8 @@ function renderProjectPlanPanelWithState(
     <ProjectPlanPanel
       activityLogs={[]}
       imageSessions={imageSessions}
-      isCreatingPlan={false}
+      isCreatingPlan={overrides.isCreatingPlan ?? false}
+      queuedWorkspaceReferences={overrides.queuedWorkspaceReferences}
       projectManagerState={projectManagerState}
       onCopyImage={vi.fn()}
       onCancelBatchTaskAll={vi.fn()}
@@ -43,7 +48,7 @@ function renderProjectPlanPanelWithState(
       onRetryBatchTaskFailed={vi.fn()}
       onRetryBatchTaskItem={vi.fn()}
       onExecutePlan={vi.fn()}
-      onOpenImagePreview={vi.fn()}
+      onOpenImagePreview={overrides.onOpenImagePreview ?? vi.fn()}
       onResolvePermission={vi.fn()}
       onResolvePreflight={vi.fn()}
       onSendMessage={onSendMessage}
@@ -58,11 +63,37 @@ function renderProjectPlanPanelWithState(
 }
 
 describe("ProjectPlanPanel persona behavior", () => {
+  test("renders user image references inline at the original input position", () => {
+    renderProjectPlanPanelWithState({
+      conversation: {
+        id: "conversation-1",
+        messages: [
+          {
+            content: "根据【图片1】生成【图片2】的商品图",
+            id: "user-1",
+            referenceFilePaths: ["/project/detail.jpg", "/project/product.jpg"],
+            role: "user"
+          }
+        ]
+      },
+      plans: []
+    });
+
+    expect(screen.getByRole("button", { name: "预览【图片1】" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "预览【图片2】" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "预览【图片1】" })).toHaveAttribute(
+      "data-batchimager-reference-path",
+      "/project/detail.jpg"
+    );
+    expect(screen.queryByText("参考图")).not.toBeInTheDocument();
+  });
+
   test("does not send the message when Enter confirms IME composition", () => {
     const onSendMessage = renderProjectPlanPanel();
     const composer = screen.getByRole("textbox");
 
-    fireEvent.change(composer, { target: { value: "english" } });
+    composer.textContent = "english";
+    fireEvent.input(composer);
     fireEvent.keyDown(composer, { code: "Enter", isComposing: true, key: "Enter" });
 
     expect(onSendMessage).not.toHaveBeenCalled();
@@ -92,10 +123,41 @@ describe("ProjectPlanPanel persona behavior", () => {
 
     await user.click(screen.getByRole("combobox", { name: "选择 Esse 人格" }));
     await user.click(await screen.findByRole("option", { name: /无情的机器人\s*规则优先/ }));
-    await user.type(screen.getByRole("textbox"), "生成一张白底图");
+    await user.type(screen.getByRole("textbox", { name: "Esse 输入" }), "生成一张白底图");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(onSendMessage).toHaveBeenCalledWith("生成一张白底图", undefined, [], "robot");
+  });
+
+  test("adds a clicked workspace image as a composer preview that can be enlarged", async () => {
+    const user = userEvent.setup();
+    const onOpenImagePreview = vi.fn();
+    const onSendMessage = renderProjectPlanPanelWithState(EMPTY_PROJECT_MANAGER_STATE, vi.fn(), [], {
+      onOpenImagePreview,
+      queuedWorkspaceReferences: [{
+        fileName: "product.jpg",
+        filePath: "/project/images/product.jpg",
+        id: "click-1"
+      }]
+    });
+
+    expect(screen.getByRole("textbox", { name: "Esse 输入" })).toHaveTextContent("图片1");
+    await user.click(screen.getByAltText("product.jpg"));
+
+    expect(onOpenImagePreview).toHaveBeenCalledWith(
+      "对话图片",
+      [{ key: "/project/images/product.jpg", label: "图片1", path: "/project/images/product.jpg" }],
+      "/project/images/product.jpg"
+    );
+
+    await user.type(screen.getByRole("textbox", { name: "Esse 输入" }), " 生成商品图");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(onSendMessage).toHaveBeenCalledWith(
+      "【图片1】 生成商品图",
+      undefined,
+      ["/project/images/product.jpg"],
+      "excellent-employee"
+    );
   });
 });
 
@@ -303,6 +365,53 @@ describe("ProjectPlanPanel plan cards", () => {
 });
 
 describe("ProjectPlanPanel Esse preflight cards", () => {
+  test("sends typed adjustment text while a preflight plan is waiting for approval", async () => {
+    const user = userEvent.setup();
+    const onSendMessage = vi.fn();
+    const onStopWork = vi.fn();
+
+    renderProjectPlanPanelWithState(
+      {
+        conversation: {
+          id: "conversation-1",
+          messages: [
+            {
+              content: "",
+              id: "preflight-1",
+              preflightDecision: "pending",
+              preflightRequest: {
+                payload: {
+                  commands: [
+                    {
+                      displayLabel: "img-1",
+                      mode: "edit",
+                      prompt: "统一做白底商品图",
+                      target: { sessionId: "sess_1", type: "existing" }
+                    }
+                  ],
+                  estimatedApiCalls: 1,
+                  tool: "generate_image"
+                },
+                requestId: "request-1"
+              },
+              role: "context"
+            }
+          ]
+        },
+        plans: []
+      },
+      onSendMessage,
+      [],
+      { isCreatingPlan: true, onStopWork }
+    );
+
+    await user.type(screen.getByRole("textbox", { name: "Esse 输入" }), "不要白底，背景改成浅灰");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(onStopWork).not.toHaveBeenCalled();
+    expect(onSendMessage).toHaveBeenCalledWith("不要白底，背景改成浅灰", undefined, [], "excellent-employee");
+  });
+
   test("shows a generation preflight card and emits execute/cancel decisions", async () => {
     const user = userEvent.setup();
     const onResolvePreflight = vi.fn();
@@ -310,7 +419,32 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
     renderWithBatchImager(
       <ProjectPlanPanel
         activityLogs={[]}
-        imageSessions={[]}
+        imageSessions={[
+          {
+            chatMessages: [],
+            chatStatus: "idle",
+            fileName: "a.jpg",
+            filePath: "/project/a.jpg",
+            id: "sess_1",
+            status: "idle"
+          },
+          {
+            chatMessages: [],
+            chatStatus: "idle",
+            fileName: "b.jpg",
+            filePath: "/project/b.jpg",
+            id: "sess_2",
+            status: "idle"
+          },
+          {
+            chatMessages: [],
+            chatStatus: "idle",
+            fileName: "c.jpg",
+            filePath: "/project/c.jpg",
+            id: "sess_3",
+            status: "idle"
+          }
+        ]}
         isCreatingPlan={false}
         projectManagerState={{
           conversation: {
@@ -326,11 +460,13 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
                       {
                         displayLabel: "img-1",
                         mode: "edit",
-                        prompt: "保留主体，换成白底主图",
+                        prompt: "保留主体，换成图3的白底主图",
+                        referenceImageIds: ["turn-ref-1"],
                         target: { sessionId: "sess_1", type: "existing" }
                       }
                     ],
                     estimatedApiCalls: 1,
+                    referenceImages: [{ filePath: "/project/ref.jpg", id: "turn-ref-1", label: "本轮参考图 1" }],
                     tool: "generate_image"
                   },
                   requestId: "request-1"
@@ -358,7 +494,10 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
     expect(screen.getByRole("region", { name: "Esse 生成确认" })).toBeInTheDocument();
     expect(screen.getByText("生成图片")).toBeInTheDocument();
     expect(screen.getByText("1 次 API 调用")).toBeInTheDocument();
-    expect(screen.getByText("保留主体，换成白底主图")).toBeInTheDocument();
+    expect(screen.getByText("保留主体，换成图3的白底主图")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "目标 图1 a.jpg" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "参考 本轮参考图 1" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "引用 图3 c.jpg" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "执行" }));
     await user.click(screen.getByRole("button", { name: "修改" }));
@@ -374,6 +513,7 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
         displayLabel: "img-1",
         mode: "generate",
         prompt: "用户修改后的浅灰场景图",
+        referenceImageIds: ["turn-ref-1"],
         target: { sessionId: "sess_1", type: "existing" }
       }
     ]);
@@ -432,6 +572,104 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
     expect(screen.queryByText("生成图片")).not.toBeInTheDocument();
     expect(screen.getByText("0 次 API 调用")).toBeInTheDocument();
   });
+
+  test("hides confirmed generation preflight cards when the execution task card is present", () => {
+    renderWithBatchImager(
+      <ProjectPlanPanel
+        activityLogs={[]}
+        imageSessions={[
+          {
+            chatMessages: [],
+            chatStatus: "idle",
+            fileName: "scene.png",
+            filePath: "/project/scene.png",
+            id: "sess_1",
+            status: "generating"
+          }
+        ]}
+        isCreatingPlan={false}
+        projectManagerState={{
+          conversation: {
+            id: "conversation-1",
+            messages: [
+              {
+                content: "",
+                id: "preflight-1",
+                preflightDecision: "execute",
+                preflightRequest: {
+                  payload: {
+                    commands: [
+                      {
+                        displayLabel: "scene.png",
+                        mode: "generate",
+                        prompt: "以场景图为基础，把目标植物自然替换进去。",
+                        referenceImageIds: ["turn-ref-5", "turn-ref-1"],
+                        referenceImageNames: ["场景图", "目标植物"],
+                        target: { fileName: "scene.png", type: "new" }
+                      }
+                    ],
+                    estimatedApiCalls: 1,
+                    referenceImages: [
+                      { filePath: "/project/scene-ref.png", id: "turn-ref-5", label: "场景图" },
+                      { filePath: "/project/plant-ref.png", id: "turn-ref-1", label: "目标植物" }
+                    ],
+                    tool: "run_batch_generation"
+                  },
+                  requestId: "request-1"
+                },
+                role: "context"
+              },
+              {
+                batchTask: {
+                  batchTaskId: "batch_1",
+                  items: [
+                    {
+                      command: {
+                        mode: "generate",
+                        prompt: "以场景图为基础，把目标植物自然替换进去。",
+                        referenceImageIds: ["turn-ref-5", "turn-ref-1"],
+                        referenceImageNames: ["场景图", "目标植物"],
+                        target: { fileName: "scene.png", type: "new" }
+                      },
+                      displayLabel: "scene.png",
+                      mode: "generate",
+                      promptSummary: "以场景图为基础",
+                      sessionId: "sess_1"
+                    }
+                  ],
+                  referenceImages: [
+                    { filePath: "/project/scene-ref.png", id: "turn-ref-5", label: "场景图" },
+                    { filePath: "/project/plant-ref.png", id: "turn-ref-1", label: "目标植物" }
+                  ]
+                },
+                content: "",
+                contextType: "esse-batch-task",
+                id: "batch-message-1",
+                role: "context"
+              }
+            ]
+          },
+          plans: []
+        }}
+        onCopyImage={vi.fn()}
+        onCancelBatchTaskAll={vi.fn()}
+        onCancelBatchTaskItem={vi.fn()}
+        onRetryBatchTaskFailed={vi.fn()}
+        onRetryBatchTaskItem={vi.fn()}
+        onExecutePlan={vi.fn()}
+        onOpenImagePreview={vi.fn()}
+        onResolvePermission={vi.fn()}
+        onResolvePreflight={vi.fn()}
+        onSendMessage={vi.fn()}
+        onStopWork={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByRole("region", { name: "Esse 生成确认" })).not.toBeInTheDocument();
+    expect(screen.getByText("已提交 1 个生成任务")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "场景图 场景图" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "目标植物 目标植物" })).toBeInTheDocument();
+  });
 });
 
 describe("ProjectPlanPanel Esse batch task cards", () => {
@@ -457,6 +695,7 @@ describe("ProjectPlanPanel Esse batch task cards", () => {
           {
             chatMessages: [],
             chatStatus: "idle",
+            generatedFilePath: "/project/b-generated.jpg",
             errorMessage: "已取消",
             fileName: "b.jpg",
             filePath: "/project/b.jpg",
@@ -474,7 +713,12 @@ describe("ProjectPlanPanel Esse batch task cards", () => {
                   batchTaskId: "batch_1",
                   items: [
                     {
-                      command: { mode: "edit", prompt: "第一张换白底", target: { sessionId: "sess_1", type: "existing" } },
+                      command: {
+                        mode: "edit",
+                        prompt: "第一张换白底，参考图2",
+                        referenceImageIds: ["turn-ref-1"],
+                        target: { sessionId: "sess_1", type: "existing" }
+                      },
                       displayLabel: "a.jpg",
                       mode: "edit",
                       promptSummary: "第一张换白底",
@@ -487,7 +731,8 @@ describe("ProjectPlanPanel Esse batch task cards", () => {
                       promptSummary: "第二张换白底",
                       sessionId: "sess_2"
                     }
-                  ]
+                  ],
+                  referenceImages: [{ filePath: "/project/ref.jpg", id: "turn-ref-1", label: "场景参考图" }]
                 },
                 content: "",
                 contextType: "esse-batch-task",
@@ -512,15 +757,28 @@ describe("ProjectPlanPanel Esse batch task cards", () => {
       />
     );
 
-    expect(screen.getByRole("region", { name: "Esse 生成任务" })).toBeInTheDocument();
+    const card = screen.getByRole("region", { name: "Esse 生成任务" });
+    const header = within(card).getByText("已提交 2 个生成任务").closest("header");
+    const runningStatus = card.querySelector(".esse-batch-task-status.running");
+
+    expect(card).toBeInTheDocument();
     expect(screen.getByText("已提交 2 个生成任务")).toBeInTheDocument();
     expect(screen.getByText("1 个进行中")).toBeInTheDocument();
     expect(screen.getByText("生成中")).toBeInTheDocument();
     expect(screen.getByText("已取消")).toBeInTheDocument();
+    expect(header).not.toBeNull();
+    expect(within(header as HTMLElement).getByRole("button", { name: "全部取消" })).toBeInTheDocument();
+    expect(card.querySelector(".esse-batch-task-card-actions .esse-status-spinner")).toBeInTheDocument();
+    expect(runningStatus).not.toBeNull();
+    expect(within(runningStatus as HTMLElement).getByRole("button", { name: "取消" })).toBeInTheDocument();
+    expect(runningStatus?.querySelector(".esse-status-spinner")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "目标 图1 a.jpg" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "参考 场景参考图" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "引用 图2 b.jpg" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "取消" }));
+    await user.click(within(runningStatus as HTMLElement).getByRole("button", { name: "取消" }));
     await user.click(screen.getByRole("button", { name: "重试" }));
-    await user.click(screen.getByRole("button", { name: "全部取消" }));
+    await user.click(within(header as HTMLElement).getByRole("button", { name: "全部取消" }));
     await user.click(screen.getByRole("button", { name: "重试失败项" }));
 
     expect(onCancelBatchTaskItem).toHaveBeenCalledWith("batch_1", "sess_1");

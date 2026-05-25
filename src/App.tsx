@@ -9,25 +9,23 @@ import {
 } from "react";
 import {
   addSessionUserMessage,
+  applyGeneratedImageResult,
   applySessionImageChoice,
   applySessionChatError,
   applySessionChatSuccess,
-  applyGeneratedImageResult,
   applySessionGenerationError,
   createImageSessionId,
   getInitialSelectedSessionId,
+  getSessionDisplayPath,
   getSessionGenerationSourcePath,
   markSessionEsseTask,
-  markSessionProjectCommand,
   markSessionGenerating,
   moveImageSession,
   removeImageSession,
   stopSessionWork,
-  toggleSessionListImageSource
 } from "./domain/imageSessions";
 import {
   applyWorkerReport,
-  appendProjectManagerAssistantMessage,
   createEmptyProjectManagerState,
   createProjectManagerUserMessage,
   markBatchPlanRunning,
@@ -55,7 +53,7 @@ import { ImagePreviewDialog, type PreviewImage } from "./components/ImagePreview
 import { ImageWorkspace } from "./components/ImageWorkspace";
 import { LogPanel } from "./components/LogPanel";
 import { ProjectListDialog } from "./components/ProjectListDialog";
-import { ProjectPlanPanel } from "./components/ProjectPlanPanel";
+import { ProjectPlanPanel, type QueuedWorkspaceReference } from "./components/ProjectPlanPanel";
 import { SessionPanel } from "./components/SessionPanel";
 import type {
   AppLogEntry,
@@ -106,7 +104,9 @@ export function App() {
   const [projectManagerState, setProjectManagerState] = useState<ProjectManagerState>(() => createEmptyProjectManagerState());
   const [projectReferenceImages, setProjectReferenceImages] = useState<BatchPlanReferenceImage[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
   const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>("image");
+  const [queuedEsseReferences, setQueuedEsseReferences] = useState<QueuedWorkspaceReference[]>([]);
   const [columns, setColumns] = useState(DEFAULT_COLUMNS);
   const [isCreatingProjectPlan, setIsCreatingProjectPlan] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -130,6 +130,7 @@ export function App() {
   const activeSessionOperationIdsRef = useRef(new Map<string, string>());
   const activeProjectOperationIdsRef = useRef(new Map<string, string>());
   const activeEsseOperationIdRef = useRef<string | null>(null);
+  const activeEsseAssistantMessageIdRef = useRef<string | null>(null);
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
@@ -279,6 +280,49 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const unsubscribe = window.batchImager?.subscribeEsseAssistantMessageUpdates?.((event) => {
+      if (!event.content.trim() || event.operationId !== activeEsseOperationIdRef.current) {
+        return;
+      }
+
+      const messageId = activeEsseAssistantMessageIdRef.current;
+      if (!messageId) {
+        return;
+      }
+
+      const nextState = upsertProjectManagerAssistantMessage(projectManagerStateRef.current, event.content, messageId);
+      projectManagerStateRef.current = nextState;
+      setProjectManagerState(nextState);
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.batchImager?.subscribeChatImageGenerationStarted?.((event) => {
+      setSessions((currentSessions) =>
+        updateAndPersistSessions(
+          markSessionGenerating(
+            currentSessions,
+            event.sessionId,
+            event.prompt,
+            undefined,
+            event.referenceImagePaths ?? [],
+            event.sourceImagePath
+          ),
+          selectedSessionIdRef.current
+        )
+      );
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent): void {
       if (event.key !== "Delete" || !selectedSessionId || isEditableEventTarget(event.target)) {
         return;
@@ -304,6 +348,7 @@ export function App() {
     setProjectManagerState(snapshot.projectManagerState ?? createEmptyProjectManagerState());
     setProjectReferenceImages(snapshot.referenceImages ?? []);
     setSelectedSessionId(nextSelectedSessionId);
+    setSelectedSessionIds(nextSelectedSessionId ? new Set([nextSelectedSessionId]) : new Set());
     currentProjectRef.current = snapshot.project;
     sessionsRef.current = nextSessions;
     projectManagerStateRef.current = snapshot.projectManagerState ?? createEmptyProjectManagerState();
@@ -475,6 +520,13 @@ export function App() {
     }
   }
 
+  async function handleDeleteProject(directory: string): Promise<void> {
+    const entries = await window.batchImager?.deleteProject({ directory });
+    if (entries) {
+      setProjectListEntries(entries);
+    }
+  }
+
   async function handleSelectImages(): Promise<void> {
     await ensureProjectForImport();
     const snapshot = await window.batchImager?.importImages({ sourcePaths: [] });
@@ -533,6 +585,14 @@ export function App() {
     const result = removeImageSession(sessions, sessionId);
     setSessions(result.sessions);
     setSelectedSessionId(result.selectedSessionId);
+    setSelectedSessionIds((currentIds) => {
+      const remainingSessionIds = new Set(result.sessions.map((session) => session.id));
+      const nextIds = new Set([...currentIds].filter((id) => id !== sessionId && remainingSessionIds.has(id)));
+      if (nextIds.size === 0 && result.selectedSessionId) {
+        nextIds.add(result.selectedSessionId);
+      }
+      return nextIds;
+    });
     persistProjectSnapshot(result.sessions, result.selectedSessionId);
 
     if (previewSessionId === sessionId) {
@@ -551,6 +611,78 @@ export function App() {
 
       return updateAndPersistSessions(nextSessions, selectedSessionIdRef.current);
     });
+  }
+
+  function handleSendWorkspaceImageToEsse(payload: { fileName: string; imagePath: string }): void {
+    setQueuedEsseReferences((currentReferences) => [
+      ...currentReferences,
+      {
+        fileName: payload.fileName,
+        filePath: payload.imagePath,
+        id: createMessageId("clicked-workspace-image")
+      }
+    ]);
+    setActiveSidebarTab("project");
+  }
+
+  function handleSelectWorkspaceSession(sessionId: string, options: { multi?: boolean } = {}): void {
+    setSelectedSessionId(sessionId);
+    setActiveSidebarTab("image");
+    setSelectedSessionIds((currentIds) => {
+      if (!options.multi) {
+        return new Set([sessionId]);
+      }
+
+      const nextIds = new Set(currentIds);
+      if (nextIds.has(sessionId)) {
+        nextIds.delete(sessionId);
+      } else {
+        nextIds.add(sessionId);
+      }
+      return nextIds.size ? nextIds : new Set([sessionId]);
+    });
+    persistProjectSnapshot(sessionsRef.current, sessionId);
+  }
+
+  async function handleOpenSelectionInFolder(): Promise<void> {
+    const session = sessions.find((currentSession) => currentSession.id === selectedSessionId) ?? sessions[0];
+    const filePath = session ? getSessionDisplayPath(session) : currentProject?.directory;
+    if (!filePath) {
+      return;
+    }
+
+    try {
+      await window.batchImager?.showFileInFolder?.({ filePath });
+    } catch (error) {
+      console.error("[BatchImager UI] Show file in folder failed", error);
+    }
+  }
+
+  function handleCopyWorkspaceSessionImage(sessionId: string): void {
+    const session = sessionsRef.current.find((currentSession) => currentSession.id === sessionId);
+    if (session) {
+      copyImageToClipboard(getSessionDisplayPath(session));
+    }
+  }
+
+  async function handleExportWorkspaceSessionImage(sessionId: string): Promise<void> {
+    const session = sessionsRef.current.find((currentSession) => currentSession.id === sessionId);
+    if (!session) {
+      return;
+    }
+
+    const imagePath = getSessionDisplayPath(session);
+    try {
+      const result = await window.batchImager?.exportImages({
+        fileName: `${getFileName(imagePath) || session.fileName}.zip`,
+        imagePaths: [imagePath]
+      });
+      if (result?.outputPath) {
+        await window.batchImager?.showFileInFolder?.({ filePath: result.outputPath });
+      }
+    } catch (error) {
+      console.error("[BatchImager UI] Image export failed", error);
+    }
   }
 
   function handleRetrySession(sessionId: string): void {
@@ -588,6 +720,7 @@ export function App() {
   function handleStopProjectWork(): void {
     cancelOperation(activeEsseOperationIdRef.current);
     activeEsseOperationIdRef.current = null;
+    activeEsseAssistantMessageIdRef.current = null;
 
     const affectedSessionIds = new Set<string>();
     for (const [operationId, sessionId] of activeProjectOperationIdsRef.current.entries()) {
@@ -611,6 +744,38 @@ export function App() {
     persistProjectSnapshot(nextSessions, selectedSessionIdRef.current, nextProjectManagerState);
   }
 
+  async function cancelPendingEssePreflightsForNewRequest(state: ProjectManagerState): Promise<ProjectManagerState> {
+    const pendingRequests = state.conversation.messages
+      .filter((message) => message.preflightRequest && (message.preflightDecision ?? "pending") === "pending")
+      .map((message) => message.preflightRequest as EssePreflightRequest);
+
+    if (pendingRequests.length === 0) {
+      return state;
+    }
+
+    activeEsseOperationIdRef.current = null;
+    setIsCreatingProjectPlan(false);
+
+    let nextState = state;
+    for (const request of pendingRequests) {
+      nextState = markEssePreflightDecision(nextState, request.requestId, "cancel");
+      await window.batchImager
+        ?.respondEssePreflight({
+          decision: "cancel",
+          detail: "用户提出了新的调整要求，旧计划作废。",
+          requestId: request.requestId
+        })
+        .catch((error) => {
+          console.error("[BatchImager UI] Esse preflight auto-cancel failed", error);
+        });
+    }
+
+    setProjectManagerState(nextState);
+    projectManagerStateRef.current = nextState;
+    persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
+    return nextState;
+  }
+
   async function handleSendEsseMessage(
     content: string,
     outputSize?: string,
@@ -621,13 +786,14 @@ export function App() {
 
     const currentSessions = sessionsRef.current;
     const userMessageId = createMessageId("esse-user");
+    const baseProjectManagerState = await cancelPendingEssePreflightsForNewRequest(projectManagerStateRef.current);
     const resolvedReferences = resolveProjectManagerReferenceImages(
-      projectManagerStateRef.current,
+      baseProjectManagerState,
       content,
       referenceImagePaths
     );
     const nextState = createProjectManagerUserMessage(
-      projectManagerStateRef.current,
+      baseProjectManagerState,
       content,
       userMessageId,
       resolvedReferences.referenceImagePaths
@@ -648,14 +814,12 @@ export function App() {
 
     setIsCreatingProjectPlan(true);
     const operationId = createOperationId("esse");
+    const assistantMessageId = createMessageId("esse-assistant");
     activeEsseOperationIdRef.current = operationId;
+    activeEsseAssistantMessageIdRef.current = assistantMessageId;
 
     try {
-      const history = [
-        ...nextState.conversation.messages
-          .filter(isEsseHistoryMessage)
-          .map((message) => ({ role: message.role, content: message.content })),
-      ];
+      const history = buildEsseAgentHistoryMessages(nextState);
       const result = await window.batchImager?.sendEsseMessage({
         messages: history,
         operationId,
@@ -678,10 +842,10 @@ export function App() {
         return;
       }
 
-      let updatedState = appendProjectManagerAssistantMessage(
+      let updatedState = upsertProjectManagerAssistantMessage(
         projectManagerStateRef.current,
         result.reply,
-        createMessageId("esse-assistant")
+        assistantMessageId
       );
 
       const nextSessions = sessionsRef.current;
@@ -690,6 +854,7 @@ export function App() {
       setProjectManagerState(updatedState);
       setSessions(nextSessions);
       setSelectedSessionId(nextSelectedSessionId);
+      setSelectedSessionIds((currentIds) => syncSelectedSessionIds(currentIds, nextSessions, nextSelectedSessionId));
       projectManagerStateRef.current = updatedState;
       sessionsRef.current = nextSessions;
       selectedSessionIdRef.current = nextSelectedSessionId;
@@ -709,6 +874,7 @@ export function App() {
     } finally {
       if (activeEsseOperationIdRef.current === operationId) {
         activeEsseOperationIdRef.current = null;
+        activeEsseAssistantMessageIdRef.current = null;
         setIsCreatingProjectPlan(false);
       }
     }
@@ -732,18 +898,10 @@ export function App() {
       planId,
       mode === "failed" ? commandsToRun.map((command) => command.id) : undefined
     );
-    const newImageCommands = commandsToRun.filter((command) => command.target === "new");
+    const newImageCommands = commandsToRun.map((command) => normalizeProjectPlanCommandForNewResult(command));
     setProjectManagerState(runningState);
     projectManagerStateRef.current = runningState;
     persistProjectSnapshot(sessions, selectedSessionId, runningState);
-
-    for (const command of commandsToRun) {
-      if (command.target === "new") {
-        continue;
-      }
-
-      void executeProjectCommand(plan, command, runningState);
-    }
 
     if (newImageCommands.length > 0) {
       void executeNewImagePlanCommands(plan, newImageCommands, runningState);
@@ -804,105 +962,6 @@ export function App() {
     });
   }
 
-  async function executeProjectCommand(
-    plan: BatchPlan,
-    command: WorkerCommand,
-    baseProjectManagerState: ProjectManagerState
-  ): Promise<void> {
-    if (command.target === "new") {
-      await executeNewImagePlanCommand(plan, command, baseProjectManagerState);
-      return;
-    }
-
-    const session = sessionsRef.current.find((currentSession) => currentSession.id === command.targetSessionId);
-
-    if (!session) {
-      applyProjectCommandReport(plan.id, makeWorkerReport(command, "failed", undefined, "图片不存在"), baseProjectManagerState);
-      return;
-    }
-
-    const sourcePath = getSessionGenerationSourcePath(session);
-    const referenceImages = getCommandReferenceImages(plan, command);
-    const referenceImagePaths = referenceImages.map((referenceImage) => referenceImage.filePath);
-    const operationId = createOperationId("project-command");
-    registerProjectOperation(operationId, command.targetSessionId);
-
-    setSessions((currentSessions) =>
-      updateAndPersistSessions(
-        markSessionProjectCommand(
-          currentSessions,
-          command.targetSessionId,
-          {
-            instruction: command.instruction,
-            referenceFilePaths: referenceImagePaths,
-            sourceFilePath: sourcePath
-          },
-          createMessageId("project-command")
-        ),
-          selectedSessionIdRef.current,
-          baseProjectManagerState
-      )
-    );
-
-    try {
-      const result = await window.batchImager?.sendChatMessage({
-        context: {
-          currentImageLabel: session.generatedFilePath ? "最近生成图" : "初始导入图",
-          fileName: session.fileName,
-          originalImageLabel: "初始导入图",
-          ...(referenceImagePaths.length ? { referenceImageCount: referenceImagePaths.length } : {})
-        },
-        operationId,
-        imagePath: sourcePath,
-        messages: [{ role: "user", content: command.instruction }],
-        ...(command.outputSize ? { outputSize: command.outputSize } : {}),
-        ...(referenceImages.length ? { referenceImages } : {}),
-        sessionId: command.targetSessionId
-      });
-
-      if (!result) {
-        throw new Error("当前运行环境不支持会话");
-      }
-      if (!isCurrentProjectOperation(operationId)) {
-        return;
-      }
-
-      setSessions((currentSessions) =>
-        updateAndPersistSessions(
-          applySessionChatSuccess(
-            currentSessions,
-            result.sessionId,
-            {
-              content: result.assistantMessage,
-              generatedFilePath: result.generatedImagePath
-            },
-            createMessageId("assistant")
-          ),
-          selectedSessionIdRef.current
-        )
-      );
-      applyProjectCommandReport(
-        plan.id,
-        makeWorkerReport(command, "completed", result.generatedImagePath, "已完成生成。"),
-        baseProjectManagerState
-      );
-    } catch (error) {
-      if (!isCurrentProjectOperation(operationId) || isCanceledError(error)) {
-        return;
-      }
-      const errorMessage = error instanceof Error ? error.message : "未知错误";
-      setSessions((currentSessions) =>
-        updateAndPersistSessions(
-          applySessionChatError(currentSessions, command.targetSessionId, errorMessage, createMessageId("error")),
-          selectedSessionIdRef.current
-        )
-      );
-      applyProjectCommandReport(plan.id, makeWorkerReport(command, "failed", undefined, errorMessage), baseProjectManagerState);
-    } finally {
-      unregisterProjectOperation(operationId);
-    }
-  }
-
   async function executeNewImagePlanCommand(
     plan: BatchPlan,
     command: WorkerCommand,
@@ -957,6 +1016,7 @@ export function App() {
     const nextSelectedSessionId = selectedSessionIdRef.current ?? nextSessions[0]?.id ?? null;
     setSessions(nextSessions);
     setSelectedSessionId(nextSelectedSessionId);
+    setSelectedSessionIds((currentIds) => syncSelectedSessionIds(currentIds, nextSessions, nextSelectedSessionId));
     sessionsRef.current = nextSessions;
     selectedSessionIdRef.current = nextSelectedSessionId;
     persistProjectSnapshot(nextSessions, nextSelectedSessionId, baseProjectManagerState);
@@ -967,7 +1027,7 @@ export function App() {
           const generatedImagePath = await runEsseImageTask(task);
           applyProjectCommandReport(
             plan.id,
-            makeWorkerReport(command, "completed", generatedImagePath, "已完成生成。"),
+            makeWorkerReport({ ...command, targetSessionId: task.sessionId }, "completed", generatedImagePath, "已完成生成。"),
             baseProjectManagerState
           );
         } catch (error) {
@@ -976,7 +1036,7 @@ export function App() {
           }
           applyProjectCommandReport(
             plan.id,
-            makeWorkerReport(command, "failed", undefined, error instanceof Error ? error.message : "未知错误"),
+            makeWorkerReport({ ...command, targetSessionId: task.sessionId }, "failed", undefined, error instanceof Error ? error.message : "未知错误"),
             baseProjectManagerState
           );
         }
@@ -1015,18 +1075,6 @@ export function App() {
         ? nextSessions.find((session) => session.id === imageRequest.sourceSessionId)
         : undefined;
       const sourceImagePath = sourceSession ? getSessionGenerationSourcePath(sourceSession) : "";
-
-      if (imageRequest.target === "existing" && sourceSession) {
-        dispatchTasks.push({
-          generationMode: "edit",
-          instruction: imageRequest.prompt,
-          ...(imageRequest.size ? { outputSize: imageRequest.size } : {}),
-          referenceImagePaths: promptReferenceImagePaths,
-          sessionId: sourceSession.id,
-          sourceImagePath
-        });
-        continue;
-      }
 
       const placeholderSessionId = createNextImageSessionId(nextSessions);
       const placeholder = await window.batchImager?.createPlaceholderImage({
@@ -1251,6 +1299,7 @@ export function App() {
           ...(session.lastPrompt ? { previousGenerationPrompt: session.lastPrompt } : {}),
           ...(referenceImagePaths.length ? { referenceImageCount: referenceImagePaths.length } : {})
         },
+        generationMode: "edit",
         imagePath: sourcePath,
         messages: history,
         operationId,
@@ -1268,15 +1317,34 @@ export function App() {
 
       setSessions((currentSessions) =>
         updateAndPersistSessions(
-          applySessionChatSuccess(
-            currentSessions,
-            result.sessionId,
-            {
-              content: result.assistantMessage,
-              generatedFilePath: result.generatedImagePath
-            },
-            assistantMessageId
-          ),
+          result.generatedImagePath
+            ? result.generationMode === "generate"
+              ? appendGeneratedWorkspaceImage(
+                  currentSessions,
+                  result.sessionId,
+                  {
+                    content: result.assistantMessage,
+                    generatedFilePath: result.generatedImagePath
+                  },
+                  assistantMessageId
+                )
+              : applySessionChatSuccess(
+                  currentSessions,
+                  result.sessionId,
+                  {
+                    content: result.assistantMessage,
+                    generatedFilePath: result.generatedImagePath
+                  },
+                  assistantMessageId
+                )
+            : applySessionChatSuccess(
+                currentSessions,
+                result.sessionId,
+                {
+                  content: result.assistantMessage
+                },
+                assistantMessageId
+              ),
           selectedSessionId
         )
       );
@@ -1368,9 +1436,11 @@ export function App() {
     }
   }
 
+  const isStartupWorkspace = !currentProject && sessions.length === 0;
+
   return (
     <div
-      className={`app-shell ${isSessionPanelResizing ? "resizing-session" : ""}`}
+      className={`app-shell ${isStartupWorkspace ? "startup" : ""} ${isSessionPanelResizing ? "resizing-session" : ""}`}
       style={{ "--session-panel-width": `${sessionPanelWidth}px` } as CSSProperties}
     >
       <AppToolbar
@@ -1378,6 +1448,7 @@ export function App() {
         logCount={logs.length}
         onColumnsChange={setColumns}
         onImport={handleSelectImages}
+        onOpenInFolder={currentProject ? handleOpenSelectionInFolder : undefined}
         onNewProject={handleNewProject}
         onOpenProject={handleOpenProject}
         onOpenLogs={() => setIsLogPanelOpen(true)}
@@ -1393,7 +1464,10 @@ export function App() {
               isDragging={isDragging}
               isRecentProjectsLoading={isProjectListLoading}
               recentProjects={recentProjects}
-              onImport={handleSelectImages}
+              onCreateBlankProject={handleNewProject}
+              onDeleteProject={(directory) => {
+                void handleDeleteProject(directory);
+              }}
               onDropFiles={handleDrop}
               onDraggingChange={setIsDragging}
               onOpenProject={(directory) => {
@@ -1406,39 +1480,38 @@ export function App() {
               isDragging={isDragging}
               sessions={sessions}
               selectedSessionId={selectedSessionId}
+              selectedSessionIds={selectedSessionIds}
               onDeleteSession={deleteSession}
               onDropFiles={handleDrop}
               onDraggingChange={setIsDragging}
               onOpenPreview={setPreviewSessionId}
               onRetrySession={handleRetrySession}
               onReorderSessions={handleReorderSessions}
-              onSelectSession={(sessionId) => {
-                setSelectedSessionId(sessionId);
-                setActiveSidebarTab("image");
-                persistProjectSnapshot(sessions, sessionId);
+              onCopySessionImage={handleCopyWorkspaceSessionImage}
+              onExportSessionImage={(sessionId) => {
+                void handleExportWorkspaceSessionImage(sessionId);
               }}
-              onToggleImageSource={(sessionId) =>
-                setSessions((currentSessions) =>
-                  updateAndPersistSessions(toggleSessionListImageSource(currentSessions, sessionId), selectedSessionId)
-                )
-              }
+              onSendToEsse={handleSendWorkspaceImageToEsse}
+              onSelectSession={handleSelectWorkspaceSession}
             />
           )}
         </section>
 
-        <div
-          className="session-resize-handle"
-          role="separator"
-          aria-label="调整会话栏宽度"
-          aria-orientation="vertical"
-          aria-valuenow={sessionPanelWidth}
-          tabIndex={0}
-          onDoubleClick={() => persistSessionPanelWidth(DEFAULT_SESSION_PANEL_WIDTH)}
-          onKeyDown={handleSessionPanelResizeKeyDown}
-          onPointerDown={handleSessionPanelResizePointerDown}
-        />
+        {!isStartupWorkspace ? (
+          <div
+            className="session-resize-handle"
+            role="separator"
+            aria-label="调整会话栏宽度"
+            aria-orientation="vertical"
+            aria-valuenow={sessionPanelWidth}
+            tabIndex={0}
+            onDoubleClick={() => persistSessionPanelWidth(DEFAULT_SESSION_PANEL_WIDTH)}
+            onKeyDown={handleSessionPanelResizeKeyDown}
+            onPointerDown={handleSessionPanelResizePointerDown}
+          />
+        ) : null}
 
-        <aside className="session-panel" aria-label="右侧工作栏">
+        {!isStartupWorkspace ? <aside className="session-panel" aria-label="右侧工作栏">
           <div className="sidebar-tabs" role="tablist" aria-label="工作对象">
             <button
               className={`sidebar-tab-button sidebar-tab-button-esse ${activeSidebarTab === "project" ? "active" : ""}`}
@@ -1468,12 +1541,18 @@ export function App() {
               activityLogs={projectManagerActivityLogs}
               imageSessions={sessions}
               isCreatingPlan={isCreatingProjectPlan}
+              queuedWorkspaceReferences={queuedEsseReferences}
               projectManagerState={projectManagerState}
               onExecutePlan={handleExecuteProjectPlan}
               onCopyImage={copyImageToClipboard}
               onCancelBatchTaskAll={handleCancelEsseBatchTaskAll}
               onCancelBatchTaskItem={handleCancelEsseBatchTaskItem}
               onOpenImagePreview={handleOpenChatImagePreview}
+              onQueuedWorkspaceReferencesConsumed={(ids) => {
+                setQueuedEsseReferences((currentReferences) =>
+                  currentReferences.filter((reference) => !ids.includes(reference.id))
+                );
+              }}
               onRetryBatchTaskFailed={handleRetryEsseBatchTaskFailed}
               onRetryBatchTaskItem={handleRetryEsseBatchTaskItem}
               onResolvePermission={(requestId, decision) => {
@@ -1497,7 +1576,7 @@ export function App() {
               onStopWork={handleStopSessionWork}
             />
           )}
-        </aside>
+        </aside> : null}
       </main>
 
       {isLogPanelOpen ? <LogPanel logs={logs} onClose={() => setIsLogPanelOpen(false)} /> : null}
@@ -1549,8 +1628,110 @@ function isChatHistoryMessage(
   return message.role === "user" || message.role === "assistant";
 }
 
-function isEsseHistoryMessage(message: ProjectManagerMessage): message is ProjectManagerMessage & EsseAgentHistoryMessage {
-  return message.role === "user" || message.role === "assistant";
+function buildEsseAgentHistoryMessages(state: ProjectManagerState): EsseAgentHistoryMessage[] {
+  return state.conversation.messages.flatMap((message) => {
+    if ((message.role === "user" || message.role === "assistant") && message.content.trim()) {
+      return [{ role: message.role, content: message.content }];
+    }
+
+    if (message.preflightRequest) {
+      return [
+        {
+          role: "assistant" as const,
+          content: formatEssePreflightForAgent(message)
+        }
+      ];
+    }
+
+    if (message.batchTask) {
+      return [
+        {
+          role: "assistant" as const,
+          content: formatEsseBatchTaskForAgent(message)
+        }
+      ];
+    }
+
+    return [];
+  });
+}
+
+function formatEssePreflightForAgent(message: ProjectManagerMessage): string {
+  const request = message.preflightRequest;
+  if (!request) {
+    return "";
+  }
+
+  const decision = message.preflightDecision ?? "pending";
+  const commandLines = request.payload.commands.map((command, index) => formatEssePreflightCommandForAgent(command, index));
+
+  return [
+    `【Esse上一版待确认计划】状态：${formatEssePreflightDecisionForAgent(decision)}；工具：${request.payload.tool}；任务数：${request.payload.commands.length}；requestId：${request.requestId}`,
+    ...commandLines
+  ].join("\n");
+}
+
+function formatEsseBatchTaskForAgent(message: ProjectManagerMessage): string {
+  const batchTask = message.batchTask;
+  if (!batchTask) {
+    return "";
+  }
+
+  return [
+    `【Esse已提交生成计划】batchTaskId：${batchTask.batchTaskId}；任务数：${batchTask.items.length}`,
+    ...batchTask.items.map((item, index) =>
+      `任务${index + 1}：${item.displayLabel}；mode=${item.mode}；referenceImageIds=${item.command.referenceImageIds?.length ? item.command.referenceImageIds.join(",") : "无"}；referenceImageNames=${item.command.referenceImageNames?.length ? item.command.referenceImageNames.join(",") : "无"}；prompt=${item.command.prompt ?? item.promptSummary}`
+    )
+  ].join("\n");
+}
+
+function formatEssePreflightCommandForAgent(command: EssePreflightCommand, index: number): string {
+  const target =
+    command.target?.type === "new"
+      ? `new${command.target.sourceSessionId ? ` sourceSessionId=${command.target.sourceSessionId}` : ""}${command.target.fileName ? ` fileName=${command.target.fileName}` : ""}`
+      : `existing${command.target?.sessionId ? ` sessionId=${command.target.sessionId}` : ""}`;
+  const references = command.referenceImageIds?.length ? command.referenceImageIds.join(",") : "无";
+  const referenceNames = command.referenceImageNames?.length ? command.referenceImageNames.join(",") : "无";
+  const size = command.size ?? "未指定";
+
+  return `任务${index + 1}：displayLabel=${command.displayLabel ?? "未命名"}；target=${target}；mode=${command.mode ?? "未指定"}；size=${size}；referenceImageIds=${references}；referenceImageNames=${referenceNames}；prompt=${command.prompt ?? ""}`;
+}
+
+function formatEssePreflightDecisionForAgent(
+  decision: NonNullable<ProjectManagerMessage["preflightDecision"]>
+): string {
+  if (decision === "execute") {
+    return "已执行";
+  }
+  if (decision === "modify") {
+    return "已按卡片内修改执行";
+  }
+  if (decision === "cancel") {
+    return "已作废";
+  }
+  return "待用户确认";
+}
+
+function normalizeProjectPlanCommandForNewResult(command: WorkerCommand): WorkerCommand {
+  if (command.target === "new") {
+    return command;
+  }
+
+  return {
+    ...command,
+    generationMode: command.generationMode ?? "edit",
+    sourceSessionId: command.sourceSessionId ?? command.targetSessionId,
+    target: "new"
+  };
+}
+
+function syncSelectedSessionIds(currentIds: Set<string>, sessions: ImageSession[], selectedSessionId: string | null): Set<string> {
+  const availableIds = new Set(sessions.map((session) => session.id));
+  const nextIds = new Set([...currentIds].filter((id) => availableIds.has(id)));
+  if (nextIds.size === 0 && selectedSessionId && availableIds.has(selectedSessionId)) {
+    nextIds.add(selectedSessionId);
+  }
+  return nextIds;
 }
 
 function getSessionRetryRequest(
@@ -1590,6 +1771,56 @@ function getSessionReferenceImages(session: ImageSession, pastedReferenceImagePa
     id: `ref-${index + 1}`,
     label: `参考图 ${index + 1}：${getFileName(filePath)}`
   }));
+}
+
+function appendGeneratedWorkspaceImage(
+  sessions: ImageSession[],
+  sourceSessionId: string,
+  result: { content: string; generatedFilePath: string },
+  messageId: string
+): ImageSession[] {
+  const sourceIndex = sessions.findIndex((session) => session.id === sourceSessionId);
+  if (sourceIndex < 0) {
+    return sessions;
+  }
+
+  const source = sessions[sourceIndex];
+  const generatedSessionId = createNextImageSessionId(sessions);
+  const sourceStatus: ImageSession["status"] = source.generatedFilePaths?.length || source.generatedFilePath ? "completed" : "idle";
+  const sourceSession: ImageSession = {
+    ...source,
+    chatMessages: [
+      ...source.chatMessages,
+      {
+        content: result.content,
+        id: messageId,
+        role: "assistant"
+      }
+    ],
+    chatStatus: "idle",
+    errorMessage: undefined,
+    status: sourceStatus
+  };
+  const generatedSession: ImageSession = {
+    chatMessages: [
+      {
+        content: `由 ${source.fileName} 新增生成。`,
+        contextType: "generated-image",
+        generatedFilePath: result.generatedFilePath,
+        id: createMessageId("generated-context"),
+        role: "context"
+      }
+    ],
+    chatStatus: "idle",
+    fileName: getFileName(result.generatedFilePath),
+    filePath: result.generatedFilePath,
+    generatedFilePaths: [result.generatedFilePath],
+    id: generatedSessionId,
+    originatedFromGeneration: true,
+    status: "completed"
+  };
+
+  return sessions.flatMap((session, index) => (index === sourceIndex ? [sourceSession, generatedSession] : [session]));
 }
 
 function buildSessionPreviewImages(session: ImageSession): PreviewImage[] {
@@ -1657,6 +1888,29 @@ function appendProjectManagerError(state: ProjectManagerState, content: string, 
           role: "error"
         }
       ]
+    }
+  };
+}
+
+function upsertProjectManagerAssistantMessage(
+  state: ProjectManagerState,
+  content: string,
+  messageId: string
+): ProjectManagerState {
+  const existing = state.conversation.messages.some((message) => message.id === messageId);
+  const nextMessage: ProjectManagerMessage = {
+    content,
+    id: messageId,
+    role: "assistant"
+  };
+
+  return {
+    ...state,
+    conversation: {
+      ...state.conversation,
+      messages: existing
+        ? state.conversation.messages.map((message) => (message.id === messageId ? nextMessage : message))
+        : [...state.conversation.messages, nextMessage]
     }
   };
 }

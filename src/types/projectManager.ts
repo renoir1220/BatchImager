@@ -33,6 +33,7 @@ export interface WorkerCommand {
   outputSize?: string;
   planId: string;
   referenceImageIds?: string[];
+  referenceImageNames?: string[];
   source: "project-manager";
   sourceSessionId?: string;
   target?: "existing" | "new";

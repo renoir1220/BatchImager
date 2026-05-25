@@ -1,5 +1,5 @@
-import { useState } from "react";
-import type { CSSProperties, DragEvent } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { CSSProperties, DragEvent, MouseEvent } from "react";
 import { getSessionDisplayPath } from "../domain/imageSessions";
 import type { ImageSession } from "../types/image";
 import { ImageCell } from "./ImageCell";
@@ -15,14 +15,17 @@ interface ImageWorkspaceProps {
   isDragging: boolean;
   sessions: ImageSession[];
   selectedSessionId: string | null;
+  selectedSessionIds?: Set<string>;
   onDraggingChange: (isDragging: boolean) => void;
   onDropFiles: (files: File[]) => void;
   onDeleteSession: (sessionId: string) => void;
   onOpenPreview: (sessionId: string) => void;
   onRetrySession: (sessionId: string) => void;
   onReorderSessions: (sourceSessionId: string, targetSessionId: string) => void;
-  onSelectSession: (sessionId: string) => void;
-  onToggleImageSource: (sessionId: string) => void;
+  onCopySessionImage: (sessionId: string) => void;
+  onExportSessionImage: (sessionId: string) => void;
+  onSelectSession: (sessionId: string, options?: { multi?: boolean }) => void;
+  onSendToEsse?: (payload: WorkspaceImageDragPayload) => void;
 }
 
 export function ImageWorkspace({
@@ -30,16 +33,45 @@ export function ImageWorkspace({
   isDragging,
   sessions,
   selectedSessionId,
+  selectedSessionIds,
   onDraggingChange,
   onDeleteSession,
   onDropFiles,
   onOpenPreview,
   onReorderSessions,
+  onCopySessionImage,
+  onExportSessionImage,
   onRetrySession,
   onSelectSession,
-  onToggleImageSource
+  onSendToEsse
 }: ImageWorkspaceProps) {
   const [dragTargetSessionId, setDragTargetSessionId] = useState<string | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
+  const suppressNextClickSessionIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return;
+    }
+
+    function closeContextMenu(): void {
+      setContextMenu(null);
+    }
+
+    function handleKeyDown(event: globalThis.KeyboardEvent): void {
+      if (event.key === "Escape") {
+        closeContextMenu();
+      }
+    }
+
+    window.addEventListener("pointerdown", closeContextMenu);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("pointerdown", closeContextMenu);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [contextMenu]);
 
   function onImageDragPayload(session: ImageSession): WorkspaceImageDragPayload {
     const imagePath = getSessionDisplayPath(session);
@@ -121,18 +153,107 @@ export function ImageWorkspace({
           key={session.id}
           dragPayload={onImageDragPayload(session)}
           isDragTarget={session.id === dragTargetSessionId}
-          isSelected={session.id === selectedSessionId}
+          isSelected={selectedSessionIds ? selectedSessionIds.has(session.id) : session.id === selectedSessionId}
           session={session}
           onDelete={() => onDeleteSession(session.id)}
+          onCtrlContextMenu={() => {
+            if (suppressNextClickSessionIdRef.current === session.id) {
+              suppressNextClickSessionIdRef.current = null;
+            }
+          }}
           onDragLeave={() => setDragTargetSessionId(null)}
           onDragOver={(event) => handleCellDragOver(event, session.id)}
           onDrop={(event) => handleCellDrop(event, session.id)}
+          onOpenContextMenu={(event) => {
+            event.stopPropagation();
+            onSelectSession(session.id);
+            setContextMenu({ sessionId: session.id, x: event.clientX, y: event.clientY });
+          }}
+          onMouseDown={(event: MouseEvent<HTMLDivElement>) => {
+            if (event.button !== 0 || !event.ctrlKey) {
+              return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+            suppressNextClickSessionIdRef.current = session.id;
+            onSelectSession(session.id);
+          }}
           onOpenPreview={() => onOpenPreview(session.id)}
           onRetry={() => onRetrySession(session.id)}
-          onSelect={() => onSelectSession(session.id)}
-          onToggleImageSource={() => onToggleImageSource(session.id)}
+          onSelect={(event: MouseEvent<HTMLDivElement>) => {
+            if (suppressNextClickSessionIdRef.current === session.id) {
+              suppressNextClickSessionIdRef.current = null;
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+
+            if (event.ctrlKey) {
+              event.preventDefault();
+              event.stopPropagation();
+              onSelectSession(session.id);
+              return;
+            }
+
+            if (event.shiftKey) {
+              onSelectSession(session.id, { multi: true });
+              return;
+            }
+
+            if (onSendToEsse) {
+              onSendToEsse(onImageDragPayload(session));
+              return;
+            }
+
+            onSelectSession(session.id);
+          }}
+          onSelectByKeyboard={() => {
+            onSelectSession(session.id);
+          }}
         />
       ))}
+      {contextMenu ? (
+        <div
+          className="workspace-image-context-menu"
+          role="menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onContextMenu={(event) => event.preventDefault()}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onCopySessionImage(contextMenu.sessionId);
+              setContextMenu(null);
+            }}
+          >
+            复制到剪贴板
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onExportSessionImage(contextMenu.sessionId);
+              setContextMenu(null);
+            }}
+          >
+            导出
+          </button>
+          <button
+            className="danger"
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onDeleteSession(contextMenu.sessionId);
+              setContextMenu(null);
+            }}
+          >
+            删除
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

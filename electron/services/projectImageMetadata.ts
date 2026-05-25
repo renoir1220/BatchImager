@@ -67,7 +67,7 @@ function resolveSessionImagePath(
     };
   }
 
-  if (!session.showOriginalInList && session.generatedFilePath) {
+  if (session.generatedFilePath) {
     return {
       filePath: session.generatedFilePath,
       sourceType: "current"

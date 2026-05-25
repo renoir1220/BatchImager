@@ -50,6 +50,13 @@ export function createBatchImagerCommandPolicy(options: BatchImagerCommandPolicy
       return deny("检测到系统级危险命令，已阻止执行。", "请改用项目内文件操作或受控的 BatchImager 工具。");
     }
 
+    if (isProjectDatabaseInspection(trimmed, projectDirectory)) {
+      return deny(
+        "不允许通过 bash/sqlite 读取 BatchImager 项目数据库。",
+        "请改用 list_sessions、get_session_records、read_image_metadata 等工作区工具读取项目状态。"
+      );
+    }
+
     if (isRecursiveDeletionOfRootOrUserDirectory(trimmed, projectDirectory)) {
       return deny("检测到根目录或用户目录的递归删除命令，已阻止执行。", "如果需要清理项目缓存，请只删除项目内明确的缓存或构建目录。");
     }
@@ -137,6 +144,16 @@ function isRecursiveDeleteCommand(command: string): boolean {
     /\brm\s+-[a-z]*r[a-z]*f?[a-z]*/i.test(command) ||
     /\b(remove-item|rmdir|rd)\b.*(?:-recurse|\/s)\b/i.test(command)
   );
+}
+
+function isProjectDatabaseInspection(command: string, projectDirectory: string): boolean {
+  const normalized = normalizeCommand(command);
+  if (!/\bsqlite3(?:\.exe)?\b/i.test(command)) {
+    return false;
+  }
+
+  const projectDatabase = `${normalizeForCommand(projectDirectory)}/project.sqlite`;
+  return normalized.includes("project.sqlite") || normalized.includes(projectDatabase);
 }
 
 function getUserRoot(projectDirectory: string): string | undefined {

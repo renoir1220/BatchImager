@@ -1,10 +1,11 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { createProject, saveProjectSnapshot } from "./projectStore";
 import { getProjectThumbnailPath } from "./projectThumbnails";
-import { listProjectCards } from "./projectList";
+import { rememberProjectDirectory } from "./projectIndex";
+import { deleteProject, listProjectCards } from "./projectList";
 
 const tempRoots: string[] = [];
 
@@ -81,6 +82,73 @@ describe("projectList", () => {
         thumbnailPaths: []
       }
     ]);
+  });
+
+  test("deletes a default project directory and returns the updated list", async () => {
+    const root = await makeTempRoot();
+    const projectsDirectory = path.join(root, "projects");
+    const indexFilePath = path.join(root, "project-index.json");
+    const project = await createProject({
+      makeId: () => "project-1",
+      makeNow: () => new Date("2026-05-21T15:00:00.000Z"),
+      projectsDirectory
+    });
+    await mkdir(path.join(project.project.directory, "images", "generated"), { recursive: true });
+    await writeFile(path.join(project.project.directory, "images", "generated", "out.png"), "generated");
+    await mkdir(path.join(project.project.directory, "thumbs"), { recursive: true });
+    await writeFile(path.join(project.project.directory, "thumbs", "thumb.png"), "thumb");
+
+    const cards = await deleteProject({
+      indexFilePath,
+      projectDirectory: project.project.directory,
+      projectsDirectory
+    });
+
+    await expect(access(project.project.directory)).rejects.toThrow();
+    expect(cards).toEqual([]);
+  });
+
+  test("deletes a remembered external project when its summary can be read", async () => {
+    const root = await makeTempRoot();
+    const projectsDirectory = path.join(root, "projects");
+    const indexFilePath = path.join(root, "project-index.json");
+    const externalRoot = path.join(root, "external");
+    const project = await createProject({
+      makeId: () => "external-project",
+      makeNow: () => new Date("2026-05-21T15:00:00.000Z"),
+      projectsDirectory: externalRoot
+    });
+    await mkdir(path.join(project.project.directory, "sqlite"), { recursive: true });
+    await writeFile(path.join(project.project.directory, "sqlite", "scratch.db"), "scratch");
+    await rememberProjectDirectory({ indexFilePath, projectDirectory: project.project.directory });
+
+    const cards = await deleteProject({
+      indexFilePath,
+      projectDirectory: project.project.directory,
+      projectsDirectory
+    });
+
+    await expect(access(project.project.directory)).rejects.toThrow();
+    expect(cards).toEqual([]);
+  });
+
+  test("removes unavailable remembered entries without deleting unrelated directories", async () => {
+    const root = await makeTempRoot();
+    const projectsDirectory = path.join(root, "projects");
+    const indexFilePath = path.join(root, "project-index.json");
+    const unavailableDirectory = path.join(root, "external", "not-a-project");
+    await mkdir(unavailableDirectory, { recursive: true });
+    await writeFile(path.join(unavailableDirectory, "keep.txt"), "keep");
+    await rememberProjectDirectory({ indexFilePath, projectDirectory: unavailableDirectory });
+
+    const cards = await deleteProject({
+      indexFilePath,
+      projectDirectory: unavailableDirectory,
+      projectsDirectory
+    });
+
+    await expect(access(path.join(unavailableDirectory, "keep.txt"))).resolves.toBeUndefined();
+    expect(cards).toEqual([]);
   });
 });
 

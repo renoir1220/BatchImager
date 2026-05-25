@@ -260,7 +260,7 @@ export function moveImageSession(sessions: ImageSession[], sourceSessionId: stri
 }
 
 export function getSessionDisplayPath(session: ImageSession): string {
-  return session.showOriginalInList ? session.filePath : getSessionGenerationSourcePath(session);
+  return getSessionGenerationSourcePath(session);
 }
 
 export function getSessionGenerationSourcePath(session: ImageSession): string {

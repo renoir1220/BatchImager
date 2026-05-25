@@ -12,7 +12,9 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "electron:dev": "electron .",
-    "package:mac": "npm run build && electron-builder --mac",
+    "package:mac": "node scripts/package-mac-private.mjs",
+    "package:mac:x64": "node scripts/package-mac-private.mjs --arch=x64",
+    "package:mac:universal": "node scripts/package-mac-private.mjs --arch=universal",
     "package:mac:dir": "npm run build && electron-builder --mac dir"
   },
   "keywords": [
@@ -37,7 +39,7 @@
   },
   "build": {
     "appId": "com.batchimager.desktop",
-    "productName": "BatchImager",
+    "productName": "Esse",
     "directories": {
       "output": "release"
     },

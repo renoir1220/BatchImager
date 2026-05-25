@@ -7,6 +7,7 @@ interface AppToolbarProps {
   onColumnsChange: (columns: number) => void;
   onNewProject: () => void;
   onImport: () => void;
+  onOpenInFolder?: () => void;
   onOpenProject: () => void;
   onOpenLogs?: () => void;
   onOpenSettings?: () => void;
@@ -19,6 +20,7 @@ export function AppToolbar({
   onColumnsChange,
   onNewProject,
   onImport,
+  onOpenInFolder,
   onOpenProject,
   projectLabel,
   onOpenLogs,
@@ -42,6 +44,11 @@ export function AppToolbar({
           <MenuBarItem onClick={onImport}>
             导入图片
           </MenuBarItem>
+          {onOpenInFolder ? (
+            <MenuBarItem onClick={onOpenInFolder}>
+              在文件夹中打开
+            </MenuBarItem>
+          ) : null}
         </MenuBarGroup>
 
         <MenuBarDivider />

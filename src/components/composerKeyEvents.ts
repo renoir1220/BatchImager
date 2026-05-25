@@ -1,6 +1,6 @@
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
-export function shouldSubmitComposerOnEnter(event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean {
+export function shouldSubmitComposerOnEnter(event: ReactKeyboardEvent<HTMLElement>): boolean {
   if (event.key !== "Enter" || event.shiftKey) {
     return false;
   }
@@ -8,7 +8,7 @@ export function shouldSubmitComposerOnEnter(event: ReactKeyboardEvent<HTMLTextAr
   return !isImeCompositionEvent(event);
 }
 
-function isImeCompositionEvent(event: ReactKeyboardEvent<HTMLTextAreaElement>): boolean {
+function isImeCompositionEvent(event: ReactKeyboardEvent<HTMLElement>): boolean {
   const nativeEvent = event.nativeEvent as globalThis.KeyboardEvent & {
     isComposing?: boolean;
     keyCode?: number;

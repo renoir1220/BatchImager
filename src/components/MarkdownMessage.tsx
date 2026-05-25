@@ -1,5 +1,6 @@
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { renderEmojiShortcodes } from "./markdownEmoji";
 
 interface MarkdownMessageProps {
   content: string;
@@ -22,7 +23,7 @@ export function MarkdownMessage({ content }: MarkdownMessageProps) {
   return (
     <div className="message-markdown">
       <ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]}>
-        {content}
+        {renderEmojiShortcodes(content)}
       </ReactMarkdown>
     </div>
   );

@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from "react";
-import type { DragEvent, FormEvent, KeyboardEvent, MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { DragEvent, FormEvent, MouseEvent } from "react";
 import type {
   AppLogEntry,
   EssePermissionRequest,
@@ -22,11 +22,16 @@ import {
   resolveGenerationSizeSelection
 } from "./GenerationSizeControl";
 import { AgentStatusLine } from "./AgentStatusLine";
-import { ComposerReferenceStrip } from "./ComposerReferenceStrip";
+import {
+  InlineReferenceComposer,
+  type InlineComposerReference,
+  type InlineComposerSnapshot,
+  type InlineReferenceComposerHandle
+} from "./InlineReferenceComposer";
+import { InlineReferenceMessage } from "./InlineReferenceMessage";
 import type { PreviewImage } from "./ImagePreviewDialog";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { MessageActions } from "./MessageActions";
-import { shouldSubmitComposerOnEnter } from "./composerKeyEvents";
 import { OsSelect, type OsSelectOption } from "./os";
 import { useAutoScrollToThreadEnd } from "./useAutoScrollToThreadEnd";
 import { usePastedReferenceImages } from "./usePastedReferenceImages";
@@ -43,17 +48,25 @@ interface ProjectPlanPanelProps {
   imageSessions?: ImageSession[];
   isCreatingPlan: boolean;
   projectManagerState: ProjectManagerState;
+  queuedWorkspaceReferences?: QueuedWorkspaceReference[];
   onExecutePlan: (planId: string, mode: ProjectPlanExecutionMode) => void;
   onCopyImage: (imagePath: string) => void;
   onCancelBatchTaskAll: (batchTaskId: string) => void;
   onCancelBatchTaskItem: (batchTaskId: string, sessionId: string) => void;
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
+  onQueuedWorkspaceReferencesConsumed?: (ids: string[]) => void;
   onRetryBatchTaskFailed: (batchTaskId: string) => void;
   onRetryBatchTaskItem: (batchTaskId: string, sessionId: string) => void;
   onResolvePermission: (requestId: string, decision: EssePermissionResponse["decision"]) => void;
   onResolvePreflight: (requestId: string, decision: EssePreflightResponse["decision"], modifiedCommands?: EssePreflightCommand[]) => void;
   onSendMessage: (content: string, outputSize?: string, referenceImagePaths?: string[], persona?: EssePersona) => void;
   onStopWork: () => void;
+}
+
+export interface QueuedWorkspaceReference {
+  fileName: string;
+  filePath: string;
+  id: string;
 }
 
 const ESSE_PERSONA_OPTIONS: OsSelectOption<EssePersona>[] = [
@@ -67,11 +80,13 @@ export function ProjectPlanPanel({
   imageSessions = [],
   isCreatingPlan,
   projectManagerState,
+  queuedWorkspaceReferences = [],
   onExecutePlan,
   onCopyImage,
   onCancelBatchTaskAll,
   onCancelBatchTaskItem,
   onOpenImagePreview,
+  onQueuedWorkspaceReferencesConsumed,
   onRetryBatchTaskFailed,
   onRetryBatchTaskItem,
   onResolvePermission,
@@ -81,17 +96,23 @@ export function ProjectPlanPanel({
 }: ProjectPlanPanelProps) {
   const [expandedPlanIds, setExpandedPlanIds] = useState<Set<string>>(() => new Set());
   const [collapsedPlanIds, setCollapsedPlanIds] = useState<Set<string>>(() => new Set());
-  const [message, setMessage] = useState("");
+  const [composerSnapshot, setComposerSnapshot] = useState<InlineComposerSnapshot>({ referenceImagePaths: [], text: "" });
   const [selectedSize, setSelectedSize] = useState("");
   const [customSize, setCustomSize] = useState("");
   const [selectedPersona, setSelectedPersona] = useState<EssePersona>("excellent-employee");
   const [isReferenceDragActive, setIsReferenceDragActive] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<InlineReferenceComposerHandle>(null);
+  const insertedReferencePathsRef = useRef(new Set<string>());
+  const consumedQueuedReferenceIdsRef = useRef(new Set<string>());
   const pastedReferences = usePastedReferenceImages();
   const isAgentWorking = isCreatingPlan || projectManagerState.plans.some((plan) => plan.status === "running");
+  const hasPendingPreflight = projectManagerState.conversation.messages.some(
+    (message) => message.preflightRequest && (message.preflightDecision ?? "pending") === "pending"
+  );
   const currentActivityLog = activityLogs.at(-1);
   const canSend = Boolean(
-    message.trim() && !pastedReferences.isSavingReference && isGenerationSizeSelectionValid(selectedSize, customSize)
+    composerSnapshot.text.trim() && !pastedReferences.isSavingReference && isGenerationSizeSelectionValid(selectedSize, customSize)
   );
   const threadContentSignature = useMemo(
     () => getProjectThreadContentSignature(projectManagerState, currentActivityLog?.message, isCreatingPlan),
@@ -99,10 +120,56 @@ export function ProjectPlanPanel({
   );
   useAutoScrollToThreadEnd(threadRef, threadContentSignature);
 
+  useEffect(() => {
+    const consumedIds: string[] = [];
+    for (const queuedWorkspaceReference of queuedWorkspaceReferences) {
+      if (consumedQueuedReferenceIdsRef.current.has(queuedWorkspaceReference.id)) {
+        continue;
+      }
+
+      consumedQueuedReferenceIdsRef.current.add(queuedWorkspaceReference.id);
+      consumedIds.push(queuedWorkspaceReference.id);
+      insertedReferencePathsRef.current.add(queuedWorkspaceReference.filePath);
+      composerRef.current?.insertReference({
+        fileName: queuedWorkspaceReference.fileName,
+        filePath: queuedWorkspaceReference.filePath,
+        id: queuedWorkspaceReference.id,
+        previewUrl: window.batchImager?.getImageUrl(queuedWorkspaceReference.filePath) ?? queuedWorkspaceReference.filePath
+      });
+    }
+
+    if (consumedIds.length > 0) {
+      onQueuedWorkspaceReferencesConsumed?.(consumedIds);
+    }
+  }, [queuedWorkspaceReferences, onQueuedWorkspaceReferencesConsumed]);
+
+  useEffect(() => {
+    if (queuedWorkspaceReferences.length > 0) {
+      return;
+    }
+    consumedQueuedReferenceIdsRef.current.clear();
+  }, [queuedWorkspaceReferences.length]);
+
+  useEffect(() => {
+    for (const referenceImage of pastedReferences.referenceImages) {
+      if (insertedReferencePathsRef.current.has(referenceImage.filePath)) {
+        continue;
+      }
+
+      insertedReferencePathsRef.current.add(referenceImage.filePath);
+      composerRef.current?.insertReference({
+        fileName: referenceImage.fileName,
+        filePath: referenceImage.filePath,
+        id: createReferenceId(referenceImage.filePath),
+        previewUrl: referenceImage.previewUrl
+      });
+    }
+  }, [pastedReferences.referenceImages]);
+
   function handleSubmit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
 
-    if (isAgentWorking) {
+    if (isAgentWorking && !(hasPendingPreflight && canSend)) {
       onStopWork();
       return;
     }
@@ -112,20 +179,15 @@ export function ProjectPlanPanel({
     }
 
     onSendMessage(
-      message.trim(),
+      composerSnapshot.text.trim(),
       resolveGenerationSizeSelection(selectedSize, customSize),
-      pastedReferences.referenceImages.map((referenceImage) => referenceImage.filePath),
+      composerSnapshot.referenceImagePaths,
       selectedPersona
     );
-    setMessage("");
+    composerRef.current?.clear();
+    setComposerSnapshot({ referenceImagePaths: [], text: "" });
+    insertedReferencePathsRef.current.clear();
     pastedReferences.clearReferenceImages();
-  }
-
-  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>): void {
-    if (shouldSubmitComposerOnEnter(event)) {
-      event.preventDefault();
-      event.currentTarget.form?.requestSubmit();
-    }
   }
 
   function handleReferenceDragEnter(event: DragEvent<HTMLDivElement>): void {
@@ -164,7 +226,12 @@ export function ProjectPlanPanel({
 
     event.preventDefault();
     setIsReferenceDragActive(false);
-    pastedReferences.addReferenceImagePath(payload.imagePath, payload.fileName);
+    insertInlineReference({
+      fileName: payload.fileName,
+      filePath: payload.imagePath,
+      id: createReferenceId(payload.imagePath),
+      previewUrl: window.batchImager?.getImageUrl(payload.imagePath) ?? payload.imagePath
+    });
   }
 
   function handleImageContextMenu(event: MouseEvent, imagePath: string): void {
@@ -204,12 +271,25 @@ export function ProjectPlanPanel({
               plan && (collapsedPlanIds.has(plan.id) || (shouldAutoCollapse && !expandedPlanIds.has(plan.id)))
             );
             const hasMessageContent = !plan && message.content.trim().length > 0;
+            const shouldRenderInlineReferences = Boolean(
+              message.role === "user" && message.referenceFilePaths?.length && /【图片\d+】/.test(message.content)
+            );
 
             return (
               <div className={`message-row ${message.role}`} key={message.id}>
                 <div className={`thread-line ${message.role}`}>
-                  {hasMessageContent ? <MarkdownMessage content={message.content} /> : null}
-                  {message.referenceFilePaths?.length ? (
+                  {hasMessageContent ? (
+                    shouldRenderInlineReferences ? (
+                      <InlineReferenceMessage
+                        content={message.content}
+                        referenceFilePaths={message.referenceFilePaths}
+                        onOpenReference={openReferencePreview}
+                      />
+                    ) : (
+                      <MarkdownMessage content={message.content} />
+                    )
+                  ) : null}
+                  {message.referenceFilePaths?.length && !shouldRenderInlineReferences ? (
                     <div className="thread-image-card">
                       <div className="thread-image-title">
                         <span>参考图</span>
@@ -239,11 +319,13 @@ export function ProjectPlanPanel({
                       onToggleCollapse={() => togglePlanCollapse(plan.id, collapsed)}
                     />
                   ) : null}
-                  {message.preflightRequest ? (
+                  {message.preflightRequest && shouldShowPreflightCard(message.preflightDecision) ? (
                     <EssePreflightCard
                       decision={message.preflightDecision ?? "pending"}
+                      imageSessions={imageSessions}
                       request={message.preflightRequest}
                       onResolve={onResolvePreflight}
+                      onOpenImagePreview={onOpenImagePreview}
                     />
                   ) : null}
                   {message.permissionRequest ? (
@@ -259,13 +341,14 @@ export function ProjectPlanPanel({
                       imageSessions={imageSessions}
                       onCancelAll={onCancelBatchTaskAll}
                       onCancelItem={onCancelBatchTaskItem}
+                      onOpenImagePreview={onOpenImagePreview}
                       onRetryFailed={onRetryBatchTaskFailed}
                       onRetryItem={onRetryBatchTaskItem}
                     />
                   ) : null}
                   {message.bashExecution ? <EsseBashExecutionCard execution={message.bashExecution} onStop={onStopWork} /> : null}
                 </div>
-                {hasMessageContent ? <MessageActions content={message.content} /> : null}
+                {hasMessageContent ? <MessageActions content={message.content} referenceFilePaths={message.referenceFilePaths} /> : null}
               </div>
             );
           })
@@ -275,31 +358,43 @@ export function ProjectPlanPanel({
       <div className="session-control-dock">
         <AgentStatusLine isWorking={isAgentWorking} message={currentActivityLog?.message} />
         <form className="session-composer" onSubmit={handleSubmit} onPaste={pastedReferences.handlePaste}>
-          <ComposerReferenceStrip
-            error={pastedReferences.referenceError}
-            images={pastedReferences.referenceImages}
-            isSaving={pastedReferences.isSavingReference}
-            onRemove={pastedReferences.removeReferenceImage}
-          />
-          <textarea
-            value={message}
+          <InlineReferenceComposer
+            footer={
+              <>
+                {pastedReferences.isSavingReference ? <div className="composer-reference-note">正在保存参考图...</div> : null}
+                {pastedReferences.referenceError ? <div className="composer-reference-error">{pastedReferences.referenceError}</div> : null}
+              </>
+            }
             placeholder="和 Esse 讨论、生成新图或安排批处理... 可直接粘贴参考图"
-            onChange={(event) => setMessage(event.target.value)}
-            onKeyDown={handleComposerKeyDown}
+            ref={composerRef}
+            onChange={setComposerSnapshot}
+            onOpenReference={openComposerReferencePreview}
+            onRemoveReference={(filePath) => {
+              insertedReferencePathsRef.current.delete(filePath);
+              pastedReferences.removeReferenceImage(filePath);
+            }}
+            onSubmit={() => {
+              const form = document.querySelector<HTMLFormElement>(".session-composer");
+              form?.requestSubmit();
+            }}
           />
           <div className="composer-toolbar">
             <GenerationSizeControl
               customValue={customSize}
               idPrefix="esse"
-              label="生成比例："
+              label="生成尺寸："
               selectedValue={selectedSize}
               onCustomValueChange={setCustomSize}
               onSelectedValueChange={setSelectedSize}
             />
             <EssePersonaSelect value={selectedPersona} onChange={setSelectedPersona} />
           </div>
-          <button type="submit" disabled={isAgentWorking ? false : !canSend} aria-label={isAgentWorking ? "停止" : "发送"}>
-            {isAgentWorking ? <span className="composer-stop-icon" aria-hidden="true" /> : "↑"}
+          <button
+            type="submit"
+            disabled={isAgentWorking && hasPendingPreflight ? !canSend : isAgentWorking ? false : !canSend}
+            aria-label={isAgentWorking && !(hasPendingPreflight && canSend) ? "停止" : "发送"}
+          >
+            {isAgentWorking && !(hasPendingPreflight && canSend) ? <span className="composer-stop-icon" aria-hidden="true" /> : "↑"}
           </button>
         </form>
       </div>
@@ -330,6 +425,28 @@ export function ProjectPlanPanel({
       return nextIds;
     });
   }
+
+  function openComposerReferencePreview(selectedPath: string): void {
+    const paths = composerRef.current?.snapshot().referenceImagePaths ?? composerSnapshot.referenceImagePaths;
+    onOpenImagePreview(
+      "对话图片",
+      paths.map((filePath, index) => ({
+        key: filePath,
+        label: `图片${index + 1}`,
+        path: filePath
+      })),
+      selectedPath
+    );
+  }
+
+  function insertInlineReference(reference: InlineComposerReference): void {
+    insertedReferencePathsRef.current.add(reference.filePath);
+    composerRef.current?.insertReference(reference);
+  }
+}
+
+function createReferenceId(filePath: string): string {
+  return `inline-ref-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${filePath.length}`;
 }
 
 function EsseBashExecutionCard({
@@ -406,12 +523,122 @@ function EssePersonaIcon() {
   );
 }
 
+function EsseCommandPreviewStrip({
+  command,
+  imageSessions,
+  onOpenImagePreview,
+  referenceImages
+}: {
+  command: EssePreflightCommand;
+  imageSessions: ImageSession[];
+  onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
+  referenceImages: BatchPlanReferenceImage[];
+}) {
+  const previews = getEsseCommandPreviews(command, imageSessions, referenceImages);
+  if (previews.length === 0) {
+    return null;
+  }
+
+  function openPreview(selected: EsseCommandPreview): void {
+    onOpenImagePreview(
+      selected.role === "target" ? "任务目标图" : "任务引用图",
+      previews.map((preview) => ({
+        key: preview.key,
+        label: `${preview.roleLabel}：${preview.label}`,
+        path: preview.filePath
+      })),
+      selected.filePath
+    );
+  }
+
+  return (
+    <div className="esse-command-preview-strip" aria-label="任务使用图片">
+      {previews.map((preview) => (
+        <button
+          className={`esse-command-preview ${preview.role}`}
+          key={preview.key}
+          type="button"
+          aria-label={`${preview.roleLabel} ${preview.label}`}
+          onClick={() => openPreview(preview)}
+        >
+          <img src={window.batchImager?.getImageUrl(preview.filePath) ?? preview.filePath} alt={preview.label} draggable={false} />
+          <span>{preview.roleLabel}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+interface EsseCommandPreview {
+  filePath: string;
+  key: string;
+  label: string;
+  role: "target" | "reference";
+  roleLabel: string;
+}
+
+function getEsseCommandPreviews(
+  command: EssePreflightCommand,
+  imageSessions: ImageSession[],
+  referenceImages: BatchPlanReferenceImage[]
+): EsseCommandPreview[] {
+  const previews: EsseCommandPreview[] = [];
+  const seen = new Set<string>();
+  const addPreview = (preview: EsseCommandPreview) => {
+    const key = `${preview.role}:${preview.filePath}`;
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    previews.push(preview);
+  };
+
+  const targetSessionId = command.target?.type === "existing" ? command.target.sessionId : command.target?.sourceSessionId;
+  const targetSession = imageSessions.find((session) => session.id === targetSessionId);
+  if (targetSession) {
+    addPreview({
+      filePath: getSessionGenerationSourcePath(targetSession),
+      key: `target:${targetSession.id}`,
+      label: formatSessionPreviewLabel(targetSession, imageSessions),
+      role: "target",
+      roleLabel: "目标"
+    });
+  }
+
+  const referencesById = new Map(referenceImages.map((referenceImage) => [referenceImage.id, referenceImage]));
+  for (const [index, referenceImageId] of (command.referenceImageIds ?? []).entries()) {
+    const referenceImage = referencesById.get(referenceImageId);
+    if (!referenceImage) {
+      continue;
+    }
+    const roleName = command.referenceImageNames?.[index]?.trim();
+    addPreview({
+      filePath: referenceImage.filePath,
+      key: `reference:${referenceImage.id}`,
+      label: referenceImage.label || referenceImage.id,
+      role: "reference",
+      roleLabel: roleName || "参考"
+    });
+  }
+
+  return previews;
+}
+
+function formatSessionPreviewLabel(session: ImageSession, imageSessions: ImageSession[]): string {
+  const index = imageSessions.findIndex((current) => current.id === session.id);
+  return `${index >= 0 ? `图${index + 1} ` : ""}${session.fileName}`;
+}
+
 function EssePreflightCard({
   decision,
+  imageSessions,
+  onOpenImagePreview,
   onResolve,
   request
 }: {
   decision: NonNullable<ProjectManagerState["conversation"]["messages"][number]["preflightDecision"]>;
+  imageSessions: ImageSession[];
+  onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
   onResolve: (requestId: string, decision: EssePreflightResponse["decision"], modifiedCommands?: EssePreflightCommand[]) => void;
   request: EssePreflightRequest;
 }) {
@@ -430,6 +657,12 @@ function EssePreflightCard({
       <div className="esse-preflight-command-list">
         {(isEditing ? editedCommands : request.payload.commands).map((command, index) => (
           <div className="esse-preflight-command" key={`${request.requestId}-${index}`}>
+            <EsseCommandPreviewStrip
+              command={command}
+              imageSessions={imageSessions}
+              referenceImages={request.payload.referenceImages ?? []}
+              onOpenImagePreview={onOpenImagePreview}
+            />
             <span>{command.displayLabel ?? command.target?.fileName ?? `任务 ${index + 1}`}</span>
             {isEditing ? (
               <>
@@ -458,6 +691,20 @@ function EssePreflightCard({
                       setEditedCommands((current) =>
                         current.map((item, itemIndex) =>
                           itemIndex === index ? { ...item, referenceImageIds: referenceImageIds.length ? referenceImageIds : undefined } : item
+                        )
+                      );
+                    }}
+                  />
+                </label>
+                <label>
+                  <span>参考图命名</span>
+                  <input
+                    value={(command.referenceImageNames ?? []).join(", ")}
+                    onChange={(event) => {
+                      const referenceImageNames = event.target.value.split(",").map((value) => value.trim()).filter(Boolean);
+                      setEditedCommands((current) =>
+                        current.map((item, itemIndex) =>
+                          itemIndex === index ? { ...item, referenceImageNames: referenceImageNames.length ? referenceImageNames : undefined } : item
                         )
                       );
                     }}
@@ -565,6 +812,7 @@ function EsseBatchTaskCard({
   imageSessions,
   onCancelAll,
   onCancelItem,
+  onOpenImagePreview,
   onRetryFailed,
   onRetryItem
 }: {
@@ -572,64 +820,75 @@ function EsseBatchTaskCard({
   imageSessions: ImageSession[];
   onCancelAll: (batchTaskId: string) => void;
   onCancelItem: (batchTaskId: string, sessionId: string) => void;
+  onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
   onRetryFailed: (batchTaskId: string) => void;
   onRetryItem: (batchTaskId: string, sessionId: string) => void;
 }) {
   const sessionsById = new Map(imageSessions.map((session) => [session.id, session]));
   const activeItems = batchTask.items.filter((item) => isActiveBatchTaskStatus(sessionsById.get(item.sessionId)?.status));
   const failedItems = batchTask.items.filter((item) => sessionsById.get(item.sessionId)?.status === "failed");
+  const hasActiveItems = activeItems.length > 0;
 
   return (
     <section className="esse-batch-task-card" aria-label="Esse 生成任务">
       <header>
         <strong>已提交 {batchTask.items.length} 个生成任务</strong>
-        <span>{activeItems.length > 0 ? `${activeItems.length} 个进行中` : "已结束"}</span>
+        <div className="esse-batch-task-card-actions">
+          <span className={`esse-batch-task-progress ${hasActiveItems ? "running" : ""}`}>
+            {hasActiveItems ? <span className="esse-status-spinner" aria-hidden="true" /> : null}
+            {hasActiveItems ? `${activeItems.length} 个进行中` : "已结束"}
+          </span>
+          {hasActiveItems ? (
+            <button className="esse-batch-task-all-cancel" type="button" onClick={() => onCancelAll(batchTask.batchTaskId)}>
+              全部取消
+            </button>
+          ) : null}
+        </div>
       </header>
       <div className="esse-batch-task-list">
         {batchTask.items.map((item) => {
           const session = sessionsById.get(item.sessionId);
           const status = session?.status ?? "idle";
           const canCancel = isActiveBatchTaskStatus(status);
+          const statusLabel = formatBatchTaskStatus(status, session?.errorMessage);
 
           return (
             <div className={`esse-batch-task-item ${status}`} key={`${batchTask.batchTaskId}-${item.sessionId}`}>
+              <EsseCommandPreviewStrip
+                command={item.command}
+                imageSessions={imageSessions}
+                referenceImages={batchTask.referenceImages ?? []}
+                onOpenImagePreview={onOpenImagePreview}
+              />
               <span className="esse-batch-task-name">{item.displayLabel}</span>
               <strong>{formatPreflightCommandMode(item.mode)}</strong>
-              <em>{formatBatchTaskStatus(status, session?.errorMessage)}</em>
+              <span className={`esse-batch-task-status ${canCancel ? "running" : ""}`}>
+                {canCancel ? <span className="esse-status-spinner" aria-hidden="true" /> : null}
+                <em>{statusLabel}</em>
+                {canCancel ? (
+                  <button
+                    className="esse-inline-action"
+                    type="button"
+                    onClick={() => onCancelItem(batchTask.batchTaskId, item.sessionId)}
+                  >
+                    取消
+                  </button>
+                ) : status === "failed" ? (
+                  <button
+                    className="esse-inline-action"
+                    type="button"
+                    onClick={() => onRetryItem(batchTask.batchTaskId, item.sessionId)}
+                  >
+                    重试
+                  </button>
+                ) : null}
+              </span>
               <p>{item.promptSummary || "未填写提示词"}</p>
-              {canCancel ? (
-                <button
-                  className="toolbar-button"
-                  type="button"
-                  onClick={() => onCancelItem(batchTask.batchTaskId, item.sessionId)}
-                >
-                  取消
-                </button>
-              ) : status === "failed" ? (
-                <button
-                  className="toolbar-button"
-                  type="button"
-                  onClick={() => onRetryItem(batchTask.batchTaskId, item.sessionId)}
-                >
-                  重试
-                </button>
-              ) : null}
             </div>
           );
         })}
       </div>
-      {activeItems.length > 0 ? (
-        <footer>
-          <button className="toolbar-button" type="button" onClick={() => onCancelAll(batchTask.batchTaskId)}>
-            全部取消
-          </button>
-          {failedItems.length > 0 ? (
-            <button className="toolbar-button" type="button" onClick={() => onRetryFailed(batchTask.batchTaskId)}>
-              重试失败项
-            </button>
-          ) : null}
-        </footer>
-      ) : failedItems.length > 0 ? (
+      {failedItems.length > 0 ? (
         <footer>
           <button className="toolbar-button" type="button" onClick={() => onRetryFailed(batchTask.batchTaskId)}>
             重试失败项
@@ -896,6 +1155,10 @@ function getCommandSourceImagePreview(command: WorkerCommand, imageSessions: Ima
 
 function getPlan(state: ProjectManagerState, planId: string): BatchPlan | null {
   return state.plans.find((plan) => plan.id === planId) ?? null;
+}
+
+function shouldShowPreflightCard(decision: ProjectManagerState["conversation"]["messages"][number]["preflightDecision"]): boolean {
+  return decision !== "execute" && decision !== "modify";
 }
 
 function hasLaterUserMessage(state: ProjectManagerState, index: number): boolean {

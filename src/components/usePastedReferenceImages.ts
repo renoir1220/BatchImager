@@ -112,6 +112,7 @@ export function usePastedReferenceImages() {
 
   return {
     addReferenceImagePath,
+    addReferenceFiles,
     clearReferenceImages,
     handlePaste,
     isSavingReference,

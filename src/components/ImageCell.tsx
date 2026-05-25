@@ -16,9 +16,12 @@ interface ImageCellProps {
   onDragLeave: () => void;
   onDragOver: (event: DragEvent<HTMLDivElement>) => void;
   onDrop: (event: DragEvent<HTMLDivElement>) => void;
-  onSelect: () => void;
+  onOpenContextMenu: (event: MouseEvent<HTMLDivElement>) => void;
+  onMouseDown: (event: MouseEvent<HTMLDivElement>) => void;
+  onCtrlContextMenu: () => void;
+  onSelect: (event: MouseEvent<HTMLDivElement>) => void;
+  onSelectByKeyboard: () => void;
   onRetry: () => void;
-  onToggleImageSource: () => void;
   onOpenPreview: () => void;
 }
 
@@ -40,15 +43,17 @@ export function ImageCell({
   onDragLeave,
   onDragOver,
   onDrop,
+  onCtrlContextMenu,
+  onMouseDown,
+  onOpenContextMenu,
   onOpenPreview,
   onRetry,
   onSelect,
-  onToggleImageSource
+  onSelectByKeyboard
 }: ImageCellProps) {
   const [isDeleteConfirming, setIsDeleteConfirming] = useState(false);
   const displayPath = getSessionDisplayPath(session);
   const imageUrl = window.batchImager?.getImageUrl(displayPath) ?? displayPath;
-  const sourceLabel = session.showOriginalInList && session.generatedFilePath ? "原" : "现";
 
   useEffect(() => {
     setIsDeleteConfirming(false);
@@ -78,7 +83,7 @@ export function ImageCell({
     }
 
     event.preventDefault();
-    onSelect();
+    onSelectByKeyboard();
   }
 
   function handleDragStart(event: DragEvent<HTMLDivElement>): void {
@@ -92,9 +97,15 @@ export function ImageCell({
       role="button"
       tabIndex={0}
       onClick={onSelect}
+      onMouseDown={onMouseDown}
       onContextMenu={(event) => {
         event.preventDefault();
-        onToggleImageSource();
+        if (event.ctrlKey) {
+          event.stopPropagation();
+          onCtrlContextMenu();
+          return;
+        }
+        onOpenContextMenu(event);
       }}
       onDoubleClick={onOpenPreview}
       onDragLeave={onDragLeave}
@@ -102,7 +113,7 @@ export function ImageCell({
       onDragStart={handleDragStart}
       onDrop={onDrop}
       onKeyDown={handleCellKeyDown}
-      title={session.generatedFilePath ? "右键切换原图/当前图，双击查看大图" : "双击查看大图"}
+      title="双击查看大图，右键打开菜单"
     >
       <img src={imageUrl} alt={session.fileName} draggable={false} />
       <button
@@ -116,7 +127,6 @@ export function ImageCell({
         <span aria-hidden="true">{isDeleteConfirming ? "✓" : <TrashIcon />}</span>
       </button>
       <span className="filename-overlay">{session.fileName}</span>
-      {session.generatedFilePath ? <span className="source-pill" aria-label={sourceLabel === "原" ? "当前显示原图" : "当前显示使用图"}>{sourceLabel}</span> : null}
       {session.status === "failed" ? (
         <button
           className="status-icon failed status-retry-button"

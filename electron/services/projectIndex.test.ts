@@ -1,9 +1,9 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { createProject } from "./projectStore";
-import { listProjectEntries, rememberProjectDirectory } from "./projectIndex";
+import { listProjectEntries, rememberProjectDirectory, removeProjectDirectoryFromIndex } from "./projectIndex";
 
 const tempRoots: string[] = [];
 
@@ -88,6 +88,28 @@ describe("projectIndex", () => {
         isUnavailable: true
       }
     ]);
+  });
+
+  test("removes remembered projects from the index by normalized path", async () => {
+    const root = await makeTempRoot();
+    const projectsDirectory = path.join(root, "projects");
+    const indexFilePath = path.join(root, "project-index.json");
+    const firstProjectDirectory = path.join(root, "external", "first");
+    const secondProjectDirectory = path.join(root, "external", "second");
+
+    await rememberProjectDirectory({ indexFilePath, projectDirectory: firstProjectDirectory });
+    await rememberProjectDirectory({ indexFilePath, projectDirectory: secondProjectDirectory });
+
+    await removeProjectDirectoryFromIndex({
+      indexFilePath,
+      projectDirectory: firstProjectDirectory.toUpperCase()
+    });
+
+    const index = JSON.parse(await readFile(indexFilePath, "utf8")) as { projectDirectories: string[] };
+    const entries = await listProjectEntries({ indexFilePath, projectsDirectory });
+
+    expect(index.projectDirectories).toEqual([secondProjectDirectory]);
+    expect(entries.map((entry) => entry.directory)).toEqual([secondProjectDirectory]);
   });
 });
 

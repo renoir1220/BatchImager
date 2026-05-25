@@ -120,18 +120,22 @@ export async function generateImageFromPrompt(
     publicMessage: "正在请求生成新图片..."
   });
 
+  const payload: Record<string, string> = {
+    model: config.model,
+    prompt,
+    response_format: "url",
+    size: requestSize
+  };
+  if (shouldSendAutoQuality(config.model)) {
+    payload.quality = "auto";
+  }
+
   const response = await fetchImageApiWithRetries({
     context,
     endpoint,
     fetchImpl: deps.fetch,
     init: {
-      body: JSON.stringify({
-        model: config.model,
-        prompt,
-        quality: "auto",
-        response_format: "url",
-        size: requestSize
-      }),
+      body: JSON.stringify(payload),
       headers: {
         Authorization: `Bearer ${config.apiKey}`,
         "Content-Type": "application/json"
@@ -471,6 +475,10 @@ async function retryImageApiRequest(
 
 function isRetryableImageApiStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
+}
+
+function shouldSendAutoQuality(model: string): boolean {
+  return !/^AA-gpt-image-2-(?:low|medium|high)$/i.test(model.trim());
 }
 
 function isInternalImageApiError(error: unknown): boolean {

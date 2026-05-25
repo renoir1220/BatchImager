@@ -428,6 +428,9 @@ describe("esseWorkspaceRuntime", () => {
     expect(persisted.sessions).toHaveLength(2);
     const duplicate = persisted.sessions[1];
     expect(duplicate?.id).not.toBe("sess_1");
+    expect(duplicateResult?.content[0]?.text).toContain(`sessionId=${duplicate?.id}`);
+    expect(duplicateResult?.content[0]?.text).toContain("新副本是 img-2");
+    expect(duplicateResult?.details?.affectedSessionIds).toEqual(["sess_1", duplicate?.id]);
     expect(duplicate).toMatchObject({
       chatMessages: [],
       fileName: "对比副本.jpg",
@@ -896,7 +899,7 @@ describe("esseWorkspaceRuntime", () => {
             displayLabel: "img-1",
             mode: "edit",
             prompt: "保留主体，换成白底主图",
-            target: { sessionId: "sess_1", type: "existing" }
+            target: { sourceSessionId: "sess_1", type: "new" }
           }
         ],
         estimatedApiCalls: 1,
@@ -946,7 +949,7 @@ describe("esseWorkspaceRuntime", () => {
         modifiedCommands: [
           {
             ...payload.commands[0],
-            mode: "generate",
+            mode: "edit",
             prompt: "用户修改后的浅灰场景图"
           }
         ]
@@ -964,9 +967,9 @@ describe("esseWorkspaceRuntime", () => {
     expect(result?.isError).toBeUndefined();
     expect(executions).toHaveLength(1);
     expect(executions[0].commands[0]).toMatchObject({
-      mode: "generate",
+      mode: "edit",
       prompt: "用户修改后的浅灰场景图",
-      target: { sessionId: "sess_1", type: "existing" }
+      target: { sourceSessionId: "sess_1", type: "new" }
     });
   });
 
@@ -1021,6 +1024,194 @@ describe("esseWorkspaceRuntime", () => {
     });
     expect(preflightPayloads[0].commands[0]).not.toHaveProperty("size");
     expect(preflightPayloads[0].commands[1]).toMatchObject({ mode: "generate", size: "2048x1152", target: { fileName: "scene.png", type: "new" } });
+  });
+
+  test("includes explicit workspace references in image preflight payloads", async () => {
+    const preflightPayloads: EssePreflightPayload[] = [];
+    const runtime = createProjectSnapshotWorkspaceRuntime({
+      executeImagePreflightTool: async (request) => ({ affectedSessionIds: request.commands.flatMap((command) => command.target.sessionId ?? []), ok: true, summary: "已提交批量生成任务。" }),
+      initialSnapshot: createSnapshot({ sessions: [createSession("sess_1"), createSession("sess_2", { fileName: "scene.jpg", filePath: "/project/original/scene.jpg" })] }),
+      requestPreflight: async (payload) => {
+        preflightPayloads.push(payload);
+        return { decision: "execute" };
+      },
+      sink: createNoopSink()
+    });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    const result = await tools.get("run_batch_generation")?.execute("call-1", {
+      commands: [
+        {
+          mode: "edit",
+          prompt: "用图2场景重做",
+          referenceImageIds: ["workspace-ref-sess_2"],
+          target: { sessionId: "sess_1", type: "existing" }
+        }
+      ]
+    });
+
+    expect(result?.isError).toBeUndefined();
+    expect(preflightPayloads[0]?.referenceImages).toEqual([
+      {
+        filePath: "/project/original/scene.jpg",
+        id: "workspace-ref-sess_2",
+        label: "图2 scene.jpg"
+      }
+    ]);
+  });
+
+  test("includes reference previews from previous submitted batch tasks in new preflight payloads", async () => {
+    const preflightPayloads: EssePreflightPayload[] = [];
+    const runtime = createProjectSnapshotWorkspaceRuntime({
+      executeImagePreflightTool: async (request) => ({ affectedSessionIds: request.commands.flatMap((command) => command.target.sessionId ?? []), ok: true, summary: "已提交批量生成任务。" }),
+      initialSnapshot: createSnapshot({
+        projectManagerState: {
+          conversation: {
+            id: "conv_1",
+            messages: [
+              {
+                batchTask: {
+                  batchTaskId: "batch_1",
+                  items: [],
+                  referenceImages: [
+                    { filePath: "/project/clicked/scene.png", id: "turn-ref-5", label: "本轮参考图 5" },
+                    { filePath: "/project/clicked/plant-a.png", id: "turn-ref-1", label: "本轮参考图 1" },
+                    { filePath: "/project/clicked/scale.png", id: "turn-ref-4", label: "本轮参考图 4" }
+                  ]
+                },
+                content: "",
+                contextType: "esse-batch-task",
+                id: "msg_batch",
+                role: "context"
+              }
+            ]
+          },
+          plans: []
+        }
+      }),
+      requestPreflight: async (payload) => {
+        preflightPayloads.push(payload);
+        return { decision: "execute" };
+      },
+      sink: createNoopSink()
+    });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    const result = await tools.get("run_batch_generation")?.execute("call-1", {
+      commands: [
+        {
+          mode: "generate",
+          prompt: "以场景图为基础，把目标植物自然替换进去，并按大小参考控制尺度。",
+          referenceImageIds: ["turn-ref-5", "turn-ref-1", "turn-ref-4"],
+          referenceImageNames: ["场景图", "目标植物", "大小参考"],
+          target: { fileName: "scene-result.png", type: "new" }
+        }
+      ]
+    });
+
+    expect(result?.isError).toBeUndefined();
+    expect(preflightPayloads[0]?.referenceImages).toEqual([
+      { filePath: "/project/clicked/scene.png", id: "turn-ref-5", label: "本轮参考图 5" },
+      { filePath: "/project/clicked/plant-a.png", id: "turn-ref-1", label: "本轮参考图 1" },
+      { filePath: "/project/clicked/scale.png", id: "turn-ref-4", label: "本轮参考图 4" }
+    ]);
+  });
+
+  test("requires local image names for multi-image generation prompts", async () => {
+    const preflightPayloads: EssePreflightPayload[] = [];
+    const runtime = createProjectSnapshotWorkspaceRuntime({
+      executeImagePreflightTool: async () => ({ affectedSessionIds: [], ok: true, summary: "已提交批量生成任务。" }),
+      initialSnapshot: createSnapshot({
+        sessions: [
+          createSession("sess_1", { fileName: "scene.jpg", filePath: "/project/original/scene.jpg" }),
+          createSession("sess_2", { fileName: "plant.jpg", filePath: "/project/original/plant.jpg" })
+        ]
+      }),
+      requestPreflight: async (payload) => {
+        preflightPayloads.push(payload);
+        return { decision: "execute" };
+      },
+      sink: createNoopSink()
+    });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    const missingNames = await tools.get("generate_image")?.execute("call-missing-names", {
+      mode: "generate",
+      prompt: "把植物放进场景",
+      referenceImageIds: ["workspace-ref-sess_1", "workspace-ref-sess_2"],
+      target: { fileName: "scene-result.png", type: "new" }
+    });
+    expect(missingNames?.isError).toBe(true);
+    expect(missingNames?.content[0]?.text).toContain("referenceImageNames required");
+
+    const uiLabelsInPrompt = await tools.get("generate_image")?.execute("call-ui-labels", {
+      mode: "generate",
+      prompt: "把【图片2】放进【图片1】场景",
+      referenceImageIds: ["workspace-ref-sess_1", "workspace-ref-sess_2"],
+      referenceImageNames: ["场景图", "目标植物"],
+      target: { fileName: "scene-result.png", type: "new" }
+    });
+    expect(uiLabelsInPrompt?.isError).toBe(true);
+    expect(uiLabelsInPrompt?.content[0]?.text).toContain("prompt must use local image names");
+
+    const result = await tools.get("generate_image")?.execute("call-ok", {
+      mode: "generate",
+      prompt: "以场景图为待保留场景，将目标植物自然替换进去。",
+      referenceImageIds: ["workspace-ref-sess_1", "workspace-ref-sess_2"],
+      referenceImageNames: ["场景图", "目标植物"],
+      target: { fileName: "scene-result.png", type: "new" }
+    });
+
+    expect(result?.isError).toBeUndefined();
+    expect(preflightPayloads[0]?.commands[0]).toMatchObject({
+      prompt: "以场景图为待保留场景，将目标植物自然替换进去。",
+      referenceImageIds: ["workspace-ref-sess_1", "workspace-ref-sess_2"],
+      referenceImageNames: ["场景图", "目标植物"]
+    });
+  });
+
+  test("preflights new images based on existing sessions without requiring duplicate_session first", async () => {
+    const preflightPayloads: EssePreflightPayload[] = [];
+    const executionRequests: unknown[] = [];
+    const runtime = createProjectSnapshotWorkspaceRuntime({
+      executeImagePreflightTool: async (request) => {
+        executionRequests.push(request);
+        return { affectedSessionIds: [], ok: true, summary: "已提交批量生成任务。" };
+      },
+      initialSnapshot: createSnapshot({ sessions: [createSession("sess_1")] }),
+      requestPreflight: async (payload) => {
+        preflightPayloads.push(payload);
+        return { decision: "execute" };
+      },
+      sink: createNoopSink()
+    });
+    const tools = toolsByName(createEsseWorkspaceTools(runtime));
+
+    const result = await tools.get("run_batch_generation")?.execute("call-1", {
+      commands: [
+        {
+          mode: "edit",
+          prompt: "基于图1生成一张新商品图，保留原图不动",
+          target: { fileName: "new-from-img-1.jpg", sourceSessionId: "sess_1", type: "new" }
+        }
+      ]
+    });
+
+    expect(result?.isError).toBeUndefined();
+    expect(preflightPayloads[0]?.commands).toEqual([
+      {
+        displayLabel: "img-1",
+        mode: "edit",
+        prompt: "基于图1生成一张新商品图，保留原图不动",
+        target: { fileName: "new-from-img-1.jpg", sourceSessionId: "sess_1", type: "new" }
+      }
+    ]);
+    expect(executionRequests).toEqual([
+      {
+        commands: preflightPayloads[0]?.commands,
+        tool: "run_batch_generation"
+      }
+    ]);
   });
 
   test("requires preflight before packaging generated images", async () => {
@@ -1103,7 +1294,7 @@ describe("esseWorkspaceRuntime", () => {
     });
 
     expect(result?.isError).toBe(true);
-    expect(result?.content[0]?.text).toContain("Reason: edit mode requires an existing target.");
+    expect(result?.content[0]?.text).toContain("Reason: edit mode with a new target requires sourceSessionId.");
   });
 
   test("treats generation-originated sessions as generated primaries", async () => {
@@ -1132,7 +1323,7 @@ describe("esseWorkspaceRuntime", () => {
     const restoreResult = await tools.get("restore_original")?.execute("restore", { sessionId: "sess_generated" });
 
     expect(listResult?.details?.sessions).toEqual([
-      expect.objectContaining({ currentImageSource: "generated", id: "sess_generated" })
+      expect.objectContaining({ currentImageSource: "generated", id: "sess_generated", referenceImageId: "workspace-ref-sess_generated" })
     ]);
     expect(recordsResult?.details?.records).toEqual([
       expect.objectContaining({ isPrimary: true, recordIndex: 1 }),

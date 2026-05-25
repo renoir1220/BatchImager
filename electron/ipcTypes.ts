@@ -33,22 +33,86 @@ export interface CancelEsseBatchTaskAllResponse {
 }
 
 export interface ApiSettingsSnapshot {
+  activeImageApiProfileId: ImageApiProfileId;
   configPath?: string;
   imageApiKeyConfigured: boolean;
   imageBaseUrl: string;
   imageModel: string;
+  imageApiProfiles: ImageApiProfileSnapshot[];
   llmApiKeyConfigured: boolean;
   llmBaseUrl: string;
   llmModel: string;
 }
 
-export interface SaveApiSettingsRequest {
-  imageApiKey?: string;
-  imageBaseUrl: string;
-  imageModel: string;
+export type ImageApiProfileId = "primary" | "secondary";
+
+export interface ImageApiProfileSnapshot {
+  active: boolean;
+  apiKeyConfigured: boolean;
+  baseUrl: string;
+  id: ImageApiProfileId;
+  llmApiKeyConfigured: boolean;
+  llmBaseUrl: string;
+  llmModel: string;
+  model: string;
+  name: string;
+}
+
+export interface SaveImageApiProfileRequest {
+  apiKey?: string;
+  baseUrl: string;
+  id: ImageApiProfileId;
   llmApiKey?: string;
   llmBaseUrl: string;
   llmModel: string;
+  model: string;
+  name: string;
+}
+
+export interface SaveApiSettingsRequest {
+  activeImageApiProfileId?: ImageApiProfileId;
+  imageApiKey?: string;
+  imageBaseUrl: string;
+  imageModel: string;
+  imageApiProfiles?: SaveImageApiProfileRequest[];
+  llmApiKey?: string;
+  llmBaseUrl: string;
+  llmModel: string;
+}
+
+export type EsseMemoryCategory = "用户偏好" | "默认约束" | "工作流惯例";
+
+export interface EsseMemoryEntry {
+  category: EsseMemoryCategory;
+  content: string;
+  createdAt: string;
+  id: string;
+}
+
+export interface EsseMemoryConflict {
+  conflictsWith: EsseMemoryEntry;
+  similarity: number;
+  suggestedNext: string;
+}
+
+export interface EsseMemorySnapshot {
+  categories: EsseMemoryCategory[];
+  entries: EsseMemoryEntry[];
+  filePath: string;
+}
+
+export interface AddEsseMemoryRequest {
+  category?: EsseMemoryCategory;
+  content: string;
+}
+
+export interface AddEsseMemoryResponse {
+  conflict?: EsseMemoryConflict;
+  snapshot: EsseMemorySnapshot;
+}
+
+export interface RemoveEsseMemoryRequest {
+  id: string;
 }
 
 export type EsseSkillSource = "built-in" | "global" | "project" | "user-path";
@@ -151,6 +215,15 @@ export interface CopyImageToClipboardResponse {
   ok: true;
 }
 
+export interface ExportImagesRequest {
+  fileName?: string;
+  imagePaths: string[];
+}
+
+export interface ExportImagesResponse {
+  outputPath: string;
+}
+
 export type ImageGenerationMode = "edit" | "generate";
 
 export interface GenerateImageResponse {
@@ -193,9 +266,17 @@ export interface SendChatMessageRequest {
 
 export interface SendChatMessageResponse {
   assistantMessage: string;
+  generationMode?: ImageGenerationMode;
   generatedImagePath?: string;
   remoteUrl?: string;
   sessionId: string;
+}
+
+export interface ChatImageGenerationStartedEvent {
+  prompt: string;
+  referenceImagePaths?: string[];
+  sessionId: string;
+  sourceImagePath: string;
 }
 
 export interface SaveReferenceImageRequest {
@@ -277,6 +358,7 @@ export interface EsseBatchTaskCardItem {
 export interface EsseBatchTaskCardData {
   batchTaskId: string;
   items: EsseBatchTaskCardItem[];
+  referenceImages?: BatchPlanReferenceImage[];
 }
 
 export interface ProjectManagerMessage {
@@ -308,6 +390,7 @@ export interface WorkerCommand {
   outputSize?: string;
   planId: string;
   referenceImageIds?: string[];
+  referenceImageNames?: string[];
   source: "project-manager";
   sourceSessionId?: string;
   target?: "existing" | "new";
@@ -395,14 +478,16 @@ export interface EssePreflightCommand {
   mode?: "edit" | "generate";
   prompt?: string;
   referenceImageIds?: string[];
+  referenceImageNames?: string[];
   size?: string;
-  target?: { fileName?: string; sessionId?: string; type: "existing" | "new" };
+  target?: { fileName?: string; sessionId?: string; sourceSessionId?: string; type: "existing" | "new" };
 }
 
 export interface EssePreflightPayload {
   commands: EssePreflightCommand[];
   estimatedApiCalls: number;
   estimatedDurationSeconds?: number;
+  referenceImages?: BatchPlanReferenceImage[];
   tool: EssePreflightToolName;
 }
 
@@ -465,6 +550,11 @@ export interface SendEsseMessageResponse {
   reply: string;
 }
 
+export interface EsseAssistantMessageUpdateEvent {
+  content: string;
+  operationId?: string;
+}
+
 export interface ProjectListEntry {
   directory: string;
   isExternal: boolean;
@@ -476,6 +566,10 @@ export interface ProjectListEntry {
 export interface RenameProjectRequest {
   directory: string;
   name: string;
+}
+
+export interface DeleteProjectRequest {
+  directory: string;
 }
 
 export interface OpenProjectRequest {

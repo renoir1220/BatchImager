@@ -4,10 +4,11 @@ interface ComposerReferenceStripProps {
   images: PastedReferenceImage[];
   isSaving: boolean;
   error: string | null;
+  onOpenPreview?: (filePath: string) => void;
   onRemove: (filePath: string) => void;
 }
 
-export function ComposerReferenceStrip({ error, images, isSaving, onRemove }: ComposerReferenceStripProps) {
+export function ComposerReferenceStrip({ error, images, isSaving, onOpenPreview, onRemove }: ComposerReferenceStripProps) {
   if (images.length === 0 && !isSaving && !error) {
     return null;
   }
@@ -17,16 +18,27 @@ export function ComposerReferenceStrip({ error, images, isSaving, onRemove }: Co
       {images.length > 0 ? (
         <div className="reference-strip compact">
           {images.map((image) => (
-            <button
+            <div
               className="reference-thumb"
               key={image.filePath}
-              type="button"
-              aria-label={`移除参考图 ${image.fileName}`}
-              onClick={() => onRemove(image.filePath)}
             >
-              <img src={image.previewUrl} alt={image.fileName} draggable={false} />
-              <span>×</span>
-            </button>
+              <button
+                className="reference-thumb-preview"
+                type="button"
+                aria-label={`查看参考图 ${image.fileName}`}
+                onClick={() => onOpenPreview?.(image.filePath)}
+              >
+                <img src={image.previewUrl} alt={image.fileName} draggable={false} />
+              </button>
+              <button
+                className="reference-remove-button"
+                type="button"
+                aria-label={`移除参考图 ${image.fileName}`}
+                onClick={() => onRemove(image.filePath)}
+              >
+                ×
+              </button>
+            </div>
           ))}
         </div>
       ) : null}

@@ -36,4 +36,31 @@ describe("MessageActions behavior", () => {
 
     expect(screen.getByRole("button", { name: "复制消息" })).toBeInTheDocument();
   });
+
+  test("copies inline image references as html metadata for round-trip paste", async () => {
+    const write = vi.fn().mockResolvedValue(undefined);
+    class FakeClipboardItem {
+      items: Record<string, Blob>;
+      constructor(items: Record<string, Blob>) {
+        this.items = items;
+      }
+    }
+    vi.stubGlobal("ClipboardItem", FakeClipboardItem);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { write, writeText: vi.fn() }
+    });
+
+    renderWithBatchImager(<MessageActions content="根据【图片1】生成" referenceFilePaths={["/project/ref-a.jpg"]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "复制消息" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(write).toHaveBeenCalledTimes(1);
+    const item = write.mock.calls[0][0][0] as FakeClipboardItem;
+    await expect(item.items["text/plain"].text()).resolves.toBe("根据【图片1】生成");
+    await expect(item.items["text/html"].text()).resolves.toContain('data-batchimager-reference-path="/project/ref-a.jpg"');
+  });
 });

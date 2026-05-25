@@ -172,9 +172,10 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
       userTask: "把 img-2 的记录 3、4 拆成一张新图"
     },
     {
-      assert: ({ persisted, result, trace }) => {
+      assert: ({ persisted, prompt, result, trace }) => {
         expect(result.reply).toBe("已复制 img-1，新的副本已选中，方便你对比着改。");
         expect(trace).toEqual(["list_sessions", "duplicate_session"]);
+        expect(prompt).toContain("用户明确要求“复制一份/做一个副本用于对比”但没有要求立即生成时，才用 duplicate_session");
         expect(persisted.sessions).toHaveLength(2);
         expect(persisted.sessions[1]?.id).not.toBe("sess_1");
         expect(persisted.sessions[1]).toMatchObject({
@@ -253,7 +254,7 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
                 displayLabel: "img-1",
                 mode: "edit",
                 prompt: "删除背景并换成白底，保留主体",
-                target: { sessionId: "sess_1", type: "existing" }
+                target: { sourceSessionId: "sess_1", type: "new" }
               }
             ],
             estimatedApiCalls: 1,
@@ -280,28 +281,26 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
     {
       assert: ({ preflightPayloads, prompt, trace }) => {
         expect(trace).toEqual(["list_sessions", "run_batch_generation"]);
-        expect(prompt).toContain("编辑现有工作区图片时先 list_sessions");
+        expect(prompt).toContain("生成结果必须新增");
         expect(prompt).not.toContain("/project/images");
-        expect(preflightPayloads).toEqual([
-          {
-            commands: [
-              {
-                displayLabel: "img-1",
-                mode: "edit",
-                prompt: "把商品改成手持展示姿势，保留主体",
-                target: { sessionId: "sess_1", type: "existing" }
-              },
-              {
-                displayLabel: "img-2",
-                mode: "edit",
-                prompt: "把商品改成手持展示姿势，保留主体",
-                target: { sessionId: "sess_2", type: "existing" }
-              }
-            ],
-            estimatedApiCalls: 2,
-            tool: "run_batch_generation"
-          }
-        ]);
+        expect(preflightPayloads[0]).toMatchObject({
+          commands: [
+            {
+              displayLabel: "img-1",
+              mode: "edit",
+              prompt: "把商品改成手持展示姿势，保留主体",
+              target: { sourceSessionId: "sess_1", type: "new" }
+            },
+            {
+              displayLabel: "img-2",
+              mode: "edit",
+              prompt: "把商品改成手持展示姿势，保留主体",
+              target: { sourceSessionId: "sess_2", type: "new" }
+            }
+          ],
+          estimatedApiCalls: 2,
+          tool: "run_batch_generation"
+        });
       },
       id: "batch-edit-uses-run-batch-generation-preflight",
       initialSnapshot: createSnapshot({
@@ -335,6 +334,8 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
         expect(result.reply).toBe("已提交 4 个鲜花图生成任务，会在后台完成。");
         expect(trace).toEqual(["run_batch_generation"]);
         expect(prompt).toContain("全新生成 N 张图");
+        expect(prompt).toContain("新图由 target.type='new' 决定，不是由 mode='generate' 决定");
+        expect(prompt).toContain("使用 mode='edit'、target.type='new'、target.sourceSessionId=源图 sessionId");
         expect(prompt).toContain("不要说“已经生成完成”");
         expect(preflightPayloads).toEqual([
           {
@@ -410,13 +411,13 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
                 displayLabel: "img-1",
                 mode: "edit",
                 prompt: "春季电商主图方案：明亮自然光、清爽浅色背景、保留商品主体和比例",
-                target: { sessionId: "sess_1", type: "existing" }
+                target: { sourceSessionId: "sess_1", type: "new" }
               },
               {
                 displayLabel: "img-2",
                 mode: "edit",
                 prompt: "春季电商主图方案：明亮自然光、清爽浅色背景、保留商品主体和比例",
-                target: { sessionId: "sess_2", type: "existing" }
+                target: { sourceSessionId: "sess_2", type: "new" }
               }
             ],
             estimatedApiCalls: 2,
@@ -450,6 +451,155 @@ function createWorkspaceAgentEvalScenarios(): WorkspaceAgentEvalScenario[] {
         }
       ],
       userTask: "帮这批图做一套春季电商主图方案"
+    },
+    {
+      assert: ({ preflightPayloads, prompt, result, trace }) => {
+        expect(result.reply).toBe("已创建 2 个商品细节图任务，确认后会新增到工作区。");
+        expect(trace).toEqual(["run_batch_generation"]);
+        expect(prompt).not.toContain("项目图片：");
+        expect(prompt).toContain("turn-ref-1");
+        expect(prompt).toContain("根据【图片1】，生成【图片2】、【图片3】的商品图");
+        expect(preflightPayloads).toEqual([
+          {
+            commands: [
+	              {
+	                mode: "generate",
+	                prompt: "根据细节风格参考，为目标商品生成电商商品细节图",
+	                referenceImageIds: ["turn-ref-2", "turn-ref-1"],
+	                referenceImageNames: ["目标商品", "细节风格参考"],
+	                target: { fileName: "图片2-商品细节图.png", type: "new" }
+	              },
+	              {
+	                mode: "generate",
+	                prompt: "根据细节风格参考，为目标商品生成电商商品细节图",
+	                referenceImageIds: ["turn-ref-3", "turn-ref-1"],
+	                referenceImageNames: ["目标商品", "细节风格参考"],
+	                target: { fileName: "图片3-商品细节图.png", type: "new" }
+	              }
+            ],
+            estimatedApiCalls: 2,
+            referenceImages: [
+              { filePath: "/project/clicked/product-a.png", id: "turn-ref-2", label: "本轮参考图 2" },
+              { filePath: "/project/clicked/detail-style.png", id: "turn-ref-1", label: "本轮参考图 1" },
+              { filePath: "/project/clicked/product-b.png", id: "turn-ref-3", label: "本轮参考图 3" }
+            ],
+            tool: "run_batch_generation"
+          }
+        ]);
+      },
+      id: "clicked-inline-images-create-two-new-batch-tasks",
+      initialSnapshot: createSnapshot({ sessions: [createSession("sess_1"), createSession("sess_2"), createSession("sess_3")] }),
+      referenceImagePaths: [
+        "/project/clicked/detail-style.png",
+        "/project/clicked/product-a.png",
+        "/project/clicked/product-b.png"
+      ],
+      reply: "已创建 2 个商品细节图任务，确认后会新增到工作区。",
+      script: [
+        {
+          tool: "run_batch_generation",
+          params: {
+            commands: [
+	              {
+	                mode: "generate",
+	                prompt: "根据细节风格参考，为目标商品生成电商商品细节图",
+	                referenceImageIds: ["turn-ref-2", "turn-ref-1"],
+	                referenceImageNames: ["目标商品", "细节风格参考"],
+	                target: { fileName: "图片2-商品细节图.png", type: "new" }
+	              },
+	              {
+	                mode: "generate",
+	                prompt: "根据细节风格参考，为目标商品生成电商商品细节图",
+	                referenceImageIds: ["turn-ref-3", "turn-ref-1"],
+	                referenceImageNames: ["目标商品", "细节风格参考"],
+	                target: { fileName: "图片3-商品细节图.png", type: "new" }
+	              }
+            ]
+          }
+        }
+      ],
+      userTask: "根据【图片1】，生成【图片2】、【图片3】的商品图"
+    },
+    {
+      assert: ({ preflightPayloads, prompt, result, trace }) => {
+        expect(result.reply).toBe("已创建图1和图2的商品图生成确认，会使用图5和附件作为参考。");
+        expect(trace).toEqual(["list_sessions", "run_batch_generation"]);
+        expect(trace).not.toContain("duplicate_session");
+        expect(prompt).toContain("工作区 referenceImageId 放进 referenceImageIds");
+        expect(preflightPayloads).toEqual([
+          {
+            commands: [
+              {
+	                displayLabel: "img-1",
+	                mode: "edit",
+	                prompt: "生成商品场景图，保留原商品主体，使用窗边木桌场景和色调参考作为视觉参考",
+	                referenceImageIds: ["workspace-ref-sess_5", "turn-ref-1"],
+	                referenceImageNames: ["窗边木桌场景", "色调参考"],
+	                target: { fileName: "图1-商品图.jpg", sourceSessionId: "sess_1", type: "new" }
+	              },
+	              {
+	                displayLabel: "img-2",
+	                mode: "edit",
+	                prompt: "生成商品场景图，保留原商品主体，使用窗边木桌场景和色调参考作为视觉参考",
+	                referenceImageIds: ["workspace-ref-sess_5", "turn-ref-1"],
+	                referenceImageNames: ["窗边木桌场景", "色调参考"],
+	                target: { fileName: "图2-商品图.jpg", sourceSessionId: "sess_2", type: "new" }
+	              }
+            ],
+            estimatedApiCalls: 2,
+            referenceImages: [
+              {
+                filePath: "/project/images/original/sess_5.jpg",
+                id: "workspace-ref-sess_5",
+                label: "图5 sess_5.jpg"
+              },
+              {
+                filePath: "/tmp/esse-uploaded-style.png",
+                id: "turn-ref-1",
+                label: "本轮参考图 1"
+              }
+            ],
+            tool: "run_batch_generation"
+          }
+        ]);
+      },
+      id: "batch-edit-passes-workspace-and-turn-reference-images",
+      initialSnapshot: createSnapshot({
+        sessions: [
+          createSession("sess_1"),
+          createSession("sess_2"),
+          createSession("sess_3"),
+          createSession("sess_4"),
+          createSession("sess_5")
+        ]
+      }),
+      referenceImagePaths: ["/tmp/esse-uploaded-style.png"],
+      reply: "已创建图1和图2的商品图生成确认，会使用图5和附件作为参考。",
+      script: [
+        { tool: "list_sessions", params: {} },
+        {
+          tool: "run_batch_generation",
+          params: {
+            commands: [
+	              {
+	                mode: "edit",
+	                prompt: "生成商品场景图，保留原商品主体，使用窗边木桌场景和色调参考作为视觉参考",
+	                referenceImageIds: ["workspace-ref-sess_5", "turn-ref-1"],
+	                referenceImageNames: ["窗边木桌场景", "色调参考"],
+	                target: { fileName: "图1-商品图.jpg", sourceSessionId: "sess_1", type: "new" }
+	              },
+	              {
+	                mode: "edit",
+	                prompt: "生成商品场景图，保留原商品主体，使用窗边木桌场景和色调参考作为视觉参考",
+	                referenceImageIds: ["workspace-ref-sess_5", "turn-ref-1"],
+	                referenceImageNames: ["窗边木桌场景", "色调参考"],
+	                target: { fileName: "图2-商品图.jpg", sourceSessionId: "sess_2", type: "new" }
+	              }
+            ]
+          }
+        }
+      ],
+      userTask: "给图1和图2生成商品图，用图5做场景参考，也用我上传的参考图统一色调"
     },
     {
       assert: ({ packageRequests, preflightPayloads, trace }) => {

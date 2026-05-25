@@ -35,6 +35,7 @@ interface EsseAgentDeps {
   bashTool?: unknown;
   createRuntime?: (options: CreateAgentRuntimeOptions) => Promise<AgentRuntime>;
   logger?: AppLogger;
+  onAssistantMessageUpdate?: (content: string) => void;
   registry?: AgentRuntimeRegistry;
   signal?: AbortSignal;
   skillLoader?: EsseSkillLoader;
@@ -139,7 +140,11 @@ export async function runEsseAgentTurn(
     },
     async ({ runtime, isFreshRuntime }) => {
       const agentLogState: AgentLogState = { hasPublishedMessageUpdate: false };
-      const unsubscribe = runtime.subscribe((event) => logAgentEvent(event, deps.logger, agentLogState));
+      const streamState: EsseStreamState = { lastContent: "" };
+      const unsubscribe = runtime.subscribe((event) => {
+        logAgentEvent(event, deps.logger, agentLogState);
+        publishAssistantMessageUpdate(event, runtime, deps.onAssistantMessageUpdate, streamState);
+      });
       const promptText = isFreshRuntime
         ? buildFullEssePrompt(input, selectedOutputSize, {
             memorySection,
@@ -171,6 +176,10 @@ export async function runEsseAgentTurn(
       if (!content) {
         throw new Error("Esse 未返回有效回复");
       }
+      if (content !== streamState.lastContent) {
+        deps.onAssistantMessageUpdate?.(content);
+        streamState.lastContent = content;
+      }
 
       deps.logger?.info("Esse agent request completed", {
         context,
@@ -184,6 +193,10 @@ export async function runEsseAgentTurn(
       return { reply: content };
     }
   );
+}
+
+interface EsseStreamState {
+  lastContent: string;
 }
 
 function createEsseTurnBudget(now = Date.now()): EsseTurnBudget {
@@ -295,6 +308,7 @@ function buildFullEssePrompt(
 
   const personaInstructions = ESSE_PERSONA_INSTRUCTIONS[input.persona ?? DEFAULT_ESSE_PERSONA];
   const history = input.messages.map((message) => `${message.role === "user" ? "用户" : "Esse"}：${message.content}`).join("\n");
+  const recentPlanContextLines = buildRecentPlanContextLines(input);
 
   const sections: string[] = [
     "你是 BatchImager 的 Esse 智能体。",
@@ -306,11 +320,13 @@ function buildFullEssePrompt(
     "==== 本轮上下文 ====",
     selectedOutputSize
       ? `- 用户本轮选择的输出分辨率：${selectedOutputSize}`
-      : "- 用户本轮没有选择输出分辨率，除非用户文字明确要求，不要自己添加 size。",
+      : "- 用户本轮没有选择输出分辨率，除非用户文字明确要求，不要自己添加 size；图像工具会按源图/每条 command 第一张输入图的原始比例推导。",
     `- 项目图片数量：${input.sessions.length}`,
     `- 本轮参考图数量：${input.referenceImagePaths?.length ?? 0}`,
+    ...recentPlanContextLines,
     "==== 对话历史 ====",
     history,
+    ...buildEmojiPromptInstruction(),
     "==== 输出要求 ====",
     "直接用中文回复用户。"
   ];
@@ -329,6 +345,7 @@ function buildEsseTurnPrompt(
 
   const personaInstructions = ESSE_PERSONA_INSTRUCTIONS[input.persona ?? DEFAULT_ESSE_PERSONA];
   const latestUserMessage = getLatestUserMessage(input);
+  const recentPlanContextLines = buildRecentPlanContextLines(input);
 
   const sections: string[] = [
     "==== 环境更新 ====",
@@ -340,11 +357,13 @@ function buildEsseTurnPrompt(
     "==== 本轮上下文 ====",
     selectedOutputSize
       ? `- 用户本轮选择的输出分辨率：${selectedOutputSize}`
-      : "- 用户本轮没有选择输出分辨率，除非用户文字明确要求，不要自己添加 size。",
+      : "- 用户本轮没有选择输出分辨率，除非用户文字明确要求，不要自己添加 size；图像工具会按源图/每条 command 第一张输入图的原始比例推导。",
     `- 项目图片数量：${input.sessions.length}`,
     `- 本轮参考图数量：${input.referenceImagePaths?.length ?? 0}`,
+    ...recentPlanContextLines,
     "==== 用户本轮要求 ====",
     latestUserMessage,
+    ...buildEmojiPromptInstruction(),
     "==== 输出要求 ====",
     "直接用中文回复用户。"
   ];
@@ -359,13 +378,12 @@ function buildFullEsseWorkspacePrompt(
   skillsSection?: string
 ): string {
   const personaInstructions = ESSE_PERSONA_INSTRUCTIONS[input.persona ?? DEFAULT_ESSE_PERSONA];
-  const sessionLines = buildWorkspaceSessionLines(input);
   const referenceImageLines = buildTurnReferenceImageLines(input);
-  const selectedDisplayLabel = getSelectedWorkspaceDisplayLabel(input);
+  const recentPlanContextLines = buildRecentPlanContextLines(input);
   const history = input.messages.map((message) => `${message.role === "user" ? "用户" : "Esse"}：${message.content}`).join("\n");
 
   return [
-    "你是 BatchImager 的 Esse 工作区 agent。你可以通过工具读取和修改左侧图片工作区。",
+    "你是 BatchImager 的 Esse 工作区 agent。默认不要假设自己知道左侧工作区内容；需要当前工作区图片、顺序或 id 时，通过工具读取。",
     ...(memorySection ? [memorySection] : []),
     ...buildSkillsPromptSection(skillsSection),
     ...buildWorkspaceToolPromptSections(),
@@ -374,14 +392,13 @@ function buildFullEsseWorkspacePrompt(
     "==== 本轮上下文 ====",
     selectedOutputSize
       ? `- 用户本轮选择的输出分辨率：${selectedOutputSize}`
-      : "- 用户本轮没有选择输出分辨率。",
-    selectedDisplayLabel ? `- 当前界面焦点图片：${selectedDisplayLabel}` : "- 当前没有界面焦点图片。",
-    referenceImageLines.length ? "- 本轮参考图路径（仅用于 add_reference_image 工具参数，不要回复给用户）：" : "- 本轮没有新上传/粘贴参考图。",
+      : "- 用户本轮没有选择输出分辨率；不要传 size，默认保持源图/第一张输入图比例。",
+    referenceImageLines.length ? "- 本轮用户加入对话的图片（可直接作为生成工具 referenceImageIds 使用；不要回复路径给用户）：" : "- 本轮没有新上传/粘贴/点击图片。",
     ...referenceImageLines.map((line) => `  ${line}`),
-    sessionLines.length ? "- 项目图片：" : "- 当前项目没有图片。",
-    ...sessionLines.map((line) => `  ${line}`),
+    ...recentPlanContextLines,
     "==== 对话历史 ====",
     history,
+    ...buildEmojiPromptInstruction(),
     "==== 最终回复要求 ====",
     "工具执行完成后，直接用一句中文总结你做了什么。不要返回 JSON，不要假装工具没有执行。"
   ].join("\n");
@@ -393,9 +410,8 @@ function buildEsseWorkspaceTurnPrompt(
   memorySection?: string,
   skillsSection?: string
 ): string {
-  const sessionLines = buildWorkspaceSessionLines(input);
   const referenceImageLines = buildTurnReferenceImageLines(input);
-  const selectedDisplayLabel = getSelectedWorkspaceDisplayLabel(input);
+  const recentPlanContextLines = buildRecentPlanContextLines(input);
 
   return [
     "==== 工作区环境更新 ====",
@@ -404,24 +420,23 @@ function buildEsseWorkspaceTurnPrompt(
     ...buildWorkspaceToolPromptSections(),
     selectedOutputSize
       ? `- 用户本轮选择的输出分辨率：${selectedOutputSize}`
-      : "- 用户本轮没有选择输出分辨率。",
-    selectedDisplayLabel ? `- 当前界面焦点图片：${selectedDisplayLabel}` : "- 当前没有界面焦点图片。",
-    referenceImageLines.length ? "- 本轮参考图路径（仅用于 add_reference_image 工具参数，不要回复给用户）：" : "- 本轮没有新上传/粘贴参考图。",
+      : "- 用户本轮没有选择输出分辨率；不要传 size，默认保持源图/第一张输入图比例。",
+    referenceImageLines.length ? "- 本轮用户加入对话的图片（可直接作为生成工具 referenceImageIds 使用；不要回复路径给用户）：" : "- 本轮没有新上传/粘贴/点击图片。",
     ...referenceImageLines.map((line) => `  ${line}`),
-    sessionLines.length ? "- 项目图片（覆盖此前）：" : "- 当前项目没有图片（覆盖此前）。",
-    ...sessionLines.map((line) => `  ${line}`),
+    ...recentPlanContextLines,
     "==== 用户本轮要求 ====",
     getLatestUserMessage(input),
+    ...buildEmojiPromptInstruction(),
     "==== 最终回复要求 ====",
     "工具执行完成后，直接用一句中文总结你做了什么。不要返回 JSON。"
   ].join("\n");
 }
 
-function buildWorkspaceSessionLines(input: EsseAgentTurnInput): string[] {
-  return input.sessions.map((session, index) => {
-    const currentSource = getWorkspaceSessionCurrentSource(session);
-    return `- img-${index + 1} / ${session.id}：${session.fileName}，当前图：${currentSource}，记录数：${session.generatedFilePaths?.length ?? 0}`;
-  });
+function buildEmojiPromptInstruction(): string[] {
+  return [
+    "==== Emoji 渲染 ====",
+    "渲染器支持原生 emoji，也会把这些短码渲染成 emoji：:sparkles: :white_check_mark: :warning: :bulb: :art: :camera: :package: :rocket: :memo: :eyes: :fire:。回复里可以少量使用；不要在工具参数、文件名、图片生成 prompt 里使用 emoji 或 emoji 短码。"
+  ];
 }
 
 function buildSkillsPromptSection(skillsSection: string | undefined): string[] {
@@ -440,51 +455,58 @@ function buildSkillsPromptSection(skillsSection: string | undefined): string[] {
 }
 
 function buildTurnReferenceImageLines(input: EsseAgentTurnInput): string[] {
-  return (input.referenceImagePaths ?? []).map((filePath, index) => `${index + 1}. ${filePath}`);
-}
-
-function getWorkspaceSessionCurrentSource(session: ProjectManagerPlanSession): "生成图" | "原图" {
-  if (session.currentImagePath && session.generatedFilePaths?.includes(session.currentImagePath)) {
-    return "生成图";
-  }
-
-  return "原图";
-}
-
-function getSelectedWorkspaceDisplayLabel(input: EsseAgentTurnInput): string | undefined {
-  if (!input.selectedSessionId) {
-    return undefined;
-  }
-
-  const index = input.sessions.findIndex((session) => session.id === input.selectedSessionId);
-  return index >= 0 ? `img-${index + 1}` : "当前选中图";
+  return (input.referenceImagePaths ?? []).map((filePath, index) => `- turn-ref-${index + 1}：对应用户消息里的【图片${index + 1}】/第 ${index + 1} 张本轮图片，filePath=${filePath}`);
 }
 
 function buildWorkspaceToolPromptSections(): string[] {
   return [
     "==== 工作区工具模式 ====",
-    "当前你可以通过工具读取和修改左侧工作区。所有工作区副作用必须通过工具执行，不要用 JSON 字段表达工作区操作。",
+    "当前你可以通过工具读取左侧工作区并提交生成/整理任务。所有工作区副作用必须通过工具执行，不要用 JSON 字段表达工作区操作。",
+    "默认不要读取左侧工作区：当用户已经通过点击/粘贴把图片加入本轮对话时，优先使用 turn-ref-N；只有用户用 img-N/第 N 张/当前工作区/已有生成记录等方式指向左侧内容，或需要打包、删除、重排、回退、查询尺寸时，才调用 list_sessions 等读工具。",
     "如果用户请求可以由当前工具完成的动作，必须先调用对应工具；不要只回复“我会处理/可以处理”。",
     "可用读工具：get_project_overview / list_sessions / get_session_records / read_image_metadata / list_reference_images / list_remembered_preferences / scan_unreferenced_files。",
     "可用写工具：restore_session_record / restore_original / rename_session / reorder_sessions / set_session_prompt / add_blank_session / add_reference_image / remove_reference_image / remember_user_preference / forget_user_preference / undo_last_actions / split_session / duplicate_session / delete_session_record / delete_session / merge_sessions / delete_unreferenced_files。",
     "生成与文件工具：generate_image / run_batch_generation / package_generated_images。它们每次都会先弹 preflight 卡片让用户确认；生成类确认后会提交后台生成任务，打包类确认后才写桌面 zip。",
+    "生成结果永远新增到左侧工作区，不写回原图。generate_image/run_batch_generation 的 target.type 必须用 'new'；基于已有工作区图生成时用 target.sourceSessionId，基于本轮点击/粘贴图片生成时用 referenceImageIds。",
     "preflight 卡片只能由这些工具触发；不要先用文字说“请确认后我就执行”。用户已经要求执行时，直接调用工具，让工具产生确认卡片。",
     "工作流要求：",
-    "1) 涉及现有工作区图片的写入、删除、生成编辑、批量处理、打包限定范围前，必须先调用 list_sessions 刷新当前工作区；即使本提示里列出了项目图片，也不要直接跳过读工具。",
+    "1) 涉及现有工作区图片的删除、回退、重排、生成、批量处理、打包限定范围前，必须先调用 list_sessions 刷新当前工作区；但用户已经点击/粘贴加入本轮对话的图片直接使用 turn-ref-N，不需要为了这些本轮图片读取左侧工作区。",
     "2) 回退或删除记录前必须调用 get_session_records 校验 recordIndex。",
     "3) 工具参数里的 sessionId 必须使用 list_sessions 返回的 id，不要传 img-1 这种 displayLabel。",
     "4) 一旦删除、合并、重排等操作让工作区数量或顺序发生变化，如果后续还要解析“现在第 N 张/剩下第 N 张/img-N”，必须重新调用 list_sessions。",
     "5) 用户询问图片尺寸、格式、字节大小、当前图信息时，用 read_image_metadata；先 list_sessions，把 UI label 映射为 sessionId；不要输出 filePath。",
+    "5.1) 读取或确认 BatchImager 项目状态时只能用工作区工具，禁止用 bash/sqlite 查询 project.sqlite；数据库 schema 是内部实现，不要猜表名或字段名。",
     "6) 用户明确要求先占一个空位、添加空白图片位、预留空白图位时，用 add_blank_session；不要为了生成新图而先调用它。",
     "7) 物理删除未引用生成文件必须先 scan_unreferenced_files，再把返回的 candidateId 传给 delete_unreferenced_files；不要传 filePath。",
-    "8) 管理项目参考图时必须用 list_reference_images / add_reference_image / remove_reference_image。add_reference_image 只能使用本轮参考图路径列表里的 filePath；用户只是粘贴了图但没有要求登记为项目参考图时，不要自动添加。生成时如需引用项目参考图，先 list_reference_images，再把返回的 id 放进 referenceImageIds。",
+    "8) 本轮用户粘贴/上传/点击加入对话的图片已经授权你在本轮读取并传给图像 API；直接把 turn-ref-1、turn-ref-2 等放进 generate_image/run_batch_generation 的 referenceImageIds，不要先 list_reference_images，也不要 add_reference_image。用户把某张工作区图片当作场景/风格/引用参考且没有点击加入本轮对话时，必须使用 list_sessions 返回的 referenceImageId 放进 referenceImageIds；只在 prompt 里写“参考图N/使用图N”不会把图片传给图像 API。只有用户明确要求“保存为项目参考图/以后复用/登记参考图”时，才用 add_reference_image；管理已有项目参考图时才用 list_reference_images / remove_reference_image。",
     "9) 用户明确说“记住/保存/以后都按这个”这类跨项目长期偏好时，用 remember_user_preference；用户问记住了什么或要求忘记时，用 list_remembered_preferences / forget_user_preference。不要把“这个项目是某客户的”这类项目专属信息写入全局记忆。",
     "10) undo_last_actions 会把工作区整体回退到那个时刻的状态。如果工具结果带 ⚠️ 警告，必须在 reply 里告诉用户这次撤销可能影响了中间的其他工作区操作。",
-    "11) 用户要求把某些生成记录单独拆出来时，先 list_sessions 和 get_session_records，再用 split_session；用户要求复制一份用于对比或试改时，先 list_sessions，再用 duplicate_session。",
-    "12) 生成/编辑图片必须用 generate_image 或 run_batch_generation；删除背景、去水印、换白底、改风格都属于图片编辑，不要只口头答应。编辑现有工作区图片时先 list_sessions；用户要全新生成 N 张图（如“生成 4 张鲜花图”）时直接用 run_batch_generation，N 条 target.type='new' command，除非引用了现有图片才先 list_sessions。单张用 generate_image；多张、全部、这批、批量处理同一类任务用 run_batch_generation，一张图一条 command。每条命令必须显式 mode='edit' 或 mode='generate'。只有用户明确要求尺寸、比例、横版、竖版、方图、2K/4K 时才传 size。",
-    "13) 打包/导出/放桌面必须用 package_generated_images；需要限定范围时先 list_sessions，只传稳定 sessionId；不要输出或猜测文件路径，也不要用文字替代 preflight。",
-    "14) 用户取消 preflight 后，不要原样重试，先问用户要调整什么。",
-    "15) 生成工具是 fire-and-forget：工具返回后只能说“已提交 N 个任务/生成会在后台完成”，不要说“已经生成完成”，也不要承诺完成后主动通知。其他工具完成后直接用一句中文总结；不要返回 JSON。"
+    "11) 用户要求把某些生成记录单独拆出来时，先 list_sessions 和 get_session_records，再用 split_session；用户明确要求“复制一份/做一个副本用于对比”但没有要求立即生成时，才用 duplicate_session。duplicate_session 的结果会返回新副本 sessionId；后续工具参数必须使用返回 id 或重新 list_sessions 后的真实 id，严禁自己编造 sess_*。",
+    "12) 生成/编辑图片必须用 generate_image 或 run_batch_generation；删除背景、去水印、换白底、改风格都属于图片编辑，不要只口头答应。生成结果必须新增：用户要全新生成 N 张图且不依赖现有图片内容时（如“生成 4 张鲜花图”），用 run_batch_generation，N 条 target.type='new' command；注意新图由 target.type='new' 决定，不是由 mode='generate' 决定。",
+    "13) 用户说“生成新图/两张新图”，但又要求基于现有工作区图、图1+附件、图1+另一张工作区参考图、把图1/图2的主体放进参考场景、保留图1植物等，目标是保留原图并新增结果：先 list_sessions，必要时把本轮附件 turn-ref-* 或工作区 referenceImageId 放进 referenceImageIds，然后直接调用 generate_image/run_batch_generation，使用 mode='edit'、target.type='new'、target.sourceSessionId=源图 sessionId；审批通过后工具会内部创建/复制新 session。不要为了生成新图提前调用 duplicate_session，不要直接编辑原始图1/图2，也不要用 target.type='new' 且缺少 sourceSessionId 来丢掉源图输入。",
+    "13.1) 用户使用【图片1】【图片2】这类本轮图片时，不要假设它们仍在左侧或需要 sessionId。比如“根据【图片1】，生成【图片2】、【图片3】的商品图”，应提交两条 run_batch_generation command：第一条 referenceImageIds 按 [turn-ref-2, turn-ref-1]，referenceImageNames 按 [目标商品, 细节/风格参考]；第二条 referenceImageIds 按 [turn-ref-3, turn-ref-1]，referenceImageNames 按 [目标商品, 细节/风格参考]；mode='generate'，target.type='new'。prompt 只能用 referenceImageNames 里的局部名字描述图片角色，不要让 API prompt 依赖【图片N】这类用户界面编号。",
+    "13.2) referenceImageIds 的顺序就是图像 API 的上传顺序；referenceImageNames 是同顺序的局部命名。遇到“场景图/场景底图/保持场景原样/保留原场景/只替换主体/把 A 放进 B 场景”时，命令必须显式写清图片角色，不能靠执行层猜。比如“分别用【图片1】【图片2】生成场景图，场景图是【图片5】，大小参考【图片4】”：scene_from_img1 用 referenceImageIds=[turn-ref-5, turn-ref-1, turn-ref-4]，referenceImageNames=[场景图, 目标植物, 大小参考]，prompt 写“以场景图为待保留场景，将目标植物自然替换进去，并按大小参考控制尺度”；scene_from_img2 用 [turn-ref-5, turn-ref-2, turn-ref-4] 和同样 names。prompt 里不要写【图片5】等用户界面编号。",
+    "14) 单张用 generate_image；多张、全部、这批、批量处理同一类任务用 run_batch_generation，一张图一条 command。每条命令必须显式 mode='edit' 或 mode='generate'。只有用户明确要求尺寸、比例、横版、竖版、方图、2K/4K 时才传 size；未指定时绝对不要传 size，以保持源图或第一张 referenceImageIds 输入图的比例。",
+    "15) 打包/导出/放桌面必须用 package_generated_images；需要限定范围时先 list_sessions，只传稳定 sessionId；不要输出或猜测文件路径，也不要用文字替代 preflight。",
+    "16) 用户取消 preflight 后，不要原样重试，先问用户要调整什么。",
+    "17) 生成工具是 fire-and-forget：工具返回后只能说“已提交 N 个任务/生成会在后台完成”，不要说“已经生成完成”，也不要承诺完成后主动通知。其他工具完成后直接用一句中文总结；不要返回 JSON。",
+    "18) 如果用户在一个待确认计划/preflight 后只提出调整要求（如“不满意、不要白底、背景换灰色、少两张、把提示词改成…”），必须把最近的【Esse上一版待确认计划】当作上一版计划，合并用户本轮修改后重新调用 generate_image 或 run_batch_generation 输出新的确认卡；不要要求用户重复原始需求，不要只解释旧计划。"
+  ];
+}
+
+function buildRecentPlanContextLines(input: EsseAgentTurnInput): string[] {
+  const recentPlanMessages = input.messages
+    .filter((message) => message.role === "assistant" && /【Esse(?:上一版待确认计划|已提交生成计划)】/.test(message.content))
+    .slice(-3);
+
+  if (recentPlanMessages.length === 0) {
+    return [];
+  }
+
+  return [
+    "==== 最近计划上下文 ====",
+    "下面是用户上一轮看到的计划/确认卡摘要；当用户本轮只说调整要求时，以这些内容为基础重出计划。",
+    ...recentPlanMessages.map((message) => message.content)
   ];
 }
 
@@ -495,6 +517,29 @@ function getLatestUserMessage(input: EsseAgentTurnInput): string {
       .find((message) => message.role === "user")
       ?.content.trim() ?? ""
   );
+}
+
+function publishAssistantMessageUpdate(
+  event: unknown,
+  runtime: AgentRuntime,
+  onAssistantMessageUpdate: ((content: string) => void) | undefined,
+  state: EsseStreamState
+): void {
+  if (!onAssistantMessageUpdate || !isPiEventType(event, "message_update")) {
+    return;
+  }
+
+  const content = runtime.getLastAssistantText()?.trim();
+  if (!content || content === state.lastContent) {
+    return;
+  }
+
+  state.lastContent = content;
+  onAssistantMessageUpdate(content);
+}
+
+function isPiEventType(event: unknown, type: string): boolean {
+  return Boolean(event && typeof event === "object" && "type" in event && event.type === type);
 }
 
 function shouldReportMissingReferenceImage(input: EsseAgentTurnInput): boolean {

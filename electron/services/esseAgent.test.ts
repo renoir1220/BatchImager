@@ -33,6 +33,9 @@ describe("esseAgent", () => {
     expect(capturedPrompt).toContain("像资深商业视觉设计师一样工作");
     expect(capturedPrompt).toContain("有审美取向的默认方案");
     expect(capturedPrompt).toContain("当前运行时没有工作区工具");
+    expect(capturedPrompt).toContain("渲染器支持原生 emoji");
+    expect(capturedPrompt).toContain(":sparkles:");
+    expect(capturedPrompt).toContain("不要在工具参数、文件名、图片生成 prompt 里使用 emoji");
     expect(capturedPrompt).toContain("不要返回 JSON");
     expect(capturedPrompt).not.toContain("输出契约");
     expect(capturedPrompt).not.toContain("只返回一个 JSON 对象");
@@ -95,7 +98,47 @@ describe("esseAgent", () => {
     );
 
     expect(capturedPrompt).toContain("工作区工具模式");
+    expect(capturedPrompt).toContain("禁止用 bash/sqlite 查询 project.sqlite");
     expect(capturedPrompt).not.toMatch(/\bplan\b|imageRequests/);
+  });
+
+  test("instructs Esse to put scene base images first for turn-reference scene replacement", async () => {
+    let capturedPrompt = "";
+
+    await runEsseAgentTurn(
+      {
+        messages: [{ role: "user", content: "分别用【图片1】【图片2】生成场景图，场景图是【图片5】，大小参考【图片4】" }],
+        referenceImagePaths: [
+          "C:/project/uploads/plant-a.jpg",
+          "C:/project/uploads/plant-b.jpg",
+          "C:/project/uploads/leaf.jpg",
+          "C:/project/uploads/scale.jpg",
+          "C:/project/uploads/scene.jpg"
+        ],
+        sessions: []
+      },
+      createEsseTestConfig(),
+      "C:/project",
+      {
+        createRuntime: async () =>
+          createFakeEsseRuntime({
+            onPrompt: (prompt) => {
+              capturedPrompt = prompt;
+            }
+          }),
+        workspaceToolRuntime: createTestWorkspaceRuntime({
+          project: createTestProjectMetadata(),
+          sessions: []
+        })
+      }
+    );
+
+    expect(capturedPrompt).toContain("referenceImageNames 是同顺序的局部命名");
+    expect(capturedPrompt).toContain("不能靠执行层猜");
+    expect(capturedPrompt).toContain("referenceImageIds=[turn-ref-5, turn-ref-1, turn-ref-4]");
+    expect(capturedPrompt).toContain("referenceImageNames=[场景图, 目标植物, 大小参考]");
+    expect(capturedPrompt).toContain("scene_from_img2 用 [turn-ref-5, turn-ref-2, turn-ref-4]");
+    expect(capturedPrompt).toContain("prompt 里不要写【图片5】等用户界面编号");
   });
 
   test("returns the assistant text directly instead of parsing legacy JSON fields", async () => {
@@ -169,6 +212,41 @@ describe("esseAgent", () => {
     expect(publicMessages.filter((message) => message === "Esse 正在组织回复...")).toHaveLength(1);
   });
 
+  test("streams assistant message updates from Pi message updates", async () => {
+    const streamedMessages: string[] = [];
+    let currentAssistantText = "";
+    let runtimeListener: ((event: unknown) => void) | undefined;
+
+    const result = await runEsseAgentTurn(
+      {
+        messages: [{ role: "user", content: "帮我看看这批图适合怎么做" }],
+        sessions: []
+      },
+      createEsseTestConfig(),
+      "C:/project",
+      {
+        createRuntime: async () =>
+          createFakeEsseRuntime({
+            getLastAssistantText: () => currentAssistantText,
+            onPrompt: () => {
+              currentAssistantText = "先做两个方向";
+              runtimeListener?.({ type: "message_update" });
+              currentAssistantText = "先做两个方向，再出确认卡。";
+              runtimeListener?.({ type: "message_update" });
+            },
+            subscribe: (listener) => {
+              runtimeListener = listener;
+              return () => undefined;
+            }
+          }),
+        onAssistantMessageUpdate: (content) => streamedMessages.push(content)
+      }
+    );
+
+    expect(result).toEqual({ reply: "先做两个方向，再出确认卡。" });
+    expect(streamedMessages).toEqual(["先做两个方向", "先做两个方向，再出确认卡。"]);
+  });
+
   test("reuses the cached Esse runtime on follow-up turns and sends an incremental prompt", async () => {
     const registry = new AgentRuntimeRegistry();
     const prompts: string[] = [];
@@ -216,6 +294,104 @@ describe("esseAgent", () => {
     expect(prompts[1]).toContain("第二轮再做成暖光家居场景");
     expect(prompts[1]).not.toContain("==== 对话历史 ====");
     expect(prompts[1]).not.toContain("输出契约");
+  });
+
+  test("includes the previous preflight plan context when the user only asks for adjustments", async () => {
+    const registry = new AgentRuntimeRegistry();
+    const prompts: string[] = [];
+    let factoryCalls = 0;
+
+    const deps = {
+      registry,
+      createRuntime: async () => {
+        factoryCalls += 1;
+        return createFakeEsseRuntime({
+          getLastAssistantText: () => `回复 ${prompts.length}`,
+          onPrompt: (prompt) => prompts.push(prompt)
+        });
+      },
+      workspaceToolRuntime: createTestWorkspaceRuntime({
+        project: createTestProjectMetadata(),
+        sessions: []
+      })
+    };
+
+    await runEsseAgentTurn(
+      {
+        messages: [{ role: "user", content: "给图1做商品图" }],
+        sessions: [{ fileName: "flower.jpg", id: "sess_1" }]
+      },
+      createEsseTestConfig(),
+      "C:\\project",
+      deps
+    );
+    await runEsseAgentTurn(
+      {
+        messages: [
+          { role: "user", content: "给图1做商品图" },
+          {
+            role: "assistant",
+            content:
+              "【Esse上一版待确认计划】状态：待用户确认；工具：generate_image；任务数：1；requestId：request-1\n任务1：displayLabel=img-1；target=existing sessionId=sess_1；mode=edit；size=未指定；referenceImageIds=无；prompt=统一做白底商品图"
+          },
+          { role: "user", content: "不要白底，背景改成浅灰" }
+        ],
+        sessions: [{ fileName: "flower.jpg", id: "sess_1" }]
+      },
+      createEsseTestConfig(),
+      "C:\\project",
+      deps
+    );
+
+    expect(factoryCalls).toBe(1);
+    expect(prompts[1]).toContain("==== 最近计划上下文 ====");
+    expect(prompts[1]).toContain("统一做白底商品图");
+    expect(prompts[1]).toContain("不要白底，背景改成浅灰");
+    expect(prompts[1]).toContain("重新调用 generate_image 或 run_batch_generation 输出新的确认卡");
+  });
+
+  test("includes submitted batch image references when the user revises a previous plan", async () => {
+    const registry = new AgentRuntimeRegistry();
+    const prompts: string[] = [];
+    let factoryCalls = 0;
+
+    const deps = {
+      registry,
+      createRuntime: async () => {
+        factoryCalls += 1;
+        return createFakeEsseRuntime({
+          getLastAssistantText: () => `回复 ${prompts.length}`,
+          onPrompt: (prompt) => prompts.push(prompt)
+        });
+      },
+      workspaceToolRuntime: createTestWorkspaceRuntime({
+        project: createTestProjectMetadata(),
+        sessions: []
+      })
+    };
+
+    await runEsseAgentTurn(
+      {
+        messages: [
+          {
+            role: "assistant",
+            content:
+              "【Esse已提交生成计划】batchTaskId：batch_1；任务数：4\n任务1：scene-1.png；mode=generate；referenceImageIds=turn-ref-5,turn-ref-1,turn-ref-4；referenceImageNames=场景图,目标植物,大小参考；prompt=以场景图为待保留场景，将目标植物自然替换进去\n任务2：scene-2.png；mode=generate；referenceImageIds=turn-ref-5,turn-ref-2,turn-ref-4；referenceImageNames=场景图,目标植物,大小参考；prompt=以场景图为待保留场景，将目标植物自然替换进去"
+          },
+          { role: "user", content: "重新生成两个商品图，要保留原始的花盆" }
+        ],
+        sessions: []
+      },
+      createEsseTestConfig(),
+      "C:/project",
+      deps
+    );
+
+    expect(factoryCalls).toBe(1);
+    expect(prompts[0]).toContain("==== 最近计划上下文 ====");
+    expect(prompts[0]).toContain("referenceImageIds=turn-ref-5,turn-ref-1,turn-ref-4");
+    expect(prompts[0]).toContain("referenceImageNames=场景图,目标植物,大小参考");
+    expect(prompts[0]).toContain("重新生成两个商品图，要保留原始的花盆");
   });
 
   test("reused workspace tools read the current turn runtime state", async () => {
@@ -439,7 +615,7 @@ describe("esseAgent", () => {
       expect.arrayContaining(["list_sessions", "get_session_records", "restore_session_record", "delete_session_record"])
     );
     expect(capturedPrompt).toContain("工作区工具模式");
-    expect(capturedPrompt).toContain("当前界面焦点图片：img-1");
+    expect(capturedPrompt).toContain("默认不要假设自己知道左侧工作区内容");
     expect(capturedPrompt).toContain("回退或删除记录前必须调用 get_session_records");
     expect(capturedPrompt).not.toContain("只返回一个 JSON 对象");
     expect(toolTrace).toEqual(["list_sessions", "get_session_records", "restore_session_record", "delete_session_record"]);

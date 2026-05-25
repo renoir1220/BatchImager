@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppLogEntry,
   AddEsseSkillPathRequest,
+  AddEsseMemoryRequest,
+  AddEsseMemoryResponse,
   ApiSettingsSnapshot,
   CancelEsseBatchTaskAllRequest,
   CancelEsseBatchTaskAllResponse,
@@ -9,10 +11,14 @@ import type {
   CancelEsseBatchTaskItemResponse,
   CancelOperationRequest,
   CancelOperationResponse,
+  ChatImageGenerationStartedEvent,
   CopyImageToClipboardRequest,
   CopyImageToClipboardResponse,
   CreatePlaceholderImageRequest,
   CreatePlaceholderImageResponse,
+  DeleteProjectRequest,
+  ExportImagesRequest,
+  ExportImagesResponse,
   GenerateImageRequest,
   InstallEsseSkillFromGitRequest,
   GenerateImageResponse,
@@ -20,6 +26,7 @@ import type {
   OpenProjectRequest,
   ProjectListEntry,
   ProjectSnapshot,
+  RemoveEsseMemoryRequest,
   RenameProjectRequest,
   RemoveEsseSkillRequest,
   RetryEsseBatchTaskFailedRequest,
@@ -40,7 +47,9 @@ import type {
   EssePermissionRequest,
   EssePermissionResponse,
   EssePermissionResponseAck,
+  EsseAssistantMessageUpdateEvent,
   EsseBashExecutionEvent,
+  EsseMemorySnapshot,
   SendEsseMessageRequest,
   SendEsseMessageResponse,
   EsseSkillsSnapshot,
@@ -57,6 +66,7 @@ const api = {
   openProject: async (request?: OpenProjectRequest): Promise<ProjectSnapshot | null> => ipcRenderer.invoke("project:open", request),
   rememberProjectDirectory: async (): Promise<ProjectListEntry[] | null> => ipcRenderer.invoke("project:remember-directory"),
   renameProject: async (request: RenameProjectRequest): Promise<ProjectListEntry[]> => ipcRenderer.invoke("project:rename", request),
+  deleteProject: async (request: DeleteProjectRequest): Promise<ProjectListEntry[]> => ipcRenderer.invoke("project:delete", request),
   importImages: async (request: ImportProjectImagesRequest): Promise<ProjectSnapshot> =>
     ipcRenderer.invoke("project:import-images", request),
   saveProjectSnapshot: async (request: SaveProjectSnapshotRequest): Promise<ProjectSnapshot> =>
@@ -79,6 +89,8 @@ const api = {
     ipcRenderer.invoke("images:save-reference", request),
   copyImageToClipboard: async (request: CopyImageToClipboardRequest): Promise<CopyImageToClipboardResponse> =>
     ipcRenderer.invoke("images:copy-to-clipboard", request),
+  exportImages: async (request: ExportImagesRequest): Promise<ExportImagesResponse> =>
+    ipcRenderer.invoke("images:export", request),
   sendChatMessage: async (request: SendChatMessageRequest): Promise<SendChatMessageResponse> =>
     ipcRenderer.invoke("chat:send-message", request),
   sendEsseMessage: async (request: SendEsseMessageRequest): Promise<SendEsseMessageResponse> =>
@@ -93,6 +105,11 @@ const api = {
     ipcRenderer.invoke("settings:save-api", request),
   listEsseSkills: async (): Promise<EsseSkillsSnapshot> => ipcRenderer.invoke("esse:skills-list"),
   reloadEsseSkills: async (): Promise<EsseSkillsSnapshot> => ipcRenderer.invoke("esse:skills-reload"),
+  listEsseMemories: async (): Promise<EsseMemorySnapshot> => ipcRenderer.invoke("esse:memory-list"),
+  addEsseMemory: async (request: AddEsseMemoryRequest): Promise<AddEsseMemoryResponse> =>
+    ipcRenderer.invoke("esse:memory-add", request),
+  removeEsseMemory: async (request: RemoveEsseMemoryRequest): Promise<EsseMemorySnapshot> =>
+    ipcRenderer.invoke("esse:memory-remove", request),
   setEsseSkillEnabled: async (request: SetEsseSkillEnabledRequest): Promise<EsseSkillsSnapshot> =>
     ipcRenderer.invoke("esse:skills-set-enabled", request),
   addEsseSkillPath: async (request: AddEsseSkillPathRequest): Promise<EsseSkillsSnapshot> =>
@@ -154,6 +171,22 @@ const api = {
 
     return () => {
       ipcRenderer.removeListener("esse:bash-execution", handler);
+    };
+  },
+  subscribeEsseAssistantMessageUpdates: (listener: (event: EsseAssistantMessageUpdateEvent) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, updateEvent: EsseAssistantMessageUpdateEvent) => listener(updateEvent);
+    ipcRenderer.on("esse:assistant-message-update", handler);
+
+    return () => {
+      ipcRenderer.removeListener("esse:assistant-message-update", handler);
+    };
+  },
+  subscribeChatImageGenerationStarted: (listener: (event: ChatImageGenerationStartedEvent) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, startedEvent: ChatImageGenerationStartedEvent) => listener(startedEvent);
+    ipcRenderer.on("chat:image-generation-started", handler);
+
+    return () => {
+      ipcRenderer.removeListener("chat:image-generation-started", handler);
     };
   },
   getPathForFile: (file: File): string => webUtils.getPathForFile(file),

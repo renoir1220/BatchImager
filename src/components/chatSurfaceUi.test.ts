@@ -10,6 +10,7 @@ describe("right sidebar chat surface", () => {
   test("session and Esse messages render through the shared markdown component", () => {
     expect(readProjectFile("src/components/MarkdownMessage.tsx")).toContain("ReactMarkdown");
     expect(readProjectFile("src/components/MarkdownMessage.tsx")).toContain("remarkGfm");
+    expect(readProjectFile("src/components/MarkdownMessage.tsx")).toContain("renderEmojiShortcodes");
     expect(readProjectFile("src/components/SessionPanel.tsx")).toContain("MarkdownMessage");
     expect(readProjectFile("src/components/ProjectPlanPanel.tsx")).toContain("MarkdownMessage");
   });
@@ -53,7 +54,8 @@ describe("right sidebar chat surface", () => {
     const styles = readProjectFile("src/styles.css");
 
     expect(sessionPanel).toContain('aria-label={isAgentWorking ? "停止" : "发送"}');
-    expect(projectPanel).toContain('aria-label={isAgentWorking ? "停止" : "发送"}');
+    expect(projectPanel).toContain('aria-label={isAgentWorking && !(hasPendingPreflight && canSend) ? "停止" : "发送"}');
+    expect(projectPanel).toContain("hasPendingPreflight");
     expect(styles).toContain(".composer-stop-icon");
   });
 

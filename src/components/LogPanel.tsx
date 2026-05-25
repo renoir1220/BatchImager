@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import type { AppLogEntry } from "../../electron/ipcTypes";
 
 interface LogPanelProps {
@@ -13,6 +14,25 @@ const LEVEL_LABEL: Record<AppLogEntry["level"], string> = {
 };
 
 export function LogPanel({ logs, onClose }: LogPanelProps) {
+  const displayLogs = [...logs].reverse();
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      event.preventDefault();
+      onClose();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose]);
+
   return (
     <div className="log-page" role="dialog" aria-modal="true" aria-labelledby="log-page-title">
       <header className="log-header">
@@ -29,7 +49,7 @@ export function LogPanel({ logs, onClose }: LogPanelProps) {
         {logs.length === 0 ? (
           <div className="log-empty">暂无日志。开始导入或生成后，这里会显示进度。</div>
         ) : (
-          logs.map((entry, index) => (
+          displayLogs.map((entry, index) => (
             <article className={`log-row ${entry.level}`} key={`${entry.timestamp}-${index}`}>
               <time>{formatTime(entry.timestamp)}</time>
               <span className="log-level">{LEVEL_LABEL[entry.level]}</span>

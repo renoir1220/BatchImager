@@ -78,6 +78,7 @@ describe("imageSessionAgent", () => {
     expect(generated).toHaveLength(1);
     expect(result).toEqual({
       content: "我已经通过 Pi 生成好了。",
+      generatedMode: "edit",
       generatedImage: {
         outputPath: "C:\\project\\images\\generated\\img-1.png",
         remoteUrl: "https://cdn.example.com/img-1.png"
@@ -92,6 +93,7 @@ describe("imageSessionAgent", () => {
     await runImageSessionAgent(
       {
         imagePath: "C:\\project\\images\\generated\\placeholder.png",
+        generationMode: "generate",
         messages: [{ role: "user", content: "根据这张参考图生成咖啡馆内部结构图" }],
         referenceImages: [{ id: "prompt-ref-1", filePath: "C:\\project\\references\\sakura-cafe.jpg", label: "Esse 提示图 1" }],
         sessionId: "img-7"
@@ -149,6 +151,7 @@ describe("imageSessionAgent", () => {
     await runImageSessionAgent(
       {
         imagePath: "C:\\project\\images\\generated\\placeholder.png",
+        generationMode: "generate",
         messages: [{ role: "user", content: "根据这张参考图生成咖啡馆内部结构图" }],
         referenceImages: [{ id: "prompt-ref-1", filePath: "C:\\project\\references\\sakura-cafe.jpg", label: "Esse 提示图 1" }],
         sessionId: "img-7"
@@ -196,6 +199,120 @@ describe("imageSessionAgent", () => {
         mode: "generate",
         prompt: "生成咖啡馆内部结构图",
         sessionId: "img-7"
+      }
+    ]);
+  });
+
+  test("coerces ambiguous current-image generation tool calls back to edit without size", async () => {
+    const generatedRequests: unknown[] = [];
+    const customTools: Array<{ name: string; execute: (id: string, params: Record<string, unknown>) => Promise<unknown> }> = [];
+
+    await runImageSessionAgent(
+      {
+        generationMode: "edit",
+        imagePath: "C:\\project\\images\\generated\\plant-latest.png",
+        messages: [{ role: "user", content: "改为漫画风格" }],
+        sessionId: "img-plant"
+      },
+      {
+        apiKey: "coding-key",
+        baseUrl: "https://api.tu-zi.com/coding",
+        model: "gpt-5.5"
+      },
+      "C:\\project",
+      {
+        createRuntime: async (options) => {
+          customTools.push(...(options.customToolDefinitions as typeof customTools));
+          return {
+            descriptor: {
+              builtInTools: [],
+              customTools: [],
+              model: options.model,
+              projectDirectory: options.projectDirectory,
+              sessionId: options.sessionId
+            },
+            dispose: () => undefined,
+            getLastAssistantText: () => "已改成漫画风格。",
+            prompt: async () => {
+              const generateTool = customTools.find((tool) => tool.name === "generate_image");
+              await generateTool?.execute("call-1", {
+                mode: "generate",
+                prompt: "把当前植物商品图改为漫画风格"
+              });
+            },
+            subscribe: () => () => undefined
+          };
+        },
+        generateImage: async (request) => {
+          generatedRequests.push(request);
+          return { outputPath: "C:\\project\\images\\generated\\plant-comic.png" };
+        }
+      }
+    );
+
+    expect(generatedRequests).toEqual([
+      {
+        imagePath: "C:\\project\\images\\generated\\plant-latest.png",
+        mode: "edit",
+        prompt: "把当前植物商品图改为漫画风格",
+        sessionId: "img-plant"
+      }
+    ]);
+  });
+
+  test("keeps generate mode when the user explicitly asks for a new image", async () => {
+    const generatedRequests: unknown[] = [];
+    const customTools: Array<{ name: string; execute: (id: string, params: Record<string, unknown>) => Promise<unknown> }> = [];
+
+    await runImageSessionAgent(
+      {
+        generationMode: "edit",
+        imagePath: "C:\\project\\images\\generated\\plant-latest.png",
+        messages: [{ role: "user", content: "新生成一张漫画风格商品图" }],
+        sessionId: "img-plant"
+      },
+      {
+        apiKey: "coding-key",
+        baseUrl: "https://api.tu-zi.com/coding",
+        model: "gpt-5.5"
+      },
+      "C:\\project",
+      {
+        createRuntime: async (options) => {
+          customTools.push(...(options.customToolDefinitions as typeof customTools));
+          return {
+            descriptor: {
+              builtInTools: [],
+              customTools: [],
+              model: options.model,
+              projectDirectory: options.projectDirectory,
+              sessionId: options.sessionId
+            },
+            dispose: () => undefined,
+            getLastAssistantText: () => "已新生成一张漫画风格图。",
+            prompt: async () => {
+              const generateTool = customTools.find((tool) => tool.name === "generate_image");
+              await generateTool?.execute("call-1", {
+                mode: "generate",
+                prompt: "新生成一张漫画风格商品图"
+              });
+            },
+            subscribe: () => () => undefined
+          };
+        },
+        generateImage: async (request) => {
+          generatedRequests.push(request);
+          return { outputPath: "C:\\project\\images\\generated\\plant-new.png" };
+        }
+      }
+    );
+
+    expect(generatedRequests).toEqual([
+      {
+        imagePath: "C:\\project\\images\\generated\\plant-latest.png",
+        mode: "generate",
+        prompt: "新生成一张漫画风格商品图",
+        sessionId: "img-plant"
       }
     ]);
   });
