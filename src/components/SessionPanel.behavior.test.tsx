@@ -60,15 +60,15 @@ describe("SessionPanel behavior", () => {
     expect(screen.queryByAltText("生成结果")).not.toBeInTheDocument();
   });
 
-  test("renders dispatched Esse task prompt with input and reference images", () => {
+  test("renders dispatched agent task prompt with input and reference images", () => {
     renderWithBatchImager(
       <SessionPanel
         activityLogs={[]}
         selectedSession={makeSession({
           chatMessages: [
             {
-              content: "来自 Esse智能体：基于图1生成商品图\n参考图：2 张",
-              contextType: "esse-task",
+              content: "来自智能体：基于图1生成商品图\n参考图：2 张",
+              contextType: "agent-task",
               id: "msg-task",
               referenceFilePaths: ["/project/ref-a.jpg", "/project/ref-b.jpg"],
               role: "context",
@@ -84,7 +84,7 @@ describe("SessionPanel behavior", () => {
       />
     );
 
-    expect(screen.getByText(/来自 Esse智能体：基于图1生成商品图/)).toBeInTheDocument();
+    expect(screen.getByText(/来自智能体：基于图1生成商品图/)).toBeInTheDocument();
     expect(screen.getByText("输入图")).toBeInTheDocument();
     expect(screen.getByText("source-current.jpg")).toBeInTheDocument();
     expect(screen.getByText("参考图")).toBeInTheDocument();

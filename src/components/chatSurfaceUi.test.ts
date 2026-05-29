@@ -7,7 +7,7 @@ function readProjectFile(filePath: string): string {
 }
 
 describe("right sidebar chat surface", () => {
-  test("session and Esse messages render through the shared markdown component", () => {
+  test("session and agent messages render through the shared markdown component", () => {
     expect(readProjectFile("src/components/MarkdownMessage.tsx")).toContain("ReactMarkdown");
     expect(readProjectFile("src/components/MarkdownMessage.tsx")).toContain("remarkGfm");
     expect(readProjectFile("src/components/MarkdownMessage.tsx")).toContain("renderEmojiShortcodes");
@@ -112,7 +112,7 @@ describe("right sidebar chat surface", () => {
     expect(styles).not.toContain(".session-preview");
   });
 
-  test("session and Esse chat images can be opened and copied from the thread", () => {
+  test("session and agent chat images can be opened and copied from the thread", () => {
     const sessionPanel = readProjectFile("src/components/SessionPanel.tsx");
     const projectPanel = readProjectFile("src/components/ProjectPlanPanel.tsx");
     const app = readProjectFile("src/App.tsx");

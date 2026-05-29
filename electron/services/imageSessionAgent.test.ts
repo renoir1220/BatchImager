@@ -95,7 +95,7 @@ describe("imageSessionAgent", () => {
         imagePath: "C:\\project\\images\\generated\\placeholder.png",
         generationMode: "generate",
         messages: [{ role: "user", content: "根据这张参考图生成咖啡馆内部结构图" }],
-        referenceImages: [{ id: "prompt-ref-1", filePath: "C:\\project\\references\\sakura-cafe.jpg", label: "Esse 提示图 1" }],
+        referenceImages: [{ id: "prompt-ref-1", filePath: "C:\\project\\references\\sakura-cafe.jpg", label: "智能体提示图 1" }],
         sessionId: "img-7"
       },
       {
@@ -153,7 +153,7 @@ describe("imageSessionAgent", () => {
         imagePath: "C:\\project\\images\\generated\\placeholder.png",
         generationMode: "generate",
         messages: [{ role: "user", content: "根据这张参考图生成咖啡馆内部结构图" }],
-        referenceImages: [{ id: "prompt-ref-1", filePath: "C:\\project\\references\\sakura-cafe.jpg", label: "Esse 提示图 1" }],
+        referenceImages: [{ id: "prompt-ref-1", filePath: "C:\\project\\references\\sakura-cafe.jpg", label: "智能体提示图 1" }],
         sessionId: "img-7"
       },
       {
@@ -351,37 +351,52 @@ describe("imageSessionAgent", () => {
     ).rejects.toThrow("Pi 会话未返回文本回复");
   });
 
-  test("rejects attachment-based generation when no reference image is available before starting Pi", async () => {
+  test("lets Pi decide what to do when the user mentions an attachment but none is available", async () => {
     let runtimeCreated = false;
     const generatedRequests: unknown[] = [];
+    let capturedPrompt = "";
 
-    await expect(
-      runImageSessionAgent(
-        {
-          imagePath: "C:\\project\\images\\generated\\placeholder.png",
-          messages: [{ role: "user", content: "按附件里的参考图继续生成三张内部设计图" }],
-          sessionId: "img-7"
+    const result = await runImageSessionAgent(
+      {
+        imagePath: "C:\\project\\images\\generated\\placeholder.png",
+        messages: [{ role: "user", content: "按附件里的参考图继续生成三张内部设计图" }],
+        sessionId: "img-7"
+      },
+      {
+        apiKey: "coding-key",
+        baseUrl: "https://api.tu-zi.com/coding",
+        model: "gpt-5.5"
+      },
+      "C:\\project",
+      {
+        createRuntime: async (options) => {
+          runtimeCreated = true;
+          return {
+            descriptor: {
+              builtInTools: [],
+              customTools: [],
+              model: options.model,
+              projectDirectory: options.projectDirectory,
+              sessionId: options.sessionId
+            },
+            dispose: () => undefined,
+            getLastAssistantText: () => "我没有看到参考图，会先向用户确认。",
+            prompt: async (prompt) => {
+              capturedPrompt = prompt;
+            },
+            subscribe: () => () => undefined
+          };
         },
-        {
-          apiKey: "coding-key",
-          baseUrl: "https://api.tu-zi.com/coding",
-          model: "gpt-5.5"
-        },
-        "C:\\project",
-        {
-          createRuntime: async () => {
-            runtimeCreated = true;
-            throw new Error("runtime should not be created");
-          },
-          generateImage: async (request) => {
-            generatedRequests.push(request);
-            return { outputPath: "unused.png" };
-          }
+        generateImage: async (request) => {
+          generatedRequests.push(request);
+          return { outputPath: "unused.png" };
         }
-      )
-    ).rejects.toThrow("我没有收到可用的参考图附件");
+      }
+    );
 
-    expect(runtimeCreated).toBe(false);
+    expect(runtimeCreated).toBe(true);
+    expect(capturedPrompt).toContain("本轮没有可引用的参考图");
+    expect(result).toEqual({ content: "我没有看到参考图，会先向用户确认。" });
     expect(generatedRequests).toEqual([]);
   });
 

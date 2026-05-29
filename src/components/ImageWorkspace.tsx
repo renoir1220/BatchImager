@@ -25,7 +25,7 @@ interface ImageWorkspaceProps {
   onCopySessionImage: (sessionId: string) => void;
   onExportSessionImage: (sessionId: string) => void;
   onSelectSession: (sessionId: string, options?: { multi?: boolean }) => void;
-  onSendToEsse?: (payload: WorkspaceImageDragPayload) => void;
+  onSendToAgent?: (payload: WorkspaceImageDragPayload) => void;
 }
 
 export function ImageWorkspace({
@@ -43,7 +43,7 @@ export function ImageWorkspace({
   onExportSessionImage,
   onRetrySession,
   onSelectSession,
-  onSendToEsse
+  onSendToAgent
 }: ImageWorkspaceProps) {
   const [dragTargetSessionId, setDragTargetSessionId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
@@ -201,8 +201,8 @@ export function ImageWorkspace({
               return;
             }
 
-            if (onSendToEsse) {
-              onSendToEsse(onImageDragPayload(session));
+            if (onSendToAgent) {
+              onSendToAgent(onImageDragPayload(session));
               return;
             }
 

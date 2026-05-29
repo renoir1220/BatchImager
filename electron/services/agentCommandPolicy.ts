@@ -24,13 +24,16 @@ const SYSTEM_DANGEROUS_PATTERNS: RegExp[] = [
   /^\s*(format|format-volume|diskpart)\b/i,
   /^\s*reg\s+(add|delete|import|restore|save|unload)\b/i,
   /^\s*schtasks\s+\/(create|delete|change)\b/i,
-  /^\s*(icacls|takeown|set-acl|chmod|chown)\b/i,
+  /^\s*(icacls|takeown|set-acl)\b/i,
   /^\s*taskkill\b.*\s\/f\b/i,
   /^\s*(sc|net\s+user)\b/i
 ];
 
 const DESTRUCTIVE_FILE_COMMAND_PATTERN =
-  /^\s*(rm|del|erase|rmdir|rd|remove-item|move-item|mv|copy|copy-item|cp)\b/i;
+  /^\s*(rm|del|erase|rmdir|rd|remove-item|move-item|mv)\b/i;
+
+const SECRET_FILE_READ_COMMAND_PATTERN =
+  /^\s*(cat|type|get-content|gc|more|less|head|tail|grep|rg|awk|sed)\b/i;
 
 export function createBatchImagerCommandPolicy(options: BatchImagerCommandPolicyOptions): BatchImagerCommandPolicy {
   const projectDirectory = path.resolve(options.projectDirectory);
@@ -57,8 +60,16 @@ export function createBatchImagerCommandPolicy(options: BatchImagerCommandPolicy
       );
     }
 
+    if (isSecretFileInspection(trimmed)) {
+      return deny("不允许通过 bash 读取本地密钥配置文件。", "如果需要检查 API 是否配置，请使用设置页或受控诊断信息，不要读取 .env 文件内容。");
+    }
+
     if (isRecursiveDeletionOfRootOrUserDirectory(trimmed, projectDirectory)) {
       return deny("检测到根目录或用户目录的递归删除命令，已阻止执行。", "如果需要清理项目缓存，请只删除项目内明确的缓存或构建目录。");
+    }
+
+    if (isPermissionChangeOfRootOrUserDirectory(trimmed, projectDirectory)) {
+      return deny("检测到根目录或用户目录的权限修改命令，已阻止执行。", "如果需要调整脚本权限，请只处理项目或 skill 目录里的明确文件。");
     }
 
     if (DESTRUCTIVE_FILE_COMMAND_PATTERN.test(trimmed) && protectedRoots.some((root) => commandMentionsPath(trimmed, root))) {
@@ -112,6 +123,35 @@ export function createBatchImagerCommandPolicy(options: BatchImagerCommandPolicy
       return checkCommandInternal(command, false);
     }
   };
+}
+
+function isSecretFileInspection(command: string): boolean {
+  return SECRET_FILE_READ_COMMAND_PATTERN.test(command) && /(?:^|[\s"'`=:/\\])\.env(?:\.[A-Za-z0-9_-]+)?(?:$|[\s"'`:/\\])/i.test(command);
+}
+
+function isPermissionChangeOfRootOrUserDirectory(command: string, projectDirectory: string): boolean {
+  if (!/^\s*(chmod|chown)\b/i.test(command)) {
+    return false;
+  }
+
+  const normalized = normalizeCommand(command);
+
+  if (/\b(chmod|chown)\b.*\s["']?\/["']?\s*$/i.test(command)) {
+    return true;
+  }
+
+  const normalizedProject = normalizeForCommand(projectDirectory);
+  if (normalized.includes(`${normalizedProject}/`) || normalized.includes(normalizedProject)) {
+    return false;
+  }
+
+  const userRoot = getUserRoot(projectDirectory);
+  if (userRoot && normalized.includes(normalizeForCommand(userRoot))) {
+    return true;
+  }
+
+  const windowsUsersRoot = normalizeForCommand("C:\\Users");
+  return normalized.includes(windowsUsersRoot) || normalized.includes("/users/") || normalized.includes("/home/");
 }
 
 function isRecursiveDeletionOfRootOrUserDirectory(command: string, projectDirectory: string): boolean {

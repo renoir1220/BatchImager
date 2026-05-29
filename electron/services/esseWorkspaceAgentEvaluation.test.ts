@@ -699,7 +699,7 @@ async function runWorkspaceAgentEvalScenario(scenario: WorkspaceAgentEvalScenari
     scenario.initialSnapshot.project.directory,
     {
       createRuntime: async (options) => {
-        const tools = (options.customToolDefinitions ?? []) as BatchImagerAgentTool[];
+        const tools = await collectRuntimeTools(options);
         toolNames = tools.map((tool) => tool.name);
         return createScriptedRuntime({
           onPrompt: async (nextPrompt) => {
@@ -758,6 +758,22 @@ function createEvalMemoryStore(initialEntries: EsseMemoryEntry[]): EsseMemorySto
   };
 }
 
+async function collectRuntimeTools(options: CreateAgentRuntimeOptions): Promise<BatchImagerAgentTool[]> {
+  const extensionTools: BatchImagerAgentTool[] = [];
+  for (const factory of options.extensionFactories ?? []) {
+    if (typeof factory !== "function") {
+      continue;
+    }
+    await factory({
+      registerTool: (tool: BatchImagerAgentTool) => {
+        extensionTools.push(tool);
+      }
+    });
+  }
+
+  return [...extensionTools, ...((options.customToolDefinitions ?? []) as BatchImagerAgentTool[])];
+}
+
 async function runToolScript(tools: BatchImagerAgentTool[], script: ToolScriptStep[], trace: string[]): Promise<void> {
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
@@ -784,7 +800,10 @@ function createScriptedRuntime(options: {
     abort: async () => undefined,
     descriptor: {
       builtInTools: [],
-      customTools: options.sessionOptions.customToolDefinitions?.map((tool) => (tool as { name?: string }).name ?? "") ?? [],
+      customTools: [
+        ...(options.sessionOptions.extensionToolNames ?? []),
+        ...(options.sessionOptions.customToolDefinitions?.map((tool) => (tool as { name?: string }).name ?? "") ?? [])
+      ],
       model: options.sessionOptions.model,
       projectDirectory: options.sessionOptions.projectDirectory,
       sessionId: "esse-workspace-agent-eval"

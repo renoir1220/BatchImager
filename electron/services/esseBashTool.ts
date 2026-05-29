@@ -2,7 +2,7 @@ import type { WebContents } from "electron";
 import type { EsseBashExecutionEvent } from "../ipcTypes";
 import type { BatchImagerCommandPolicy } from "./agentCommandPolicy";
 import type { EssePermissionBroker } from "./essePermissionBroker";
-import type { EssePermissionPolicy } from "./essePermissionPolicy";
+import type { AgentWorkspacePermissionPolicy } from "./agentWorkspacePermissionPolicy";
 import type { EsseSkillLoader, EsseSkillRecord } from "./esseSkillLoader";
 
 export interface EsseBashOperations {
@@ -58,14 +58,28 @@ interface EsseBashToolDefinition {
   name?: string;
 }
 
-const ESSE_PERMISSION_POLICY_FOR_BASH: EssePermissionPolicy = {
+const AGENT_PERMISSION_POLICY_FOR_BASH: AgentWorkspacePermissionPolicy = {
   read: "allow",
   "safe-write": "allow",
   destructive: "ask",
   "external-write": "ask"
 };
 
-const ALLOWED_ENV_KEYS = new Set(["HOME", "PATH", "USER", "LANG", "LC_ALL", "TMPDIR", "SHELL", "DISPLAY"]);
+const ALLOWED_ENV_KEYS = new Set(["HOME", "PATH", "Path", "USER", "LANG", "LC_ALL", "TMPDIR", "SHELL", "DISPLAY"]);
+const BASH_RUNNING_EVENT_INTERVAL_MS = 250;
+// GUI-launched Electron apps often miss Homebrew paths; keep this explicit instead of inheriting the full shell env.
+const DEFAULT_POSIX_BASH_PATH_ENTRIES = [
+  "/opt/homebrew/bin",
+  "/opt/homebrew/sbin",
+  "/usr/local/bin",
+  "/usr/local/sbin",
+  "/usr/bin",
+  "/bin",
+  "/usr/sbin",
+  "/sbin"
+];
+const MAX_BASH_EVENT_OUTPUT_CHARS = 12_000;
+const MAX_BASH_EVENT_OUTPUT_LINES = 240;
 const SECRET_ENV_PATTERN = /(?:^TUZI_|^OPENAI_|^ANTHROPIC_|^BATCHIMAGER_API_|API_KEY|TOKEN|SECRET|PASSWORD)/i;
 
 export async function createEsseBashTool(options: CreateEsseBashToolOptions): Promise<unknown> {
@@ -94,7 +108,7 @@ export async function createEsseBashTool(options: CreateEsseBashToolOptions): Pr
             toolName: "bash"
           },
           {
-            policy: ESSE_PERMISSION_POLICY_FOR_BASH,
+      policy: AGENT_PERMISSION_POLICY_FOR_BASH,
             sessionAllowList: options.sessionAllowList,
             signal: linkedSignal.signal
           }
@@ -139,12 +153,43 @@ export function sanitizeBashEnv(
     }
   }
 
+  const bashPath = buildBashPath(sanitized.PATH ?? sanitized.Path);
+  if (bashPath) {
+    sanitized.PATH = bashPath;
+    if (process.platform === "win32" && sanitized.Path) {
+      sanitized.Path = bashPath;
+    }
+  }
   sanitized.BATCHIMAGER_PROJECT_DIR = projectDirectory;
   sanitized.BATCHIMAGER_SKILL_NAME = skill?.name ?? "";
   sanitized.BATCHIMAGER_SKILL_DIR = skill?.baseDir ?? "";
   sanitized.BATCHIMAGER_USER_DATA = userDataDirectory;
 
   return sanitized;
+}
+
+function buildBashPath(inputPath: string | undefined): string {
+  const delimiter = process.platform === "win32" ? ";" : ":";
+  const defaultEntries = process.platform === "win32" ? [] : DEFAULT_POSIX_BASH_PATH_ENTRIES;
+  const entries = [...splitPathEntries(inputPath, delimiter), ...defaultEntries];
+  const seen = new Set<string>();
+  const uniqueEntries: string[] = [];
+
+  for (const entry of entries) {
+    const normalizedEntry = entry.trim();
+    if (!normalizedEntry || seen.has(normalizedEntry)) {
+      continue;
+    }
+
+    seen.add(normalizedEntry);
+    uniqueEntries.push(normalizedEntry);
+  }
+
+  return uniqueEntries.join(delimiter);
+}
+
+function splitPathEntries(inputPath: string | undefined, delimiter: string): string[] {
+  return inputPath?.split(delimiter) ?? [];
 }
 
 function sanitizeSpawnContext(context: EsseBashSpawnContext, options: CreateEsseBashToolOptions): EsseBashSpawnContext {
@@ -185,7 +230,8 @@ function wrapBashToolDefinition(toolDefinition: unknown, options: CreateEsseBash
     ) => {
       const command = typeof params.command === "string" ? params.command : "";
       const skill = inferSkillForBash(command, options.projectDirectory, options.skillLoader);
-      publishBashExecutionEvent(options, {
+      const publisher = createBashExecutionEventPublisher((event) => publishBashExecutionEvent(options, event));
+      publisher.publishImmediate({
         command,
         cwd: options.projectDirectory,
         skillName: skill?.name ?? null,
@@ -198,12 +244,13 @@ function wrapBashToolDefinition(toolDefinition: unknown, options: CreateEsseBash
           params,
           signal,
           (partialResult) => {
-            publishBashExecutionEvent(options, {
+            const output = extractTextContent(partialResult);
+            publisher.publishRunning({
               command,
               cwd: options.projectDirectory,
               fullOutputPath: extractFullOutputPath(partialResult),
-              output: extractTextContent(partialResult),
-              outputPath: extractBatchImagerOutputPath(extractTextContent(partialResult)),
+              output,
+              outputPath: extractBatchImagerOutputPath(output),
               skillName: skill?.name ?? null,
               status: "running",
               toolCallId
@@ -213,7 +260,7 @@ function wrapBashToolDefinition(toolDefinition: unknown, options: CreateEsseBash
           ctx
         );
         const output = extractTextContent(result);
-        publishBashExecutionEvent(options, {
+        publisher.publishFinal({
           command,
           cwd: options.projectDirectory,
           exitCode: extractExitCode(result),
@@ -227,7 +274,7 @@ function wrapBashToolDefinition(toolDefinition: unknown, options: CreateEsseBash
         });
         return result;
       } catch (error) {
-        publishBashExecutionEvent(options, {
+        publisher.publishFinal({
           command,
           cwd: options.projectDirectory,
           isError: true,
@@ -237,6 +284,8 @@ function wrapBashToolDefinition(toolDefinition: unknown, options: CreateEsseBash
           toolCallId
         });
         throw error;
+      } finally {
+        publisher.dispose();
       }
     }
   };
@@ -247,7 +296,87 @@ function isBashToolDefinition(value: unknown): value is EsseBashToolDefinition {
 }
 
 function publishBashExecutionEvent(options: CreateEsseBashToolOptions, event: EsseBashExecutionEvent): void {
-  options.webContents.send("esse:bash-execution", event);
+  const normalized = normalizeBashExecutionEvent(event);
+  options.webContents.send("agent:bash-execution", normalized);
+  options.webContents.send("esse:bash-execution", normalized);
+}
+
+interface BashExecutionEventPublisher {
+  dispose: () => void;
+  publishFinal: (event: EsseBashExecutionEvent) => void;
+  publishImmediate: (event: EsseBashExecutionEvent) => void;
+  publishRunning: (event: EsseBashExecutionEvent) => void;
+}
+
+function createBashExecutionEventPublisher(send: (event: EsseBashExecutionEvent) => void): BashExecutionEventPublisher {
+  let pendingRunningEvent: EsseBashExecutionEvent | undefined;
+  let runningEventTimer: NodeJS.Timeout | undefined;
+
+  const clearRunningEventTimer = () => {
+    if (!runningEventTimer) {
+      return;
+    }
+
+    clearTimeout(runningEventTimer);
+    runningEventTimer = undefined;
+  };
+
+  const flushRunningEvent = () => {
+    const event = pendingRunningEvent;
+    pendingRunningEvent = undefined;
+    clearRunningEventTimer();
+
+    if (event) {
+      send(event);
+    }
+  };
+
+  return {
+    dispose: () => {
+      pendingRunningEvent = undefined;
+      clearRunningEventTimer();
+    },
+    publishFinal: (event) => {
+      pendingRunningEvent = undefined;
+      clearRunningEventTimer();
+      send(event);
+    },
+    publishImmediate: (event) => {
+      send(event);
+    },
+    publishRunning: (event) => {
+      pendingRunningEvent = { ...pendingRunningEvent, ...event };
+      if (!runningEventTimer) {
+        runningEventTimer = setTimeout(flushRunningEvent, BASH_RUNNING_EVENT_INTERVAL_MS);
+      }
+    }
+  };
+}
+
+function normalizeBashExecutionEvent(event: EsseBashExecutionEvent): EsseBashExecutionEvent {
+  if (typeof event.output !== "string") {
+    return event;
+  }
+
+  return {
+    ...event,
+    output: compactBashOutputForUi(event.output)
+  };
+}
+
+function compactBashOutputForUi(output: string): string {
+  const normalized = output.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimEnd();
+  const lines = normalized.split("\n");
+  const lineCompacted =
+    lines.length > MAX_BASH_EVENT_OUTPUT_LINES
+      ? [`+${lines.length - MAX_BASH_EVENT_OUTPUT_LINES} 行已折叠`, ...lines.slice(-MAX_BASH_EVENT_OUTPUT_LINES)].join("\n")
+      : normalized;
+
+  if (lineCompacted.length <= MAX_BASH_EVENT_OUTPUT_CHARS) {
+    return lineCompacted;
+  }
+
+  return `+${lineCompacted.length - MAX_BASH_EVENT_OUTPUT_CHARS} 字符已折叠\n${lineCompacted.slice(-MAX_BASH_EVENT_OUTPUT_CHARS)}`;
 }
 
 function extractTextContent(value: unknown): string {

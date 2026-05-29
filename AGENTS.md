@@ -33,6 +33,15 @@ This is a real product codebase, not a throwaway demo. Prefer small, testable, p
 
 The renderer must not read API keys or directly access Node filesystem APIs. Route privileged work through preload IPC into the Electron main process.
 
+## Agent Design Principles
+
+Prefer giving the active agent provider timely, structured context and capable tools over hard-coded intent routing. Esse is the default provider, not the owner of BatchImager workbench semantics.
+
+- Do not block or rewrite user requests based on heuristic wording such as "attachment", "reference image", "previous image", or "add to the left". The program should provide known facts, available images, recent plans, workspace state, tool outputs, and safety boundaries, then let the active provider decide whether to act, ask a question, or use a tool.
+- Hard-coded restrictions are appropriate only for security, secrets, user asset protection, irreversible actions, and real API/product invariants.
+- When users want image generation, the active provider must use this project's image-generation API tools. For batch generation, the provider should create a batch preflight confirmation card first. If one request contains too many generation tasks, it may split them into confirmation batches of about 10 tasks, wait for the user to execute, modify, or cancel each card, then continue with the next batch.
+- If adding a guard, document which invariant it protects and add a regression test.
+
 ## Image Edit Input Rules
 
 The user cares about the output size or ratio, not destructive edits to the input. Preserve the input image content as much as possible.

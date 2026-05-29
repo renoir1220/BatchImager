@@ -1,0 +1,3633 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-05-28",
+  "title": "BatchImager Agent Tool Design",
+  "purpose": [
+    "List every tool that a BatchImager agent provider or the right-side image session agent can see.",
+    "Separate model-visible contracts from implementation details.",
+    "Provide a baseline for migrating tools toward a controlled Pi extension without splitting the provider-visible tool world.",
+    "Track first-batch controlled Pi extension migration decisions in the same source of truth used by the viewer.",
+    "Evaluate which tools should be removed or replaced by Pi basic tools before extension migration.",
+    "Define the right-side panel as an agent provider host, with Esse as the first provider and BatchImager as one workbench that exposes capabilities through stable APIs."
+  ],
+  "sourceFiles": [
+    "electron/services/agentRuntime.ts",
+    "electron/services/agentProviderRegistry.ts",
+    "electron/services/agentProviders.ts",
+    "electron/services/agentWorkspacePermissionPolicy.ts",
+    "electron/services/esseAgent.ts",
+    "electron/services/esseWorkspaceTools.ts",
+    "electron/services/batchImagerWorkbenchActions.ts",
+    "electron/services/batchImagerWorkbenchCapabilities.ts",
+    "electron/services/batchImagerWorkbenchCapabilityApi.ts",
+    "electron/services/batchImagerWorkbenchExtension.ts",
+    "electron/services/esseBashTool.ts",
+    "electron/services/imageSessionAgent.ts",
+    "electron/services/batchImagerAgentTools.ts",
+    "electron/main.ts",
+    "node_modules/@earendil-works/pi-coding-agent/dist/core/tools/*.js"
+  ],
+  "globalContracts": [
+    {
+      "name": "Single visible tool world",
+      "rule": "Every provider should see one coherent BatchImager workspace toolset. Implementation source must not leak into names, result shape, or recovery semantics."
+    },
+    {
+      "name": "Provider-independent workbench protocol",
+      "rule": "The right-side panel dispatches through an agent provider registry. Adding Codex, Claude Code, or another provider should add a provider runner/adapter against the same BatchImager workbench capabilities, not move product logic into that provider."
+    },
+    {
+      "name": "Model-visible result",
+      "rule": "Treat AgentToolResult.content text as model-visible. Treat details as program/UI/log structured data unless explicitly converted into content text."
+    },
+    {
+      "name": "Unified error wording",
+      "rule": "Workspace tools should return error content in the form Reason, optional Detail, optional Suggested next, and set isError=true."
+    },
+    {
+      "name": "No image API bypass",
+      "rule": "Image generation/editing must go through generate_image or run_batch_generation and then BatchImager's shared image executor."
+    },
+    {
+      "name": "No silent destructive action",
+      "rule": "Non-read tools must pass BatchImager permission or preflight policy, even when registered through Pi extension APIs."
+    },
+    {
+      "name": "No default size invention",
+      "rule": "Only pass size when the user explicitly requested size, ratio, orientation, 2K, 4K, square, horizontal, or vertical output."
+    },
+    {
+      "name": "Open provider id contract",
+      "rule": "AgentProviderId is a provider protocol string validated by syntax and registry availability, not a TypeScript union locked to Esse."
+    }
+  ],
+  "resultContract": {
+    "currentType": "AgentToolResult",
+    "shape": {
+      "content": "Array of text/image blocks. Text blocks are the primary model-visible result.",
+      "details": "Optional structured data for UI, logging, diagnostics, and possible future adapters.",
+      "isError": "Optional/currently used boolean error flag. Pi finalizes tool execution with an isError state.",
+      "terminate": "Pi-supported optional hint, not currently used by BatchImager tools."
+    },
+    "workspaceSuccessPattern": {
+      "contentText": "Chinese short summary or compact machine-readable text.",
+      "details": "Structured data such as sessions, records, metadata, affectedSessionIds, memories, candidates, or preflight execution result."
+    },
+    "workspaceErrorPattern": {
+      "contentText": "Reason: ...\\nDetail: ...\\nSuggested next: ...",
+      "isError": true
+    },
+    "testingImplication": "Tests should assert both content text and details for program behavior, but LLM behavior tests should not depend on details unless the adapter deliberately surfaces them."
+  },
+  "agentProviderVisibleContext": [
+    {
+      "section": "Persona",
+      "source": "buildFullEssePrompt / buildEsseWorkspaceTurnPrompt",
+      "visibleToModel": true,
+      "content": "Selected Esse persona instructions."
+    },
+    {
+      "section": "Memory",
+      "source": "renderEsseMemorySection",
+      "visibleToModel": true,
+      "content": "Remembered global user preferences when memory is configured."
+    },
+    {
+      "section": "Skills",
+      "source": "EsseSkillLoader.formatForPrompt",
+      "visibleToModel": true,
+      "content": "Skill names and descriptions only. Full SKILL.md must be read with read before use."
+    },
+    {
+      "section": "Workspace tool mode",
+      "source": "buildWorkspaceToolPromptSections",
+      "visibleToModel": true,
+      "content": "Manual tool policy text listing read tools, write tools, generation tools, and workflow rules."
+    },
+    {
+      "section": "Current turn references",
+      "source": "buildTurnReferenceImageLines",
+      "visibleToModel": true,
+      "content": "turn-ref-N IDs mapped to current user-uploaded/clicked images and file paths. Paths are for tool use only and should not be echoed."
+    },
+    {
+      "section": "Workspace snapshot",
+      "source": "buildWorkspaceSnapshotLines",
+      "visibleToModel": true,
+      "content": "selectedSessionId, img-N display labels, stable sessionId, referenceImageId, fileName, generatedRecordCount."
+    },
+    {
+      "section": "Conversation reference candidates",
+      "source": "buildConversationReferenceImageLines",
+      "visibleToModel": true,
+      "content": "conversation-ref-N IDs from prior message attachments. The active provider should use them only when the user explicitly asks to reuse them."
+    },
+    {
+      "section": "Recent plan context",
+      "source": "buildRecentPlanContextLines",
+      "visibleToModel": true,
+      "content": "Recent pending/submitted plan summaries used when the user modifies a previous confirmation plan."
+    },
+    {
+      "section": "Tool schemas",
+      "source": "Pi AgentSession tools",
+      "visibleToModel": true,
+      "content": "Tool names, descriptions, parameter schemas, and selected prompt snippets/guidelines."
+    },
+    {
+      "section": "Tool details",
+      "source": "AgentToolResult.details",
+      "visibleToModel": "not guaranteed",
+      "content": "Stored in Pi toolResult messages and emitted to app events, but OpenAI-compatible provider conversion primarily sends content text."
+    }
+  ],
+  "riskLevels": [
+    {
+      "risk": "read",
+      "meaning": "Does not mutate workspace or user assets.",
+      "permission": "No permission prompt by default."
+    },
+    {
+      "risk": "safe-write",
+      "meaning": "Mutates app state or creates expected project artifacts, but should be reversible or low-risk.",
+      "permission": "Allowed/asked by BatchImager agent permission policy depending on target and session allow-list."
+    },
+    {
+      "risk": "destructive",
+      "meaning": "Deletes, reorders, merges, undoes, or physically removes assets.",
+      "permission": "Ask or deny according to permission policy."
+    },
+    {
+      "risk": "external-write",
+      "meaning": "Registers or imports external/local assets into project state.",
+      "permission": "Ask or allow according to permission policy."
+    }
+  ],
+  "runtimeSurfaces": [
+    {
+      "id": "agent-provider-host",
+      "label": "Right-side agent provider host",
+      "currentRegistration": "agentProviderRegistry dispatches agent:send-message to registered provider runners. The current app registers Esse as the first provider, exposes agent preflight/permission/batch-task IPC, and keeps legacy esse:* IPC names as compatibility aliases.",
+      "targetRegistration": "Add future providers such as Codex or Claude Code as adapters that receive the same BatchImager workbench context and call the same capability/extension protocol.",
+      "notes": [
+        "main.ts no longer hard-codes providerId checks inside agent:send-message.",
+        "agent:list-providers returns descriptors from the registry used for actual dispatch.",
+        "Provider-specific implementation can differ, but BatchImager keeps ownership of workbench state, permission, preflight, image execution, and logs.",
+        "Renderer confirmation cards and background task cards render the active provider label instead of hard-coding Esse."
+      ]
+    },
+    {
+      "id": "pi-builtins",
+      "label": "Pi built-in tools",
+      "currentRegistration": "agentRuntime.ts tools allow-list plus optional wrapped bash",
+      "targetRegistration": "Controlled Pi extension or Pi built-ins with BatchImager policy hooks",
+      "notes": [
+        "BatchImager's DEFAULT_BUILT_IN_TOOLS exposes only read, grep, find, and ls.",
+        "write and edit are Pi built-ins but not currently exposed to BatchImager agents.",
+        "Esse bash uses Pi's createBashToolDefinition but is wrapped by BatchImager command policy, permission broker, env sanitizer, and event publishing."
+      ]
+    },
+    {
+      "id": "batchimager-workbench",
+      "label": "BatchImager workbench tools",
+      "currentRegistration": "Provider-visible BatchImager workbench tools are registered through the app-bundled controlled Pi extension. Read tools use shared BatchImager Capability APIs; session/record/undo mutations use shared BatchImager Workbench Action APIs; generic project-file tools have been removed from the provider-visible product toolset; confirmation, permission, bash, assistant-streaming, and batch-task UI flows use provider-neutral agent IPC with legacy esse:* aliases for compatibility.",
+      "targetRegistration": "Keep one app-bundled controlled Pi extension for product workspace tools; progressively move remaining memory, package, asset-import, and generation executor glue from provider-specific helpers into BatchImager capability/action/interactive-flow APIs.",
+      "notes": [
+        "These tools share turn budget and optional recordToolCall instrumentation.",
+        "Most non-read tools call requestWorkspaceToolPermission.",
+        "Preflight tools call requestPreflight and wait for user execute/modify/cancel."
+      ]
+    },
+    {
+      "id": "image-session",
+      "label": "Right-side image session tools",
+      "currentRegistration": "customTools passed to createAgentSession from runImageSessionAgent",
+      "targetRegistration": "May become a separate controlled Pi extension surface, but should keep single image executor.",
+      "notes": [
+        "Tool definitions are held by Pi across runtime reuse, so current code uses turnStateByKey to avoid stale closure state.",
+        "This agent sees selected image context, reference image index, and output size rules."
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "read",
+      "surface": "pi-builtins",
+      "agentVisibleTo": [
+        "agent-provider",
+        "right-image-session"
+      ],
+      "status": "enabled",
+      "label": "read",
+      "risk": "read",
+      "requiresPreflight": false,
+      "description": "Read the contents of a file. Supports text files and images. Text output is truncated; use offset/limit for large files.",
+      "modelVisible": {
+        "promptSnippet": "Read file contents",
+        "promptGuidelines": []
+      },
+      "input": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "description": "Path to the file to read, relative or absolute."
+        },
+        {
+          "name": "offset",
+          "type": "number",
+          "required": false,
+          "description": "1-indexed line number to start reading from."
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false,
+          "description": "Maximum number of lines to read."
+        }
+      ],
+      "output": {
+        "contentText": "File text, or image attachment with placeholder text depending on provider.",
+        "details": [
+          "truncation"
+        ]
+      },
+      "implementation": {
+        "current": "Pi built-in createReadToolDefinition; enabled by DEFAULT_BUILT_IN_TOOLS.",
+        "files": [
+          "electron/services/agentRuntime.ts",
+          "node_modules/@earendil-works/pi-coding-agent/dist/core/tools/read.js"
+        ]
+      },
+      "consistencyNotes": [
+        "Do not use read for BatchImager project database or hidden secrets."
+      ],
+      "migration": {
+        "status": "已完成",
+        "batch": "baseline",
+        "target": "Keep using Pi built-in read/search/list tool registration through the BatchImager allow-list.",
+        "rationale": "This is already Pi-native and stable. The main work is to keep BatchImager prompts and tests aligned with its model-visible behavior.",
+        "adapterWork": [],
+        "verification": [
+          "Assert tool name, schema, and result text remain unchanged.",
+          "Assert BatchImager policy boundaries still apply where relevant."
+        ]
+      },
+      "reduction": {
+        "status": "基础能力",
+        "originalPurpose": "读取文件内容，支持文本和图片。",
+        "replacement": "",
+        "rationale": "这是 Pi 的基础读能力，应该承担普通文件读取，而不是由 BatchImager 重复造 read_project_file。",
+        "removalPlan": "Do not remove from Pi. Keep the BatchImager exposure policy narrow and documented.",
+        "riskIfRemoved": "The active provider loses foundational file/search/command capability and may need product-specific duplicate tools again."
+      },
+      "capability": {
+        "owner": "Pi",
+        "layer": "pi-foundation",
+        "interfacePlan": "由 Pi 内置工具提供；BatchImager 只控制暴露范围与安全策略。",
+        "exposure": "通过 Pi built-in registration 直接对当前 agent provider 可见。",
+        "notes": [
+          "用于普通文件读取、搜索和目录查看。"
+        ]
+      },
+      "followUp": {
+        "action": "保留并治理",
+        "phase": "0-reduce-duplicates",
+        "nextStep": "继续暴露，并让 prompt 优先使用这些基础工具替代重复的 BatchImager 项目文件工具。",
+        "tests": [
+          "固定 Pi built-in 暴露 schema/result 的快照测试。"
+        ]
+      }
+    },
+    {
+      "name": "grep",
+      "surface": "pi-builtins",
+      "agentVisibleTo": [
+        "agent-provider",
+        "right-image-session"
+      ],
+      "status": "enabled",
+      "label": "grep",
+      "risk": "read",
+      "requiresPreflight": false,
+      "description": "Search file contents for a pattern. Returns paths and line numbers, respects .gitignore, and truncates output.",
+      "modelVisible": {
+        "promptSnippet": "Search file contents for patterns (respects .gitignore)",
+        "promptGuidelines": []
+      },
+      "input": [
+        {
+          "name": "pattern",
+          "type": "string",
+          "required": true,
+          "description": "Search pattern, regex or literal string."
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "required": false,
+          "description": "Directory or file to search."
+        },
+        {
+          "name": "glob",
+          "type": "string",
+          "required": false,
+          "description": "File glob filter."
+        },
+        {
+          "name": "ignoreCase",
+          "type": "boolean",
+          "required": false,
+          "description": "Case-insensitive search."
+        },
+        {
+          "name": "literal",
+          "type": "boolean",
+          "required": false,
+          "description": "Treat pattern as literal string."
+        },
+        {
+          "name": "context",
+          "type": "number",
+          "required": false,
+          "description": "Lines before/after each match."
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false,
+          "description": "Maximum matches."
+        }
+      ],
+      "output": {
+        "contentText": "Matching lines with paths and line numbers.",
+        "details": [
+          "truncation",
+          "matchLimitReached",
+          "linesTruncated"
+        ]
+      },
+      "implementation": {
+        "current": "Pi built-in createGrepToolDefinition; enabled by DEFAULT_BUILT_IN_TOOLS.",
+        "files": [
+          "electron/services/agentRuntime.ts",
+          "node_modules/@earendil-works/pi-coding-agent/dist/core/tools/grep.js"
+        ]
+      },
+      "consistencyNotes": [
+        "Prefer workspace tools over grep for BatchImager project state."
+      ],
+      "migration": {
+        "status": "已完成",
+        "batch": "baseline",
+        "target": "Keep using Pi built-in read/search/list tool registration through the BatchImager allow-list.",
+        "rationale": "This is already Pi-native and stable. The main work is to keep BatchImager prompts and tests aligned with its model-visible behavior.",
+        "adapterWork": [],
+        "verification": [
+          "Assert tool name, schema, and result text remain unchanged.",
+          "Assert BatchImager policy boundaries still apply where relevant."
+        ]
+      },
+      "reduction": {
+        "status": "基础能力",
+        "originalPurpose": "搜索文件内容并返回路径和行号。",
+        "replacement": "",
+        "rationale": "这是 Pi 的基础搜索能力，适合替代普通项目文件搜索类需求。",
+        "removalPlan": "Do not remove from Pi. Keep the BatchImager exposure policy narrow and documented.",
+        "riskIfRemoved": "The active provider loses foundational file/search/command capability and may need product-specific duplicate tools again."
+      },
+      "capability": {
+        "owner": "Pi",
+        "layer": "pi-foundation",
+        "interfacePlan": "由 Pi 内置工具提供；BatchImager 只控制暴露范围与安全策略。",
+        "exposure": "通过 Pi built-in registration 直接对当前 agent provider 可见。",
+        "notes": [
+          "用于普通文件读取、搜索和目录查看。"
+        ]
+      },
+      "followUp": {
+        "action": "保留并治理",
+        "phase": "0-reduce-duplicates",
+        "nextStep": "继续暴露，并让 prompt 优先使用这些基础工具替代重复的 BatchImager 项目文件工具。",
+        "tests": [
+          "固定 Pi built-in 暴露 schema/result 的快照测试。"
+        ]
+      }
+    },
+    {
+      "name": "find",
+      "surface": "pi-builtins",
+      "agentVisibleTo": [
+        "agent-provider",
+        "right-image-session"
+      ],
+      "status": "enabled",
+      "label": "find",
+      "risk": "read",
+      "requiresPreflight": false,
+      "description": "Search for files by glob pattern. Returns matching file paths relative to the search directory.",
+      "modelVisible": {
+        "promptSnippet": "Find files by glob pattern (respects .gitignore)",
+        "promptGuidelines": []
+      },
+      "input": [
+        {
+          "name": "pattern",
+          "type": "string",
+          "required": true,
+          "description": "Glob pattern such as '*.ts' or 'src/**/*.spec.ts'."
+        },
+        {
+          "name": "path",
+          "type": "string",
+          "required": false,
+          "description": "Directory to search."
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false,
+          "description": "Maximum results."
+        }
+      ],
+      "output": {
+        "contentText": "Matching file paths.",
+        "details": [
+          "truncation",
+          "resultLimitReached"
+        ]
+      },
+      "implementation": {
+        "current": "Pi built-in createFindToolDefinition; enabled by DEFAULT_BUILT_IN_TOOLS.",
+        "files": [
+          "electron/services/agentRuntime.ts",
+          "node_modules/@earendil-works/pi-coding-agent/dist/core/tools/find.js"
+        ]
+      },
+      "consistencyNotes": [
+        "Do not use find as a substitute for list_sessions or list_reference_images."
+      ],
+      "migration": {
+        "status": "已完成",
+        "batch": "baseline",
+        "target": "Keep using Pi built-in read/search/list tool registration through the BatchImager allow-list.",
+        "rationale": "This is already Pi-native and stable. The main work is to keep BatchImager prompts and tests aligned with its model-visible behavior.",
+        "adapterWork": [],
+        "verification": [
+          "Assert tool name, schema, and result text remain unchanged.",
+          "Assert BatchImager policy boundaries still apply where relevant."
+        ]
+      },
+      "reduction": {
+        "status": "基础能力",
+        "originalPurpose": "按 glob 查找文件路径。",
+        "replacement": "",
+        "rationale": "这是 Pi 的基础文件发现能力，适合替代普通项目文件枚举需求。",
+        "removalPlan": "Do not remove from Pi. Keep the BatchImager exposure policy narrow and documented.",
+        "riskIfRemoved": "The active provider loses foundational file/search/command capability and may need product-specific duplicate tools again."
+      },
+      "capability": {
+        "owner": "Pi",
+        "layer": "pi-foundation",
+        "interfacePlan": "由 Pi 内置工具提供；BatchImager 只控制暴露范围与安全策略。",
+        "exposure": "通过 Pi built-in registration 直接对当前 agent provider 可见。",
+        "notes": [
+          "用于普通文件读取、搜索和目录查看。"
+        ]
+      },
+      "followUp": {
+        "action": "保留并治理",
+        "phase": "0-reduce-duplicates",
+        "nextStep": "继续暴露，并让 prompt 优先使用这些基础工具替代重复的 BatchImager 项目文件工具。",
+        "tests": [
+          "固定 Pi built-in 暴露 schema/result 的快照测试。"
+        ]
+      }
+    },
+    {
+      "name": "ls",
+      "surface": "pi-builtins",
+      "agentVisibleTo": [
+        "agent-provider",
+        "right-image-session"
+      ],
+      "status": "enabled",
+      "label": "ls",
+      "risk": "read",
+      "requiresPreflight": false,
+      "description": "List directory contents. Includes dotfiles, sorted alphabetically, with '/' suffix for directories.",
+      "modelVisible": {
+        "promptSnippet": "List directory contents",
+        "promptGuidelines": []
+      },
+      "input": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": false,
+          "description": "Directory to list."
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "required": false,
+          "description": "Maximum entries."
+        }
+      ],
+      "output": {
+        "contentText": "Directory entries.",
+        "details": [
+          "truncation",
+          "entryLimitReached"
+        ]
+      },
+      "implementation": {
+        "current": "Pi built-in createLsToolDefinition; enabled by DEFAULT_BUILT_IN_TOOLS.",
+        "files": [
+          "electron/services/agentRuntime.ts",
+          "node_modules/@earendil-works/pi-coding-agent/dist/core/tools/ls.js"
+        ]
+      },
+      "consistencyNotes": [
+        "Do not expose hidden project implementation as product truth."
+      ],
+      "migration": {
+        "status": "已完成",
+        "batch": "baseline",
+        "target": "Keep using Pi built-in read/search/list tool registration through the BatchImager allow-list.",
+        "rationale": "This is already Pi-native and stable. The main work is to keep BatchImager prompts and tests aligned with its model-visible behavior.",
+        "adapterWork": [],
+        "verification": [
+          "Assert tool name, schema, and result text remain unchanged.",
+          "Assert BatchImager policy boundaries still apply where relevant."
+        ]
+      },
+      "reduction": {
+        "status": "基础能力",
+        "originalPurpose": "列出目录内容。",
+        "replacement": "",
+        "rationale": "这是 Pi 的基础目录浏览能力，适合替代普通项目目录查看需求。",
+        "removalPlan": "Do not remove from Pi. Keep the BatchImager exposure policy narrow and documented.",
+        "riskIfRemoved": "The active provider loses foundational file/search/command capability and may need product-specific duplicate tools again."
+      },
+      "capability": {
+        "owner": "Pi",
+        "layer": "pi-foundation",
+        "interfacePlan": "由 Pi 内置工具提供；BatchImager 只控制暴露范围与安全策略。",
+        "exposure": "通过 Pi built-in registration 直接对当前 agent provider 可见。",
+        "notes": [
+          "用于普通文件读取、搜索和目录查看。"
+        ]
+      },
+      "followUp": {
+        "action": "保留并治理",
+        "phase": "0-reduce-duplicates",
+        "nextStep": "继续暴露，并让 prompt 优先使用这些基础工具替代重复的 BatchImager 项目文件工具。",
+        "tests": [
+          "固定 Pi built-in 暴露 schema/result 的快照测试。"
+        ]
+      }
+    },
+    {
+      "name": "write",
+      "surface": "pi-builtins",
+      "agentVisibleTo": [],
+      "status": "disabled",
+      "label": "write",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Pi built-in file write tool. Creates or overwrites files.",
+      "modelVisible": {
+        "promptSnippet": "Create or overwrite files",
+        "promptGuidelines": [
+          "Use write only for new files or complete rewrites."
+        ]
+      },
+      "input": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "description": "Path to write."
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": true,
+          "description": "Content to write."
+        }
+      ],
+      "output": {
+        "contentText": "Success or error text.",
+        "details": []
+      },
+      "implementation": {
+        "current": "Not allowed by BatchImager tool allow-list.",
+        "files": [
+          "electron/services/agentRuntime.ts",
+          "node_modules/@earendil-works/pi-coding-agent/dist/core/tools/write.js"
+        ]
+      },
+      "consistencyNotes": [
+        "Do not expose until governed Pi write/edit has BatchImager path, permission, and secret-safety wrappers."
+      ],
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Pi built-in write is intentionally disabled because direct arbitrary file writes bypass BatchImager project-file policy.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "暂不启用",
+        "originalPurpose": "创建或覆盖文件。",
+        "replacement": "未来受控 Pi write 可处理普通项目文本产物。",
+        "rationale": "未来可作为普通文件写入基础能力，但现在直接启用会绕开 BatchImager 项目目录、密钥、sqlite、图片资产保护策略。",
+        "removalPlan": "Keep hidden until project-scoped path policy, permission prompts, denylist, and secret-safety tests are in place.",
+        "riskIfRemoved": "Low now because the tool is not exposed; future file-write replacement work would need another controlled path."
+      },
+      "capability": {
+        "owner": "Pi + 未来 BatchImager 策略",
+        "layer": "pi-foundation",
+        "interfacePlan": "未来作为受控 Pi 文件写入/编辑能力启用。",
+        "exposure": "当前不对 agent provider 暴露。",
+        "notes": [
+          "未来可替代 project-file 写入/追加工具。"
+        ]
+      },
+      "followUp": {
+        "action": "暂不启用",
+        "phase": "0-reduce-duplicates",
+        "nextStep": "先设计项目根限制、denylist、覆盖权限确认和密钥保护策略，再考虑启用。",
+        "tests": [
+          "禁止 .env、sqlite、受保护图片路径。",
+          "覆盖/删除式编辑需要权限确认。"
+        ]
+      }
+    },
+    {
+      "name": "edit",
+      "surface": "pi-builtins",
+      "agentVisibleTo": [],
+      "status": "disabled",
+      "label": "edit",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Pi built-in exact text replacement tool.",
+      "modelVisible": {
+        "promptSnippet": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+        "promptGuidelines": []
+      },
+      "input": [
+        {
+          "name": "path",
+          "type": "string",
+          "required": true,
+          "description": "File to edit."
+        },
+        {
+          "name": "edits",
+          "type": "array",
+          "required": true,
+          "description": "Array of oldText/newText exact replacements."
+        }
+      ],
+      "output": {
+        "contentText": "Success/error text.",
+        "details": [
+          "diff",
+          "firstChangedLine"
+        ]
+      },
+      "implementation": {
+        "current": "Not allowed by BatchImager tool allow-list.",
+        "files": [
+          "electron/services/agentRuntime.ts",
+          "node_modules/@earendil-works/pi-coding-agent/dist/core/tools/edit.js"
+        ]
+      },
+      "consistencyNotes": [
+        "Do not expose unless protected by BatchImager project file policy."
+      ],
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Pi built-in edit is intentionally disabled because exact text replacement would bypass BatchImager project-file policy and permission wording.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "暂不启用",
+        "originalPurpose": "对文件做精确文本替换。",
+        "replacement": "未来受控 Pi edit 可处理普通项目文本编辑场景。",
+        "rationale": "未来可作为项目文本编辑能力，但必须先加路径策略、权限确认、secret 防护和测试。",
+        "removalPlan": "Keep hidden until project-scoped path policy, permission prompts, denylist, and secret-safety tests are in place.",
+        "riskIfRemoved": "Low now because the tool is not exposed; future file-write replacement work would need another controlled path."
+      },
+      "capability": {
+        "owner": "Pi + 未来 BatchImager 策略",
+        "layer": "pi-foundation",
+        "interfacePlan": "未来作为受控 Pi 文件写入/编辑能力启用。",
+        "exposure": "当前不对 agent provider 暴露。",
+        "notes": [
+          "未来可替代 project-file 写入/追加工具。"
+        ]
+      },
+      "followUp": {
+        "action": "暂不启用",
+        "phase": "0-reduce-duplicates",
+        "nextStep": "先设计项目根限制、denylist、覆盖权限确认和密钥保护策略，再考虑启用。",
+        "tests": [
+          "禁止 .env、sqlite、受保护图片路径。",
+          "覆盖/删除式编辑需要权限确认。"
+        ]
+      }
+    },
+    {
+      "name": "bash",
+      "surface": "pi-builtins",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "wrapped",
+      "label": "bash",
+      "risk": "destructive",
+      "requiresPreflight": false,
+      "description": "Execute a bash command in the current working directory. BatchImager wraps Pi's bash tool with command policy, permission broker, skill inference, env sanitization, abort linking, and UI events.",
+      "modelVisible": {
+        "promptSnippet": "Execute bash commands (ls, grep, find, etc.)",
+        "promptGuidelines": []
+      },
+      "input": [
+        {
+          "name": "command",
+          "type": "string",
+          "required": true,
+          "description": "Bash command to execute."
+        },
+        {
+          "name": "timeout",
+          "type": "number",
+          "required": false,
+          "description": "Timeout in seconds."
+        }
+      ],
+      "output": {
+        "contentText": "stdout/stderr summary, truncated by Pi if large.",
+        "details": [
+          "truncation",
+          "fullOutputPath"
+        ]
+      },
+      "implementation": {
+        "current": "createEsseBashTool calls Pi createBashToolDefinition and wraps operations.",
+        "files": [
+          "electron/services/esseBashTool.ts",
+          "electron/main.ts",
+          "node_modules/@earendil-works/pi-coding-agent/dist/core/tools/bash.js"
+        ]
+      },
+      "consistencyNotes": [
+        "Used mainly for skills and local project commands.",
+        "Must not replace generate_image or run_batch_generation for image generation.",
+        "Sanitized env allows only HOME, PATH, USER, LANG, LC_ALL, TMPDIR, SHELL, DISPLAY plus BatchImager skill vars."
+      ],
+      "migration": {
+        "status": "已完成",
+        "batch": "baseline",
+        "target": "Keep Pi bash wrapped by BatchImager command policy, permission broker, env sanitizer, and event publishing.",
+        "rationale": "The tool already uses Pi tool machinery, but BatchImager must retain its product safety wrapper. This is not a first-batch extension migration candidate.",
+        "adapterWork": [],
+        "verification": [
+          "Assert tool name, schema, and result text remain unchanged.",
+          "Assert BatchImager policy boundaries still apply where relevant."
+        ]
+      },
+      "reduction": {
+        "status": "基础能力",
+        "originalPurpose": "执行本地 shell 命令。",
+        "replacement": "",
+        "rationale": "这是通用命令能力，应替代产品工具表里的重复命令入口；BatchImager 应保留 wrapper 和权限策略。",
+        "removalPlan": "Do not remove from Pi. Keep the BatchImager exposure policy narrow and documented.",
+        "riskIfRemoved": "The active provider loses foundational file/search/command capability and may need product-specific duplicate tools again."
+      },
+      "capability": {
+        "owner": "Pi + BatchImager 策略",
+        "layer": "pi-foundation",
+        "interfacePlan": "Pi bash 负责命令协议，BatchImager wrapper 负责命令策略、权限、环境变量清洗和事件发布。",
+        "exposure": "作为受控 shell 能力对当前 agent provider 可见。",
+        "notes": [
+          "长期用于替代产品工具表里的重复命令入口。"
+        ]
+      },
+      "followUp": {
+        "action": "保留并统一命令入口",
+        "phase": "0-reduce-duplicates",
+        "nextStep": "把 wrapped bash 统一为当前 provider/工作台上下文里的唯一命令执行入口。",
+        "tests": [
+          "命令策略回归测试。",
+          "密钥环境变量清洗测试。"
+        ]
+      }
+    },
+    {
+      "name": "get_project_overview",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "项目概览",
+      "risk": "read",
+      "requiresPreflight": false,
+      "description": "Get project metadata for the current BatchImager project. Use when the user asks about the project name, image count, selected session, or workspace summary.",
+      "input": [],
+      "output": {
+        "contentText": "已读取项目概览。",
+        "details": [
+          "imageCount",
+          "projectDirectory",
+          "projectId",
+          "projectName",
+          "selectedSessionId"
+        ]
+      },
+      "implementation": {
+        "current": "Reads runtime.getState().",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/batchImagerWorkbenchCapabilityApi.ts",
+          "electron/services/batchImagerWorkbenchExtension.ts"
+        ]
+      },
+      "migrationClass": "read-tool-first",
+      "migration": {
+        "status": "已完成",
+        "batch": "first-controlled-extension",
+        "target": "Register through one BatchImager-controlled Pi extension while delegating execution to the existing workspace runtime.",
+        "rationale": "Read-only, no preflight, no permission prompt, and low product-risk. Good first batch for proving model-visible consistency.",
+        "adapterWork": [
+          "Move the tool definition into a controlled extension factory without changing the public name or JSON schema.",
+          "Keep executor calls routed to the existing workspace runtime so behavior and logging stay unchanged.",
+          "Preserve AgentToolResult.content text exactly unless a test intentionally updates the contract."
+        ],
+        "verification": [
+          "Golden-test the tool schema exposed to Pi before and after migration.",
+          "Golden-test model-visible content text and key details fields.",
+          "Run existing workspace runtime tests plus one extension registration smoke test."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "读取当前 BatchImager 项目概览、图片数量、选中 session 等。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "项目概览来自 app 状态，不等同于目录列表；保留可避免 agent provider 直接猜项目内部结构。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "已完成第一批迁移",
+        "phase": "2-first-controlled-extension",
+        "nextStep": "已在 1.3 中抽出 BatchImager Capability API，并通过 app 内置 controlled Pi extension factory 注册；后续测试继续锁定 schema、content text 和安全字段白名单。",
+        "tests": [
+          "batchImagerWorkbenchCapabilities.test.ts 固定第一批 capability 清单。",
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "list_sessions",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "列出工作区",
+      "risk": "read",
+      "requiresPreflight": false,
+      "description": "List all image sessions in the current BatchImager project. Use before workspace writes. Returns stable id, displayLabel, and referenceImageId.",
+      "input": [],
+      "output": {
+        "contentText": "A compact list of img-N, id, referenceImageId, fileName, currentImageSource, generatedRecordCount, selected flag.",
+        "details": [
+          "sessions"
+        ]
+      },
+      "implementation": {
+        "current": "Reads runtime.getState().sessions and selectedSessionId.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/batchImagerWorkbenchCapabilityApi.ts",
+          "electron/services/batchImagerWorkbenchExtension.ts"
+        ]
+      },
+      "migrationClass": "read-tool-first",
+      "migration": {
+        "status": "已完成",
+        "batch": "first-controlled-extension",
+        "target": "Register through one BatchImager-controlled Pi extension while delegating execution to the existing workspace runtime.",
+        "rationale": "Read-only, no preflight, no permission prompt, and low product-risk. Good first batch for proving model-visible consistency.",
+        "adapterWork": [
+          "Move the tool definition into a controlled extension factory without changing the public name or JSON schema.",
+          "Keep executor calls routed to the existing workspace runtime so behavior and logging stay unchanged.",
+          "Preserve AgentToolResult.content text exactly unless a test intentionally updates the contract."
+        ],
+        "verification": [
+          "Golden-test the tool schema exposed to Pi before and after migration.",
+          "Golden-test model-visible content text and key details fields.",
+          "Run existing workspace runtime tests plus one extension registration smoke test."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "列出工作区图片 session、displayLabel、referenceImageId、状态等。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "session 是产品对象，不是文件；agent provider 需要稳定 sessionId 和 img-N 映射。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "已完成第一批迁移",
+        "phase": "2-first-controlled-extension",
+        "nextStep": "已在 1.3 中抽出 BatchImager Capability API，并通过 app 内置 controlled Pi extension factory 注册；后续测试继续锁定 schema、content text 和安全字段白名单。",
+        "tests": [
+          "batchImagerWorkbenchCapabilities.test.ts 固定第一批 capability 清单。",
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "get_session_records",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "查看图片记录",
+      "risk": "read",
+      "requiresPreflight": false,
+      "description": "Get generated records for one session. Use before restore_session_record or delete_session_record. recordIndex is 1-based.",
+      "input": [
+        {
+          "name": "sessionId",
+          "type": "string",
+          "required": true,
+          "description": "Stable session id from list_sessions."
+        }
+      ],
+      "output": {
+        "contentText": "Record list with recordIndex, fileName, isCurrent, optional isPrimary.",
+        "details": [
+          "sessionId",
+          "records"
+        ]
+      },
+      "implementation": {
+        "current": "Reads one session generatedFilePaths.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/batchImagerWorkbenchCapabilityApi.ts",
+          "electron/services/batchImagerWorkbenchExtension.ts"
+        ]
+      },
+      "migrationClass": "read-tool-first",
+      "migration": {
+        "status": "已完成",
+        "batch": "first-controlled-extension",
+        "target": "Register through one BatchImager-controlled Pi extension while delegating execution to the existing workspace runtime.",
+        "rationale": "Read-only, no preflight, no permission prompt, and low product-risk. Good first batch for proving model-visible consistency.",
+        "adapterWork": [
+          "Move the tool definition into a controlled extension factory without changing the public name or JSON schema.",
+          "Keep executor calls routed to the existing workspace runtime so behavior and logging stay unchanged.",
+          "Preserve AgentToolResult.content text exactly unless a test intentionally updates the contract."
+        ],
+        "verification": [
+          "Golden-test the tool schema exposed to Pi before and after migration.",
+          "Golden-test model-visible content text and key details fields.",
+          "Run existing workspace runtime tests plus one extension registration smoke test."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "读取某个 session 的生成记录和 recordIndex。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "生成记录是产品历史，不能让 agent provider 直接读 sqlite 或从文件名推断。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "已完成第一批迁移",
+        "phase": "2-first-controlled-extension",
+        "nextStep": "已在 1.3 中抽出 BatchImager Capability API，并通过 app 内置 controlled Pi extension factory 注册；后续测试继续锁定 schema、content text 和安全字段白名单。",
+        "tests": [
+          "batchImagerWorkbenchCapabilities.test.ts 固定第一批 capability 清单。",
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "read_image_metadata",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "读取图片信息",
+      "risk": "read",
+      "requiresPreflight": false,
+      "description": "Read width, height, format, and byte size for a workspace image without exposing file paths.",
+      "input": [
+        {
+          "name": "sessionId",
+          "type": "string",
+          "required": true,
+          "description": "Stable session id from list_sessions."
+        },
+        {
+          "name": "recordIndex",
+          "type": "string",
+          "required": false,
+          "description": "Optional 1-based generated record index."
+        }
+      ],
+      "output": {
+        "contentText": "sessionId, sourceType, optional recordIndex, fileName, width, height, format, byteSize.",
+        "details": [
+          "metadata"
+        ]
+      },
+      "implementation": {
+        "current": "Delegates to runtime.readImageMetadata.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/projectImageMetadata.ts",
+          "electron/services/batchImagerWorkbenchCapabilityApi.ts",
+          "electron/services/batchImagerWorkbenchExtension.ts"
+        ]
+      },
+      "migrationClass": "read-tool-first",
+      "migration": {
+        "status": "已完成",
+        "batch": "first-controlled-extension",
+        "target": "Register through one BatchImager-controlled Pi extension while delegating execution to the existing workspace runtime.",
+        "rationale": "Read-only, no preflight, no permission prompt, and low product-risk. Good first batch for proving model-visible consistency.",
+        "adapterWork": [
+          "Move the tool definition into a controlled extension factory without changing the public name or JSON schema.",
+          "Keep executor calls routed to the existing workspace runtime so behavior and logging stay unchanged.",
+          "Preserve AgentToolResult.content text exactly unless a test intentionally updates the contract."
+        ],
+        "verification": [
+          "Golden-test the tool schema exposed to Pi before and after migration.",
+          "Golden-test model-visible content text and key details fields.",
+          "Run existing workspace runtime tests plus one extension registration smoke test."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "按 session/record 读取图片宽高、格式、字节数，不暴露路径。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "虽然 bash 也能读图片元数据，但这个工具按产品对象定位，并减少路径泄露和错误文件读取。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "已完成第一批迁移",
+        "phase": "2-first-controlled-extension",
+        "nextStep": "已在 1.3 中抽出 BatchImager Capability API，并通过 app 内置 controlled Pi extension factory 注册；后续测试继续锁定 schema、content text 和安全字段白名单。",
+        "tests": [
+          "batchImagerWorkbenchCapabilities.test.ts 固定第一批 capability 清单。",
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "restore_session_record",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "回退记录",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Restore a session to a previous generated record. Call list_sessions and get_session_records first. recordIndex is 1-based.",
+      "input": [
+        {
+          "name": "sessionId",
+          "type": "string",
+          "required": true,
+          "description": "Stable session id."
+        },
+        {
+          "name": "recordIndex",
+          "type": "string",
+          "required": true,
+          "description": "1-based generated record index."
+        }
+      ],
+      "output": {
+        "contentText": "已切换到记录 N。",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Reversible mutation via runtime.applyMutation and undo log.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Restores mutate selected image state and chat context; extension migration needs explicit UI-state and undo/recovery tests.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "把 session 恢复到某个历史生成记录。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "这是产品状态 mutation，涉及 session 当前图、上下文和 undo，不可用文件读写替代。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，第二批评估",
+        "phase": "3-mutation-capabilities",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "restore_original",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "恢复原图",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Restore a session to its original imported image. Call list_sessions first. Does not delete generated records.",
+      "input": [
+        {
+          "name": "sessionId",
+          "type": "string",
+          "required": true,
+          "description": "Stable session id from list_sessions."
+        }
+      ],
+      "output": {
+        "contentText": "已恢复为原图 or 已切回第一张生成图。",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Reversible mutation via runtime.applyMutation and undo log.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Restores mutate selected image state; keep current executor until workspace mutation events are covered through the extension adapter.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "把 session 恢复到原始导入图。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "这是产品状态 mutation，不能只靠文件操作表达。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，第二批评估",
+        "phase": "3-mutation-capabilities",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "rename_session",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "重命名图片",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Rename one image session's display fileName. Does not rename files on disk.",
+      "input": [
+        {
+          "name": "sessionId",
+          "type": "string",
+          "required": true,
+          "description": "Stable session id from list_sessions."
+        },
+        {
+          "name": "fileName",
+          "type": "string",
+          "required": true,
+          "description": "New non-empty display fileName."
+        }
+      ],
+      "output": {
+        "contentText": "已重命名为 fileName。",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Reversible mutation via runtime.applyMutation and undo log.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Safe but user-visible mutation. It is a good second-batch candidate after read-only tools prove the controlled extension adapter.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "修改 session 的显示文件名。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "这是 workspace 状态字段，不一定对应磁盘改名；应保留产品工具。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，第二批评估",
+        "phase": "3-mutation-capabilities",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "reorder_sessions",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "调整顺序",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Reorder all image sessions. sessionIds must be a complete permutation of stable ids from list_sessions.",
+      "input": [
+        {
+          "name": "sessionIds",
+          "type": "array",
+          "required": true,
+          "description": "Complete ordered list of stable session ids."
+        }
+      ],
+      "output": {
+        "contentText": "已调整图片顺序。",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Reversible mutation, validates full permutation.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Requires complete workspace ordering validation and user-visible mutation semantics; not a first-batch read-only candidate.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "调整工作区 session 顺序。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "顺序是 UI/workspace 状态，不是文件系统顺序。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，第二批评估",
+        "phase": "3-mutation-capabilities",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "set_session_prompt",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "设置提示词",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Set one image session's default prompt for future generation. Does not call the image API.",
+      "input": [
+        {
+          "name": "sessionId",
+          "type": "string",
+          "required": true,
+          "description": "Stable session id from list_sessions."
+        },
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": true,
+          "description": "Non-empty default prompt."
+        }
+      ],
+      "output": {
+        "contentText": "已更新这张图的默认提示词。",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Reversible mutation updates lastPrompt.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Mutates per-session defaults that affect later generation. It should wait for mutation audit tests.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "设置某个 session 的默认提示词。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "这是后续生成行为的产品配置，不是普通文件写入。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，第二批评估",
+        "phase": "3-mutation-capabilities",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "add_blank_session",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "添加空白图位",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Add one blank placeholder image session to the workspace without calling the image API.",
+      "input": [
+        {
+          "name": "fileName",
+          "type": "string",
+          "required": false,
+          "description": "Optional display fileName."
+        }
+      ],
+      "output": {
+        "contentText": "Runtime summary.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Permission check then runtime.createBlankSession.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/esseWorkspaceRuntime.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Creates workspace state and generated seed assets. Needs UI-state and undo/recovery coverage before extension migration.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "创建空白占位 session。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "这会创建 workspace session 和种子图状态，不是普通文件创建。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，第二批评估",
+        "phase": "3-mutation-capabilities",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "add_workspace_image",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "添加图片到工作区",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Add one or more existing local image files as new image sessions in the left workspace.",
+      "input": [
+        {
+          "name": "images",
+          "type": "array",
+          "required": false,
+          "description": "Preferred multi-image array of { filePath, fileName }."
+        },
+        {
+          "name": "filePath",
+          "type": "string",
+          "required": false,
+          "description": "Legacy single-image local file path."
+        },
+        {
+          "name": "fileName",
+          "type": "string",
+          "required": false,
+          "description": "Legacy single-image display fileName."
+        }
+      ],
+      "output": {
+        "contentText": "Runtime summary.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Validates supported image extension, permission check, runtime.addWorkspaceImage.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/esseWorkspaceRuntime.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Imports external local images into workspace state. Needs asset-protection and permission semantics before migration.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "把已有本地图片导入为工作区 session。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "导入需要复制/登记为产品 session 并刷新 UI；不是让 agent provider 复制文件即可。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，第二批评估",
+        "phase": "3-mutation-capabilities",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "list_reference_images",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "列出参考图",
+      "risk": "read",
+      "requiresPreflight": false,
+      "description": "List project reference images, conversation attachment candidates, and current-turn attachment images.",
+      "input": [],
+      "output": {
+        "contentText": "Numbered reference image list with id, label, fileName.",
+        "details": [
+          "referenceImages"
+        ]
+      },
+      "implementation": {
+        "current": "Merges project references, conversation-ref-N, and turn-ref-N.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/batchImagerWorkbenchCapabilityApi.ts",
+          "electron/services/batchImagerWorkbenchExtension.ts"
+        ]
+      },
+      "migrationClass": "read-tool-first",
+      "migration": {
+        "status": "已完成",
+        "batch": "first-controlled-extension",
+        "target": "Register through one BatchImager-controlled Pi extension while delegating execution to the existing workspace runtime.",
+        "rationale": "Read-only, no preflight, no permission prompt, and low product-risk. Good first batch for proving model-visible consistency.",
+        "adapterWork": [
+          "Move the tool definition into a controlled extension factory without changing the public name or JSON schema.",
+          "Keep executor calls routed to the existing workspace runtime so behavior and logging stay unchanged.",
+          "Preserve AgentToolResult.content text exactly unless a test intentionally updates the contract."
+        ],
+        "verification": [
+          "Golden-test the tool schema exposed to Pi before and after migration.",
+          "Golden-test model-visible content text and key details fields.",
+          "Run existing workspace runtime tests plus one extension registration smoke test."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "列出项目参考图、本轮附件和历史候选引用。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "它聚合项目状态、turn 附件和 conversation 候选，Pi 文件工具无法知道这些临时引用。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "已完成第一批迁移",
+        "phase": "2-first-controlled-extension",
+        "nextStep": "已在 1.3 中抽出 BatchImager Capability API，并通过 app 内置 controlled Pi extension factory 注册；后续测试继续锁定 schema、content text 和安全字段白名单。",
+        "tests": [
+          "batchImagerWorkbenchCapabilities.test.ts 固定第一批 capability 清单。",
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "add_reference_image",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "添加参考图",
+      "risk": "external-write",
+      "requiresPreflight": false,
+      "description": "Add a reference image to the current project from an available local image path.",
+      "input": [
+        {
+          "name": "filePath",
+          "type": "string",
+          "required": true,
+          "description": "Available local image path."
+        },
+        {
+          "name": "fileName",
+          "type": "string",
+          "required": false,
+          "description": "Optional display file name."
+        }
+      ],
+      "output": {
+        "contentText": "Runtime summary.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Validates supported extension, permission check, runtime.addReferenceImage.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/esseWorkspaceRuntime.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Registers external/local assets as reusable project references. Needs asset-protection and provenance tests before migration.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "把可用本地图片登记为项目参考图。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "登记参考图是产品状态和资产保护动作，不是简单文件复制。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，第二批评估",
+        "phase": "3-mutation-capabilities",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "remove_reference_image",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "删除参考图",
+      "risk": "destructive",
+      "requiresPreflight": false,
+      "description": "Remove one reference image from the current project by id. Does not delete the original source file shared by the user.",
+      "input": [
+        {
+          "name": "referenceImageId",
+          "type": "string",
+          "required": true,
+          "description": "Stable reference image id from list_reference_images."
+        }
+      ],
+      "output": {
+        "contentText": "Runtime summary.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Permission check then runtime.removeReferenceImage.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/esseWorkspaceRuntime.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Removes project reference state. Destructive/reference semantics should wait until adapter policy is proven.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "移除项目参考图登记。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "删除的是产品引用关系，不应让 agent provider 直接改内部状态。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "list_remembered_preferences",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "列出已记忆条目",
+      "risk": "read",
+      "requiresPreflight": false,
+      "description": "List all currently remembered user preferences with their ids and categories.",
+      "input": [],
+      "output": {
+        "contentText": "Numbered memory list, or no remembered entries message.",
+        "details": [
+          "memories"
+        ]
+      },
+      "implementation": {
+        "current": "runtime.memoryStore.list.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/esseMemoryStore.ts",
+          "electron/services/batchImagerWorkbenchCapabilityApi.ts",
+          "electron/services/batchImagerWorkbenchExtension.ts"
+        ]
+      },
+      "migrationClass": "read-tool-first",
+      "migration": {
+        "status": "已完成",
+        "batch": "first-controlled-extension",
+        "target": "Register through one BatchImager-controlled Pi extension while delegating execution to the existing workspace runtime.",
+        "rationale": "Read-only, no preflight, no permission prompt, and low product-risk. Good first batch for proving model-visible consistency.",
+        "adapterWork": [
+          "Move the tool definition into a controlled extension factory without changing the public name or JSON schema.",
+          "Keep executor calls routed to the existing workspace runtime so behavior and logging stay unchanged.",
+          "Preserve AgentToolResult.content text exactly unless a test intentionally updates the contract."
+        ],
+        "verification": [
+          "Golden-test the tool schema exposed to Pi before and after migration.",
+          "Golden-test model-visible content text and key details fields.",
+          "Run existing workspace runtime tests plus one extension registration smoke test."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "列出 agent provider 已记忆的用户偏好。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "记忆是 app 管理的跨项目状态，不应通过文件搜索暴露内部存储。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "已完成第一批迁移",
+        "phase": "2-first-controlled-extension",
+        "nextStep": "已在 1.3 中抽出 BatchImager Capability API，并通过 app 内置 controlled Pi extension factory 注册；后续测试继续锁定 schema、content text 和安全字段白名单。",
+        "tests": [
+          "batchImagerWorkbenchCapabilities.test.ts 固定第一批 capability 清单。",
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "remember_user_preference",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "记住用户偏好",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Save a user preference, default, or constraint to be remembered across future agent-provider sessions in any project.",
+      "input": [
+        {
+          "name": "content",
+          "type": "string",
+          "required": true,
+          "description": "Concise Chinese preference text under 200 characters."
+        },
+        {
+          "name": "category",
+          "type": "string",
+          "required": false,
+          "description": "用户偏好, 默认约束, or 工作流惯例."
+        }
+      ],
+      "output": {
+        "contentText": "Saved memory summary or similar-memory error.",
+        "details": [
+          "memory"
+        ]
+      },
+      "implementation": {
+        "current": "Permission check then runtime.memoryStore.add with similarity conflict detection.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/esseMemoryStore.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Writes cross-session agent memory. Migrate only after memory-store visibility and audit wording are tested through the extension adapter.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "保存跨项目用户偏好。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "这是 agent memory 语义，需要类别、来源、审计和未来可见性控制。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，第二批评估",
+        "phase": "3-mutation-capabilities",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "forget_user_preference",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "删除记忆条目",
+      "risk": "destructive",
+      "requiresPreflight": false,
+      "description": "Delete one remembered preference by id.",
+      "input": [
+        {
+          "name": "memoryId",
+          "type": "string",
+          "required": true,
+          "description": "Id from list_remembered_preferences."
+        }
+      ],
+      "output": {
+        "contentText": "Deleted memory summary.",
+        "details": [
+          "memory"
+        ]
+      },
+      "implementation": {
+        "current": "Permission check then runtime.memoryStore.remove.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/esseMemoryStore.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Deletes cross-session agent memory. Keep current destructive permission path for now.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "删除一条 agent provider 记忆。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "这是 memory store mutation，不是普通文件删除。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "undo_last_actions",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "撤销最近操作",
+      "risk": "destructive",
+      "requiresPreflight": false,
+      "description": "Undo the most recent N reversible workspace actions in this project.",
+      "input": [
+        {
+          "name": "count",
+          "type": "string",
+          "required": false,
+          "description": "Optional 1..10, default 1."
+        }
+      ],
+      "output": {
+        "contentText": "Undo summary, possibly with a warning about intermediate workspace writes.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Permission check, applies undo descriptors, marks undo entries, no revision count.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Undo crosses multiple prior mutations and is tightly coupled to current workspace action history. Not a first-batch candidate.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "撤销最近可逆 workspace 操作。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "依赖 app 的 undo history 和 mutation log，不能由 Pi 基础工具可靠完成。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "scan_unreferenced_files",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "扫描未引用文件",
+      "risk": "read",
+      "requiresPreflight": false,
+      "description": "Scan the project generated-image directory for files not referenced by any session, chat message, or project report.",
+      "input": [],
+      "output": {
+        "contentText": "Candidate summary with candidateId, fileName, byteSize. Never returns file paths in text.",
+        "details": [
+          "candidates"
+        ]
+      },
+      "implementation": {
+        "current": "runtime.scanUnreferencedFiles.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/projectUnreferencedFiles.ts",
+          "electron/services/batchImagerWorkbenchCapabilityApi.ts",
+          "electron/services/batchImagerWorkbenchExtension.ts"
+        ]
+      },
+      "migrationClass": "read-tool-first",
+      "migration": {
+        "status": "已完成",
+        "batch": "first-controlled-extension",
+        "target": "Register through one BatchImager-controlled Pi extension while delegating execution to the existing workspace runtime.",
+        "rationale": "Read-only, no preflight, no permission prompt, and low product-risk. Good first batch for proving model-visible consistency.",
+        "adapterWork": [
+          "Move the tool definition into a controlled extension factory without changing the public name or JSON schema.",
+          "Keep executor calls routed to the existing workspace runtime so behavior and logging stay unchanged.",
+          "Preserve AgentToolResult.content text exactly unless a test intentionally updates the contract."
+        ],
+        "verification": [
+          "Golden-test the tool schema exposed to Pi before and after migration.",
+          "Golden-test model-visible content text and key details fields.",
+          "Run existing workspace runtime tests plus one extension registration smoke test."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "扫描生成目录中未被 session/chat/report 引用的文件。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "它需要交叉比对产品状态与磁盘文件；单纯 find 无法判断是否真的未引用。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "已完成第一批迁移",
+        "phase": "2-first-controlled-extension",
+        "nextStep": "已在 1.3 中抽出 BatchImager Capability API，并通过 app 内置 controlled Pi extension factory 注册；后续测试继续锁定 schema、content text 和安全字段白名单。",
+        "tests": [
+          "batchImagerWorkbenchCapabilities.test.ts 固定第一批 capability 清单。",
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "delete_unreferenced_files",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "删除未引用文件",
+      "risk": "destructive",
+      "requiresPreflight": false,
+      "description": "Physically delete generated files identified by candidateId from scan_unreferenced_files. Never accepts file paths.",
+      "input": [
+        {
+          "name": "candidateIds",
+          "type": "array",
+          "required": true,
+          "description": "candidateId values from scan_unreferenced_files."
+        }
+      ],
+      "output": {
+        "contentText": "已删除 N 个未引用生成文件。",
+        "details": [
+          "results"
+        ]
+      },
+      "implementation": {
+        "current": "Permission check then runtime.deleteUnreferencedFiles, which re-scans before deleting.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/projectUnreferencedFiles.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Physically deletes generated files. Keep outside first batch until destructive file permission and recovery semantics are explicitly modeled.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "按 candidateId 物理删除扫描出的未引用文件。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "只接受 scan 产生的 candidateId 是重要安全设计；不应替换为任意 rm 命令。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "generate_image",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "生成图片预览",
+      "risk": "safe-write",
+      "requiresPreflight": true,
+      "description": "Generate or edit a single image through the BatchImager project image API. Always creates a preflight confirmation card before execution.",
+      "input": [
+        {
+          "name": "target",
+          "type": "object",
+          "required": true,
+          "description": "Output target. Use type='new'. Use sourceSessionId when based on an existing workspace image."
+        },
+        {
+          "name": "mode",
+          "type": "string",
+          "required": true,
+          "description": "edit or generate. No default."
+        },
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": true,
+          "description": "Image generation prompt."
+        },
+        {
+          "name": "referenceImageIds",
+          "type": "array",
+          "required": false,
+          "description": "Project, workspace, conversation, or turn reference ids in exact API upload order."
+        },
+        {
+          "name": "referenceImageNames",
+          "type": "array",
+          "required": false,
+          "description": "Local names matching referenceImageIds order and length."
+        },
+        {
+          "name": "size",
+          "type": "string",
+          "required": false,
+          "description": "Optional explicit output size. Omit unless clearly requested."
+        }
+      ],
+      "output": {
+        "contentText": "Preflight cancel/modify/execution result summary. If executed, result means jobs were submitted, not necessarily completed.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "normalizeImagePreflightCommand, permission, requestPreflight, executeImagePreflightTool, shared image executor.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/esseImagePreflightExecutor.ts",
+          "electron/services/sharedGenerateImageCore.ts",
+          "electron/services/imageGenerationService.ts"
+        ]
+      },
+      "migrationClass": "extension-entry-host-preflight",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Image generation uses preflight/background execution, remote API recovery, size rules, and shared image executor. It should migrate only after controlled extension support for preflight cards is designed.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "创建单图生成/编辑 preflight 卡，并走共享图片生成执行器。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "必须保留尺寸规则、preflight、后台任务、恢复、日志和 API 安全边界。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-interactive-flow",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "run_batch_generation",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "批量生成预览",
+      "risk": "safe-write",
+      "requiresPreflight": true,
+      "description": "Run multiple image generation/edit commands through the BatchImager project image API. Always creates one preflight card before execution.",
+      "input": [
+        {
+          "name": "commands",
+          "type": "array",
+          "required": true,
+          "description": "Array of generate_image command objects. Each requires target, mode, prompt."
+        },
+        {
+          "name": "globalInstruction",
+          "type": "string",
+          "required": false,
+          "description": "Optional shared instruction summary."
+        }
+      ],
+      "output": {
+        "contentText": "Preflight cancel/modify/execution result summary. If executed, result means jobs were submitted.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Normalizes every command, permission, requestPreflight, executeImagePreflightTool.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/esseImagePreflightExecutor.ts"
+        ]
+      },
+      "migrationClass": "extension-entry-host-preflight",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Batch generation is intentionally preflight-driven and UI-interactive. It needs a dedicated extension-to-BatchImager preflight bridge before migration.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "创建批量生成 preflight 卡并批量执行。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "批量确认、任务拆分、后台执行和 UI 状态都是产品工作流。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-interactive-flow",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "package_generated_images",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "打包生成图",
+      "risk": "safe-write",
+      "requiresPreflight": true,
+      "description": "Package generated images into a zip file on the desktop. Calling this tool creates the preflight confirmation card.",
+      "input": [
+        {
+          "name": "fileName",
+          "type": "string",
+          "required": false,
+          "description": "Optional zip file name."
+        },
+        {
+          "name": "sessionIds",
+          "type": "array",
+          "required": false,
+          "description": "Optional stable session ids to include."
+        }
+      ],
+      "output": {
+        "contentText": "Preflight/execution result summary.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Validates sessions with generated images, requestPreflight, executePackagePreflightTool.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "electron/services/essePackagePreflightExecutor.ts"
+        ]
+      },
+      "migrationClass": "extension-entry-host-preflight",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Packaging creates a desktop zip and uses preflight. Keep current path until external artifact creation is covered by adapter tests.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "创建打包生成图的确认卡并输出 zip。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "它基于 session/generated records 选择图片并走用户确认，不只是 zip 命令。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-interactive-flow",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "delete_session_record",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "删除记录",
+      "risk": "destructive",
+      "requiresPreflight": false,
+      "description": "Logically delete one generated record from a session. Does not delete files from disk.",
+      "input": [
+        {
+          "name": "sessionId",
+          "type": "string",
+          "required": true,
+          "description": "Stable session id."
+        },
+        {
+          "name": "recordIndex",
+          "type": "string",
+          "required": true,
+          "description": "1-based generated record index."
+        }
+      ],
+      "output": {
+        "contentText": "已删除记录 N。",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Permission, reversible mutation, may delete originated generation session if last record removed.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Deletes generated-record state. Destructive workspace mutations should wait for a later policy-focused batch.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "逻辑删除某个生成记录。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "删除的是产品记录引用，不等同于删除文件。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "delete_session",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "删除图片",
+      "risk": "destructive",
+      "requiresPreflight": false,
+      "description": "Delete one image session from the workspace. This only removes workspace references.",
+      "input": [
+        {
+          "name": "sessionId",
+          "type": "string",
+          "required": true,
+          "description": "Stable session id from list_sessions."
+        }
+      ],
+      "output": {
+        "contentText": "Mutation summary.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Permission and reversible mutation via domain project mutations.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "src/domain/projectMutations.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Deletes workspace session references and changes visible workspace structure. Not suitable for first read-only migration.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "删除工作区 session 引用。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "这是 workspace 结构 mutation，不能用文件删除替代。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "merge_sessions",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "合并图片",
+      "risk": "destructive",
+      "requiresPreflight": false,
+      "description": "Merge generated records from source sessions into a target session, then remove source sessions.",
+      "input": [
+        {
+          "name": "targetSessionId",
+          "type": "string",
+          "required": true,
+          "description": "Stable target session id."
+        },
+        {
+          "name": "sourceSessionIds",
+          "type": "array",
+          "required": true,
+          "description": "Stable source session ids."
+        }
+      ],
+      "output": {
+        "contentText": "Mutation summary.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Permission and reversible mutation via domain project mutations.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "src/domain/projectMutations.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Combines records and removes source sessions. Complex destructive mutation; needs dedicated invariants before migration.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "把多个 session 的生成记录合并到目标 session 并移除源 session。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "复杂产品 mutation，涉及记录归属和 UI 状态。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "split_session",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "拆分图片",
+      "risk": "destructive",
+      "requiresPreflight": false,
+      "description": "Split selected generated records from one session into a new independent session.",
+      "input": [
+        {
+          "name": "sessionId",
+          "type": "string",
+          "required": true,
+          "description": "Stable source session id."
+        },
+        {
+          "name": "recordIndexes",
+          "type": "array",
+          "required": true,
+          "description": "1-based record indexes to move into the new session."
+        },
+        {
+          "name": "fileName",
+          "type": "string",
+          "required": false,
+          "description": "Optional fileName for the new session."
+        }
+      ],
+      "output": {
+        "contentText": "Mutation summary.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Permission and reversible mutation via domain project mutations.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "src/domain/projectMutations.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Creates a new session from records and mutates source session state. Complex workspace mutation; later batch.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "从一个 session 中拆出生成记录形成新 session。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "复杂产品 mutation，无法靠文件复制准确表达。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "duplicate_session",
+      "surface": "batchimager-workbench",
+      "agentVisibleTo": [
+        "agent-provider"
+      ],
+      "status": "enabled",
+      "label": "复制图片",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Duplicate one image session including its current image and generated record references. Image files are not copied.",
+      "input": [
+        {
+          "name": "sessionId",
+          "type": "string",
+          "required": true,
+          "description": "Stable source session id."
+        },
+        {
+          "name": "fileName",
+          "type": "string",
+          "required": false,
+          "description": "Optional display fileName for the duplicate."
+        }
+      ],
+      "output": {
+        "contentText": "Mutation summary.",
+        "details": [
+          "affectedSessionIds"
+        ]
+      },
+      "implementation": {
+        "current": "Permission and reversible mutation via domain project mutations.",
+        "files": [
+          "electron/services/esseWorkspaceTools.ts",
+          "src/domain/projectMutations.ts"
+        ]
+      },
+      "migrationClass": "action-tool-host-executor",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current implementation until the first read-only extension batch is verified.",
+        "rationale": "Creates new workspace session state and references generated assets. Safe-write but not read-only; good later candidate.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "复制一个 session 及其当前图/记录引用。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "复制的是产品状态和引用关系，不是直接复制文件。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-capability",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，第二批评估",
+        "phase": "3-mutation-capabilities",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      },
+      "visibility": {}
+    },
+    {
+      "name": "generate_image",
+      "surface": "image-session",
+      "agentVisibleTo": [
+        "right-image-session"
+      ],
+      "status": "enabled",
+      "label": "生成图片",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Generate or edit the selected BatchImager product image using the existing image generation pipeline.",
+      "modelVisible": {
+        "promptSnippet": "Generate or edit the selected product image",
+        "promptGuidelines": [
+          "When the user asks to create, regenerate, edit, restyle, remove background, or make a product image, call generate_image.",
+          "Always choose mode explicitly.",
+          "Only pass size when selected or explicitly requested.",
+          "Pass referenceImageIds only for the reference images the user clearly points to or truly needs."
+        ]
+      },
+      "input": [
+        {
+          "name": "mode",
+          "type": "string",
+          "required": true,
+          "description": "edit or generate."
+        },
+        {
+          "name": "prompt",
+          "type": "string",
+          "required": true,
+          "description": "Detailed prompt for the image generation model."
+        },
+        {
+          "name": "referenceImageIds",
+          "type": "array",
+          "required": false,
+          "description": "Reference image ids from the provided reference index."
+        },
+        {
+          "name": "size",
+          "type": "string",
+          "required": false,
+          "description": "Optional output size in WIDTHxHEIGHT."
+        }
+      ],
+      "output": {
+        "contentText": "图片生成完成，已更新当前图片。",
+        "details": []
+      },
+      "implementation": {
+        "current": "Reads current turnStateByKey, validates mode/prompt, selects reference paths, calls runSharedGenerateImageCore.",
+        "files": [
+          "electron/services/imageSessionAgent.ts",
+          "electron/services/sharedGenerateImageCore.ts",
+          "electron/main.ts"
+        ]
+      },
+      "migrationClass": "separate-image-session-extension",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current image-session custom tool; revisit as a separate image-session extension surface.",
+        "rationale": "Right-side image session tool has separate selected-image context and Pi runtime reuse state. Keep separate until workspace extension consistency is proven.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "保留",
+        "originalPurpose": "右侧单图会话生成/编辑当前选中图片。",
+        "replacement": "Pi basic tools are insufficient because the tool depends on BatchImager product state or app-owned workflow.",
+        "rationale": "这是图片会话专属生成入口，必须走共享生成执行器和当前图片上下文。",
+        "removalPlan": "Keep as an provider-visible product tool. It can still be registered through a controlled Pi extension later.",
+        "riskIfRemoved": "The active provider would have to infer product state from files or call unsafe lower-level operations, increasing mistakes and security risk."
+      },
+      "capability": {
+        "owner": "BatchImager",
+        "layer": "batchimager-interactive-flow",
+        "interfacePlan": "BatchImager Capability API 是真实产品接口；Pi extension wrapper 只负责转接。",
+        "exposure": "迁移后通过 controlled Pi extension 对当前 agent provider 可见。",
+        "notes": [
+          "这是产品语义，不是通用文件/命令能力。"
+        ]
+      },
+      "followUp": {
+        "action": "保留，后期迁移",
+        "phase": "4-preflight-and-destructive-flows",
+        "nextStep": "保持当前行为，等 capability API 与 extension bridge 覆盖权限、UI 和恢复语义后再迁移。",
+        "tests": [
+          "模型可见契约快照测试。",
+          "Capability API 行为测试。"
+        ]
+      }
+    },
+    {
+      "name": "run_project_command",
+      "surface": "image-session",
+      "agentVisibleTo": [
+        "right-image-session"
+      ],
+      "status": "enabled",
+      "label": "运行项目命令",
+      "risk": "safe-write",
+      "requiresPreflight": false,
+      "description": "Run a local command for the current BatchImager project. Broad project commands are allowed, but catastrophic system actions and protected image mutations are blocked.",
+      "input": [
+        {
+          "name": "command",
+          "type": "string",
+          "required": true,
+          "description": "Command to run in the current BatchImager project directory."
+        }
+      ],
+      "output": {
+        "contentText": "exitCode plus truncated stdout/stderr.",
+        "details": [
+          "exitCode"
+        ]
+      },
+      "implementation": {
+        "current": "createRunProjectCommandTool with BatchImager command policy and child_process.exec.",
+        "files": [
+          "electron/services/batchImagerAgentTools.ts",
+          "electron/services/imageSessionAgent.ts"
+        ]
+      },
+      "migrationClass": "review-needed",
+      "migration": {
+        "status": "暂不做",
+        "batch": "later-review",
+        "target": "Keep current image-session command policy path.",
+        "rationale": "Broad local command execution is policy-heavy and session-specific. It should not move in the first extension batch.",
+        "adapterWork": [],
+        "verification": [
+          "Do not migrate until permission, preflight, UI event, and recovery semantics have explicit adapter tests."
+        ]
+      },
+      "reduction": {
+        "status": "建议删除",
+        "originalPurpose": "右侧图片会话执行本地项目命令。",
+        "replacement": "wrapped Pi bash",
+        "rationale": "这与 Pi bash 重叠，且会造成 右侧 agent 两套命令策略；应统一到受控 Pi bash。",
+        "removalPlan": "先冻结新能力；把右侧 agent 命令需求迁到统一 bash wrapper 后删除。",
+        "riskIfRemoved": "Replacement policy must preserve project-root confinement, secret denial, permission prompts for writes, and clear error wording."
+      },
+      "capability": {
+        "owner": "重复通用命令能力",
+        "layer": "generic-duplicate",
+        "interfacePlan": "改由 provider 统一 wrapped Pi bash 处理命令执行。",
+        "exposure": "右侧 image-session 统一命令入口后删除。",
+        "notes": [
+          "避免维护两套命令策略。"
+        ]
+      },
+      "followUp": {
+        "action": "删除但暂缓",
+        "phase": "0-reduce-duplicates",
+        "nextStep": "冻结新能力，把右侧命令需求迁到 wrapped Pi bash，然后删除该 tool。",
+        "tests": [
+          "右侧命令策略一致性测试。",
+          "abort/event publishing 测试。"
+        ]
+      }
+    }
+  ],
+  "extensionMigrationPrinciples": [
+    {
+      "principle": "Register all BatchImager workbench tools through one controlled Pi extension",
+      "reason": "Avoid a split where some tools are Pi-native and others are customTools-only."
+    },
+    {
+      "principle": "Keep BatchImager host executors for product actions",
+      "reason": "Preflight, permission, image API invariants, workspace mutation, undo, and file safety are product responsibilities."
+    },
+    {
+      "principle": "Move read/context tools first",
+      "reason": "They are low-risk and validate whether Pi context/tool lifecycle reduces custom runtime glue."
+    },
+    {
+      "principle": "Normalize result content before migration",
+      "reason": "Every provider should receive the same content text and error semantics regardless of implementation path."
+    },
+    {
+      "principle": "Do not expose user/project .pi extensions to override product tools by default",
+      "reason": "Core product tools interact with user assets, paid APIs, and app state."
+    }
+  ],
+  "testGuidance": [
+    {
+      "area": "Tool manifest consistency",
+      "assertions": [
+        "Every registered provider-visible tool appears in this database.",
+        "Every database tool has name, surface, agentVisibleTo, risk, requiresPreflight, description, input, output, implementation.",
+        "No duplicate visible tool names within one agent surface unless intentionally documented."
+      ]
+    },
+    {
+      "area": "Model-visible result consistency",
+      "assertions": [
+        "Success results include concise content text.",
+        "Error results include Reason and suggestedNext when recovery is possible.",
+        "LLM behavior tests do not depend on details-only data."
+      ]
+    },
+    {
+      "area": "Permission and preflight",
+      "assertions": [
+        "Non-read tools request permission unless explicitly preflight-only or documented safe.",
+        "generate_image, run_batch_generation, and package_generated_images always create preflight before execution.",
+        "Canceled preflight returns an error instructing the active provider not to retry unchanged."
+      ]
+    },
+    {
+      "area": "Image generation invariants",
+      "assertions": [
+        "Image API tools call the shared image executor.",
+        "No tool defaults to square size.",
+        "size is omitted unless user explicitly requested size/ratio/orientation."
+      ]
+    },
+    {
+      "area": "Controlled extension migration",
+      "assertions": [
+        "After migration, all provider-visible tools are registered through the controlled extension entry point.",
+        "Executor implementation may differ, but tool schema and result content remain unchanged.",
+        "Pi tool_call hooks cannot be bypassed by product tools."
+      ]
+    }
+  ],
+  "migrationStatuses": [
+    {
+      "status": "已完成",
+      "meaning": "Already aligned enough with the target Pi integration model; keep behavior stable and cover with regression tests instead of migrating in the first batch."
+    },
+    {
+      "status": "建议做",
+      "meaning": "Recommended for the first controlled Pi extension migration batch. These tools should be migrated first because they are low-risk and make consistency measurable."
+    },
+    {
+      "status": "暂不做",
+      "meaning": "Do not migrate in the first batch. Reasons include disabled surface, high-risk mutation, preflight/user-interaction coupling, separate right-side session semantics, or insufficient adapter design."
+    }
+  ],
+  "migrationBatches": [
+    {
+      "id": "baseline",
+      "label": "Baseline / already Pi-aligned",
+      "goal": "Keep Pi built-ins and wrapped bash stable while workspace tools move behind a controlled extension."
+    },
+    {
+      "id": "first-controlled-extension",
+      "label": "First controlled Pi extension batch",
+      "goal": "Register the BatchImager workspace tool world through one app-bundled controlled Pi extension. The read-only first batch is also extracted into reusable BatchImager Capability APIs with identical names, schemas, model-visible text, and AgentToolResult content."
+    },
+    {
+      "id": "workbench-actions",
+      "label": "Workbench action extraction",
+      "goal": "Move reversible session and generated-record mutations out of Esse-specific helpers into reusable BatchImager Workbench Action APIs while keeping permission, preflight, undo, and mutation sinks in BatchImager."
+    },
+    {
+      "id": "later-review",
+      "label": "Later review",
+      "goal": "Revisit mutation, preflight, generation, destructive, and right-side image-session tools after the read-only extension adapter proves consistency."
+    }
+  ],
+  "reductionStatuses": [
+    {
+      "status": "保留",
+      "meaning": "Keep as a BatchImager agent tool because it expresses product state, product mutation, UI/preflight workflow, or app-owned safety semantics that Pi basic tools cannot reliably infer from files."
+    },
+    {
+      "status": "建议删除",
+      "meaning": "Remove from the provider-visible BatchImager toolset after a replacement path is ready. The capability is generic file or command work that should be handled by Pi basic tools."
+    },
+    {
+      "status": "基础能力",
+      "meaning": "Keep as Pi-provided foundational capability. It is not a BatchImager product tool and should be governed by BatchImager policy where needed."
+    },
+    {
+      "status": "暂不启用",
+      "meaning": "Do not expose yet. It may replace custom project-file tools later, but needs BatchImager policy, permission, and secret-safety wrappers first."
+    }
+  ],
+  "reductionPrinciples": [
+    {
+      "name": "Pi 基础工具负责通用文件与命令",
+      "rule": "Reading files, searching text, listing directories, and generic shell work should be handled by Pi read/grep/find/ls/bash with BatchImager policy wrappers, not by product-specific duplicate tools."
+    },
+    {
+      "name": "BatchImager tools 只表达产品语义",
+      "rule": "Keep tools that operate on sessions, generated records, reference images, preflight cards, memories, workspace ordering, package exports, or recovery-safe image generation."
+    },
+    {
+      "name": "不要让 provider 直接猜内部存储",
+      "rule": "If a result depends on project.sqlite, in-memory turn references, generated-record indexes, undo history, or UI state, keep a product tool instead of asking a provider to inspect files."
+    },
+    {
+      "name": "删除要有替代路径",
+      "rule": "A tool can be marked 建议删除 before code deletion, but actual deletion must wait until prompts, tests, and Pi policy wrappers make the replacement behavior safe and understandable."
+    }
+  ],
+  "architectureModel": {
+    "thesis": "右侧是 agent provider host；Esse 是第一种 provider。BatchImager 是任何 provider 都可以进入的图片工作台。BatchImager 需要 agent 才能获得智能协作能力，但 BatchImager 的产品语义应由 BatchImager 自己通过 capability API 拥有和暴露。",
+    "actors": [
+      {
+        "name": "Agent provider registry",
+        "role": "右侧 agent 宿主分发层。",
+        "owns": "provider descriptor 列表、agent:send-message 到具体 provider runner 的分发、unsupported/unavailable provider 的统一错误。providerId 是稳定字符串协议，不再被 TypeScript 收窄到 esse；当前只注册 Esse。"
+      },
+      {
+        "name": "Pi",
+        "role": "agent runtime 与 tool 协议层。",
+        "owns": "会话生命周期、tool schema、内置文件/搜索/bash 能力、extension 注册，以及模型和工具事件流。"
+      },
+      {
+        "name": "Esse",
+        "role": "通用协作 agent 人格和 shell。",
+        "owns": "面向用户的推理、工具选择、对话连续性、记忆使用，以及跨工作台的一致 agent 行为；不内建 BatchImager 领域逻辑。"
+      },
+      {
+        "name": "BatchImager",
+        "role": "图片生成工作台和产品领域。",
+        "owns": "项目、图片 session、生成记录、参考图、preflight 卡片、权限策略、图片 API 不变量、恢复、日志和 UI 状态。"
+      },
+      {
+        "name": "Controlled Pi extension",
+        "role": "Pi/provider 与工作台 capability provider 之间的受控适配层。",
+        "owns": "模型可见的 tool 名称、schema、description、结果文本；执行时委托给 BatchImager capability API。"
+      },
+      {
+        "name": "BatchImager Capability API",
+        "role": "稳定产品能力接口，供 UI、Electron IPC、controlled extension 和可选 CLI 共用。",
+        "owns": "只读产品查询和模型可见结果文本。Pi tool wrapper 只是调用入口，不是产品逻辑的源头。"
+      },
+      {
+        "name": "BatchImager Workbench Action API",
+        "role": "稳定产品写入接口，供任意 agent provider 的工具适配器共用。",
+        "owns": "session、生成记录、排序、拆分/合并/复制、恢复和 undo 等工作台状态修改；所有 provider 只负责按协议请求动作。"
+      },
+      {
+        "name": "Optional CLI",
+        "role": "同一 capability API 之上的自动化/调试外壳。",
+        "owns": "离线批处理、调试和 skill 调用；不承载需要实时 UI/preflight 交互的核心逻辑。"
+      }
+    ]
+  },
+  "designPrinciples": [
+    {
+      "name": "Provider 不内建工作台语义",
+      "rule": "Agent providers should not own BatchImager concepts such as sessions, generated records, reference images, or preflight cards. Providers only see capabilities exposed by the current workbench."
+    },
+    {
+      "name": "Provider 只适配，不拥有产品逻辑",
+      "rule": "Each provider runner can choose its own runtime, prompt style, or tool protocol, but all BatchImager actions must still go through BatchImager workbench capabilities and safety policies."
+    },
+    {
+      "name": "产品语义归工作台所有",
+      "rule": "BatchImager owns its project model, mutations, invariants, and safety rules. Tool execution must call BatchImager capability APIs instead of duplicating product logic inside a provider or the extension wrapper."
+    },
+    {
+      "name": "Pi 基础能力不重复造轮子",
+      "rule": "Generic file read/search/list and shell execution belong to Pi read/grep/find/ls/bash with BatchImager policy wrappers. BatchImager should not expose duplicate project-file tools unless they add product semantics."
+    },
+    {
+      "name": "Extension 是协议适配层",
+      "rule": "Controlled Pi extension packages model-visible schemas and forwards calls to BatchImager capabilities. It should not become a second product service layer."
+    },
+    {
+      "name": "Capability API 是真实接口",
+      "rule": "The same capability/action API should be callable by UI/IPC, controlled Pi extension, and optional CLI where appropriate. This keeps behavior testable and avoids tool-only business logic."
+    },
+    {
+      "name": "CLI 是可选外壳",
+      "rule": "CLI is useful for debug, batch jobs, and skills, but UI-dependent flows such as preflight cards and live selection should stay API/event driven rather than CLI-first."
+    },
+    {
+      "name": "模型可见契约必须稳定",
+      "rule": "Whether a capability is backed by Pi built-in, controlled extension, Electron service, or CLI, providers should see stable names, descriptions, schemas, content text, and error wording."
+    },
+    {
+      "name": "删除优先于迁移",
+      "rule": "Before moving tools into extension form, remove duplicate generic tools and keep only product capabilities. A smaller tool world is easier for the active provider to reason about."
+    }
+  ],
+  "capabilityLayers": [
+    {
+      "id": "pi-foundation",
+      "owner": "Pi",
+      "label": "Pi 基础能力",
+      "examples": [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "bash"
+      ],
+      "policy": "Expose narrowly; wrap bash and future write/edit with BatchImager path, secret, permission, and asset-protection policy."
+    },
+    {
+      "id": "generic-duplicate",
+      "owner": "None / duplicate",
+      "label": "应删除的通用重复能力",
+      "examples": [
+        "read_project_file",
+        "write_project_file",
+        "append_project_file",
+        "run_project_command"
+      ],
+      "policy": "Do not migrate as product tools. Replace with governed Pi foundation capabilities."
+    },
+    {
+      "id": "batchimager-capability",
+      "owner": "BatchImager",
+      "label": "BatchImager 产品能力",
+      "examples": [
+        "list_sessions",
+        "get_session_records",
+        "generate_image",
+        "run_batch_generation"
+      ],
+      "policy": "Define in a BatchImager capability API; expose to the active provider via controlled Pi extension."
+    },
+    {
+      "id": "batchimager-action",
+      "owner": "BatchImager",
+      "label": "BatchImager 工作台动作",
+      "examples": [
+        "rename_session",
+        "restore_session_record",
+        "delete_session",
+        "undo_last_actions"
+      ],
+      "policy": "Define in a BatchImager workbench action API; provider adapters may request these actions only through BatchImager permission, undo, and mutation sinks."
+    },
+    {
+      "id": "batchimager-interactive-flow",
+      "owner": "BatchImager",
+      "label": "BatchImager 交互/确认流能力",
+      "examples": [
+        "generate_image",
+        "run_batch_generation",
+        "package_generated_images"
+      ],
+      "policy": "Keep preflight, permission, batch-task control, background execution, recovery, and UI events in BatchImager; extension only initiates and reports the flow."
+    },
+    {
+      "id": "agent-provider-generic",
+      "owner": "agent-provider",
+      "label": "通用 agent provider 能力",
+      "examples": [
+        "memory usage policy",
+        "tool choice strategy",
+        "cross-workbench persona"
+      ],
+      "policy": "Keep generic; do not encode BatchImager session/file assumptions here."
+    }
+  ],
+  "toolProcessingPlan": [
+    {
+      "phase": "0-reduce-duplicates",
+      "title": "先做减法",
+      "goal": "Remove or de-emphasize tools that duplicate Pi foundation capabilities before migrating product tools.",
+      "tools": [
+        "read_project_file",
+        "write_project_file",
+        "append_project_file",
+        "run_project_command"
+      ],
+      "acceptance": [
+        "read_project_file / write_project_file / append_project_file 已从 createEsseWorkspaceTools 注册列表删除。",
+        "Prompt 不再教 provider 把普通项目文件读写当成 BatchImager 产品工具。",
+        "esseWorkspaceRuntime.test 有 absent regression，证明这些重复工具不再暴露。",
+        "run_project_command 不作为 BatchImager workspace product tool 暴露；通用命令走 wrapped Pi bash。"
+      ]
+    },
+    {
+      "phase": "1-define-capability-api",
+      "title": "抽出 BatchImager Capability API",
+      "goal": "Make product capabilities callable independently of any one provider's tool registration.",
+      "tools": [
+        "get_project_overview",
+        "list_sessions",
+        "get_session_records",
+        "read_image_metadata",
+        "list_reference_images",
+        "list_remembered_preferences",
+        "scan_unreferenced_files"
+      ],
+      "acceptance": [
+        "第一批只读能力都有稳定 TypeScript interface，且测试不依赖 Pi 注册方式。",
+        "UI/IPC 和 extension wrapper 在可行处调用同一份 capability 实现。",
+        "Capability API 不向模型暴露 API key、原始 sqlite 访问或不安全文件路径。"
+      ]
+    },
+    {
+      "phase": "2-first-controlled-extension",
+      "title": "第一批只读 controlled Pi extension",
+      "goal": "Expose the 7 retained read-only BatchImager capabilities through a controlled Pi extension with unchanged model-visible behavior.",
+      "tools": [
+        "get_project_overview",
+        "list_sessions",
+        "get_session_records",
+        "read_image_metadata",
+        "list_reference_images",
+        "list_remembered_preferences",
+        "scan_unreferenced_files"
+      ],
+      "acceptance": [
+        "tool 名称、description、JSON schema、content text 和错误措辞与当前行为一致，除非测试明确记录了有意修改。",
+        "现有 workspace runtime 测试继续通过。",
+        "registration smoke test 证明 app 可以安装受控 extension，不依赖用户项目里的 .pi/extensions。"
+      ]
+    },
+    {
+      "phase": "3-mutation-capabilities",
+      "title": "抽出产品写入 Action API",
+      "goal": "Move reversible workspace mutations behind a BatchImager Workbench Action API and extension bridge after permission/undo behavior is explicit.",
+      "tools": [
+        "restore_session_record",
+        "restore_original",
+        "rename_session",
+        "reorder_sessions",
+        "set_session_prompt",
+        "delete_session_record",
+        "delete_session",
+        "merge_sessions",
+        "split_session",
+        "duplicate_session",
+        "undo_last_actions"
+      ],
+      "acceptance": [
+        "已在 1.3 中抽出 session/record/undo 工作台 Action API，测试不依赖 provider 运行时。",
+        "Provider 工具适配层只负责参数解析、turn budget、权限和 undo 入口封装，产品 mutation 逻辑归 BatchImager action API。",
+        "extension wrapper 不绕过 BatchImager permission policy。"
+      ]
+    },
+    {
+      "phase": "4-preflight-and-destructive-flows",
+      "title": "最后处理确认流和破坏性动作",
+      "goal": "Keep preflight, destructive operations, and image API invariants in BatchImager while allowing agent providers to initiate them through extension tools.",
+      "tools": [
+        "generate_image",
+        "run_batch_generation",
+        "package_generated_images",
+        "restore_session_record",
+        "restore_original",
+        "remove_reference_image",
+        "forget_user_preference",
+        "undo_last_actions",
+        "delete_unreferenced_files",
+        "delete_session_record",
+        "delete_session",
+        "merge_sessions",
+        "split_session"
+      ],
+      "acceptance": [
+        "preflight 卡片仍支持执行、修改、取消。",
+        "图片生成仍使用 shared executor 和 prepareImageForEditApi 规则。",
+        "破坏性动作优先接受 sessionId、recordIndex、candidateId 等安全标识，不接受任意原始文件路径。"
+      ]
+    },
+    {
+      "phase": "5-optional-cli",
+      "title": "可选 CLI",
+      "goal": "Expose selected non-interactive BatchImager capabilities for skills/debug/batch use without making CLI the product source of truth.",
+      "tools": [
+        "scan_unreferenced_files",
+        "package_generated_images",
+        "list_sessions"
+      ],
+      "acceptance": [
+        "CLI 调用与 UI/extension wrapper 相同的 capability API。",
+        "CLI 不直接执行 live UI-only 操作；遇到需要用户确认的流程时返回需要确认的信息。"
+      ]
+    }
+  ],
+  "implementationMilestones": [
+    {
+      "status": "done",
+      "title": "1.3 agent provider registry",
+      "summary": "新增通用 agent provider 注册/分发入口，当前默认注册 Esse。providerId 是开放的稳定字符串协议；preload/main 暴露 agent:list-providers 与 agent:send-message，同时保留 esse:send-message 兼容旧路径。",
+      "files": [
+        "electron/services/agentProviderRegistry.ts",
+        "electron/services/agentProviderRegistry.test.ts",
+        "electron/services/agentProviders.ts",
+        "electron/services/agentProviders.test.ts",
+        "electron/ipcTypes.ts",
+        "electron/preload.ts",
+        "electron/main.ts",
+        "src/App.tsx",
+        "src/components/ProjectPlanPanel.tsx"
+      ]
+    },
+    {
+      "status": "done",
+      "title": "1.3 provider-neutral interactive-flow IPC",
+      "summary": "preload/main/UI 已新增 agent preflight、permission、batch-task cancel/retry API；确认卡、权限卡、批量生成任务控制、生成任务记录和 E2E harness 优先使用 provider-neutral 名称或当前 provider 标签；legacy esse:* IPC 和 preload 方法继续作为兼容别名。",
+      "files": [
+        "electron/ipcTypes.ts",
+        "electron/preload.ts",
+        "electron/main.ts",
+        "electron/services/essePreflightBroker.ts",
+        "electron/services/essePermissionBroker.ts",
+        "src/App.tsx",
+        "src/components/ProjectPlanPanel.tsx",
+        "src/test/batchImagerAppE2eHarness.tsx",
+        "src/App.e2e.test.tsx",
+        "src/components/generationRecoveryUi.test.ts",
+        "src/domain/imageSessions.ts",
+        "src/domain/imageSessions.test.ts",
+        "electron/services/agentWorkspacePermissionPolicy.ts",
+        "electron/services/esseBashTool.ts"
+      ]
+    },
+    {
+      "status": "done",
+      "title": "1.3 first BatchImager workbench capability catalog",
+      "summary": "新增第一批 BatchImager workbench capability catalog，明确 7 个只读产品能力属于 BatchImager，而不是 provider 内建能力或 Pi 通用文件能力。",
+      "files": [
+        "electron/services/batchImagerWorkbenchCapabilities.ts",
+        "electron/services/batchImagerWorkbenchCapabilities.test.ts"
+      ]
+    },
+    {
+      "status": "done",
+      "title": "BatchImager Capability API implementation",
+      "summary": "已把第一批 7 个只读产品能力抽成 BatchImager Workbench Capability API，并让 BatchImager workbench tools 通过该 API 返回相同的模型可见内容。",
+      "files": [
+        "electron/services/batchImagerWorkbenchCapabilityApi.ts",
+        "electron/services/batchImagerWorkbenchCapabilityApi.test.ts",
+        "electron/services/esseWorkspaceTools.ts",
+        "electron/services/esseWorkspaceRuntime.test.ts"
+      ]
+    },
+    {
+      "status": "done",
+      "title": "1.3 controlled BatchImager workbench extension",
+      "summary": "BatchImager 工作区工具已统一通过 app 内置 controlled Pi extension factory 注册；第一批 7 个只读产品能力额外抽成 Capability API，剩余工具暂时复用现有 BatchImager host runtime executor。",
+      "files": [
+        "electron/services/batchImagerWorkbenchExtension.ts",
+        "electron/services/batchImagerWorkbenchExtension.test.ts",
+        "electron/services/agentRuntime.ts",
+        "electron/services/agentRuntime.test.ts",
+        "electron/services/esseAgent.ts",
+        "electron/services/esseAgent.test.ts",
+        "electron/services/esseWorkspaceAgentEvaluation.test.ts"
+      ]
+    },
+    {
+      "status": "done",
+      "title": "1.3 BatchImager workbench action API",
+      "summary": "已把 session、生成记录、拆分/合并/复制、恢复和 undo 等工作台 mutation 从 BatchImager workbench tools 抽到 provider-independent BatchImager Workbench Action API；provider 工具适配层只做参数适配、权限/预算/undo 封装。",
+      "files": [
+        "electron/services/batchImagerWorkbenchActions.ts",
+        "electron/services/batchImagerWorkbenchActions.test.ts",
+        "electron/services/esseWorkspaceTools.ts",
+        "electron/services/esseWorkspaceRuntime.test.ts"
+      ]
+    }
+  ]
+}

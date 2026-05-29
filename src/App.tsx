@@ -18,7 +18,7 @@ import {
   getInitialSelectedSessionId,
   getSessionDisplayPath,
   getSessionGenerationSourcePath,
-  markSessionEsseTask,
+  markSessionAgentTask,
   markSessionGenerating,
   moveImageSession,
   removeImageSession,
@@ -57,14 +57,16 @@ import { ProjectPlanPanel, type QueuedWorkspaceReference } from "./components/Pr
 import { SessionPanel } from "./components/SessionPanel";
 import type {
   AppLogEntry,
+  AgentPermissionRequest,
+  AgentPermissionResponse,
+  AgentPreflightCommand,
+  AgentPreflightRequest,
+  AgentPreflightResponse,
+  AgentProviderDescriptor,
+  AgentProviderId,
+  AgentBashExecutionEvent,
   ChatReferenceImage,
   EsseAgentHistoryMessage,
-  EsseBashExecutionEvent,
-  EssePermissionRequest,
-  EssePermissionResponse,
-  EssePreflightCommand,
-  EssePreflightRequest,
-  EssePreflightResponse,
   ProjectListEntry,
   ProjectMetadata,
   ProjectSnapshot
@@ -72,7 +74,7 @@ import type {
 import type {
   BatchPlan,
   BatchPlanReferenceImage,
-  EsseImageRequest,
+  AgentImageRequest,
   EssePersona,
   ProjectManagerMessage,
   ProjectManagerState,
@@ -82,8 +84,26 @@ import type {
 import esseTabMascot from "./assets/esse-tab-mascot.png";
 
 const DEFAULT_COLUMNS = 4;
+const BASH_EXECUTION_RENDER_INTERVAL_MS = 250;
+const DEFAULT_AGENT_PROVIDER: AgentProviderDescriptor = {
+  description: "BatchImager 当前内置的图片工作台协作 agent。",
+  id: "esse",
+  label: "Esse",
+  shortLabel: "Esse",
+  status: "available",
+  supportsPersona: true,
+  workbenchCapabilityIds: [
+    "get_project_overview",
+    "list_sessions",
+    "get_session_records",
+    "read_image_metadata",
+    "list_reference_images",
+    "list_remembered_preferences",
+    "scan_unreferenced_files"
+  ]
+};
 type SidebarTab = "project" | "image";
-interface EsseDispatchTask {
+interface AgentDispatchTask {
   generationMode: "edit" | "generate";
   instruction: string;
   referenceImagePaths: string[];
@@ -106,9 +126,12 @@ export function App() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
   const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>("image");
-  const [queuedEsseReferences, setQueuedEsseReferences] = useState<QueuedWorkspaceReference[]>([]);
+  const [agentProviders, setAgentProviders] = useState<AgentProviderDescriptor[]>([DEFAULT_AGENT_PROVIDER]);
+  const [activeAgentProviderId, setActiveAgentProviderId] = useState<AgentProviderId>(DEFAULT_AGENT_PROVIDER.id);
+  const [queuedAgentReferences, setQueuedAgentReferences] = useState<QueuedWorkspaceReference[]>([]);
   const [columns, setColumns] = useState(DEFAULT_COLUMNS);
   const [isCreatingProjectPlan, setIsCreatingProjectPlan] = useState(false);
+  const [agentStatusTokenCount, setAgentStatusTokenCount] = useState<number | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isLogPanelOpen, setIsLogPanelOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -129,8 +152,11 @@ export function App() {
   const currentProjectRef = useRef(currentProject);
   const activeSessionOperationIdsRef = useRef(new Map<string, string>());
   const activeProjectOperationIdsRef = useRef(new Map<string, string>());
-  const activeEsseOperationIdRef = useRef<string | null>(null);
-  const activeEsseAssistantMessageIdRef = useRef<string | null>(null);
+  const activeAgentOperationIdRef = useRef<string | null>(null);
+  const activeAgentAssistantMessageIdRef = useRef<string | null>(null);
+  const activeAgentInputTokenCountRef = useRef(0);
+  const pendingBashExecutionEventsRef = useRef(new Map<string, AgentBashExecutionEvent>());
+  const bashExecutionFlushTimerRef = useRef<number | null>(null);
 
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedSessionId) ?? null,
@@ -147,6 +173,10 @@ export function App() {
   );
   const projectManagerActivityLogs = useMemo(() => getProjectManagerActivityLogs(logs), [logs]);
   const recentProjects = useMemo(() => selectRecentProjects(projectListEntries), [projectListEntries]);
+  const activeAgentProvider = useMemo(
+    () => agentProviders.find((provider) => provider.id === activeAgentProviderId) ?? agentProviders[0] ?? DEFAULT_AGENT_PROVIDER,
+    [activeAgentProviderId, agentProviders]
+  );
   const runningWorkCount = useMemo(
     () =>
       sessions.filter((session) => session.status === "generating" || session.status === "queued" || session.chatStatus === "sending").length +
@@ -207,6 +237,24 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    let isMounted = true;
+
+    void window.batchImager?.listAgentProviders?.().then((providers) => {
+      if (!isMounted || !providers?.length) {
+        return;
+      }
+      setAgentProviders(providers);
+      setActiveAgentProviderId((currentProviderId) =>
+        providers.some((provider) => provider.id === currentProviderId) ? currentProviderId : providers[0].id
+      );
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
     const unsubscribe = window.batchImager?.subscribeProjectThumbnailUpdates(() => {
       if (isProjectListOpen || sessions.length === 0) {
         void loadProjectList();
@@ -229,11 +277,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = window.batchImager?.subscribeEssePreflightRequests((request) => {
-      const nextState = appendEssePreflightMessage(
+    const subscribePreflight =
+      window.batchImager?.subscribeAgentPreflightRequests ?? window.batchImager?.subscribeEssePreflightRequests;
+    const unsubscribe = subscribePreflight?.((request) => {
+      const nextState = appendAgentPreflightMessage(
         projectManagerStateRef.current,
         request,
-        createMessageId("esse-preflight")
+        createMessageId("agent-preflight")
       );
       projectManagerStateRef.current = nextState;
       setProjectManagerState(nextState);
@@ -246,11 +296,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = window.batchImager?.subscribeEssePermissionRequests?.((request) => {
-      const nextState = appendEssePermissionMessage(
+    const subscribePermission =
+      window.batchImager?.subscribeAgentPermissionRequests ?? window.batchImager?.subscribeEssePermissionRequests;
+    const unsubscribe = subscribePermission?.((request) => {
+      const nextState = appendAgentPermissionMessage(
         projectManagerStateRef.current,
         request,
-        createMessageId("esse-permission")
+        createMessageId("agent-permission")
       );
       projectManagerStateRef.current = nextState;
       setProjectManagerState(nextState);
@@ -263,29 +315,84 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = window.batchImager?.subscribeEsseBashExecutionEvents?.((event) => {
-      const nextState = upsertEsseBashExecutionMessage(
-        projectManagerStateRef.current,
-        event,
-        createMessageId("esse-bash")
-      );
-      projectManagerStateRef.current = nextState;
-      setProjectManagerState(nextState);
-      persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
-    });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    const unsubscribe = window.batchImager?.subscribeEsseAssistantMessageUpdates?.((event) => {
-      if (!event.content.trim() || event.operationId !== activeEsseOperationIdRef.current) {
+    const applyBashExecutionEvents = (events: AgentBashExecutionEvent[], options: { persist: boolean }): void => {
+      if (events.length === 0) {
         return;
       }
 
-      const messageId = activeEsseAssistantMessageIdRef.current;
+      let nextState = projectManagerStateRef.current;
+      for (const event of events) {
+        nextState = upsertAgentBashExecutionMessage(nextState, event, createMessageId("agent-bash"));
+      }
+
+      projectManagerStateRef.current = nextState;
+      setProjectManagerState(nextState);
+      if (options.persist) {
+        persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
+      }
+    };
+
+    const clearBashExecutionFlushTimer = (): void => {
+      if (bashExecutionFlushTimerRef.current === null) {
+        return;
+      }
+
+      window.clearTimeout(bashExecutionFlushTimerRef.current);
+      bashExecutionFlushTimerRef.current = null;
+    };
+
+    const flushPendingBashExecutionEvents = (): void => {
+      const events = [...pendingBashExecutionEventsRef.current.values()];
+      pendingBashExecutionEventsRef.current.clear();
+      clearBashExecutionFlushTimer();
+      applyBashExecutionEvents(events, { persist: false });
+    };
+
+    const schedulePendingBashExecutionFlush = (): void => {
+      if (bashExecutionFlushTimerRef.current !== null) {
+        return;
+      }
+
+      bashExecutionFlushTimerRef.current = window.setTimeout(
+        flushPendingBashExecutionEvents,
+        BASH_EXECUTION_RENDER_INTERVAL_MS
+      );
+    };
+
+    const subscribeBashExecutionEvents =
+      window.batchImager?.subscribeAgentBashExecutionEvents ?? window.batchImager?.subscribeEsseBashExecutionEvents;
+    const unsubscribe = subscribeBashExecutionEvents?.((event) => {
+      if (event.status === "running" && hasBashExecutionOutputUpdate(event)) {
+        pendingBashExecutionEventsRef.current.set(event.toolCallId, event);
+        schedulePendingBashExecutionFlush();
+        return;
+      }
+
+      pendingBashExecutionEventsRef.current.delete(event.toolCallId);
+      if (pendingBashExecutionEventsRef.current.size === 0) {
+        clearBashExecutionFlushTimer();
+      }
+
+      applyBashExecutionEvents([event], { persist: event.status !== "running" });
+    });
+
+    return () => {
+      unsubscribe?.();
+      pendingBashExecutionEventsRef.current.clear();
+      clearBashExecutionFlushTimer();
+    };
+  }, []);
+
+  useEffect(() => {
+    const subscribeAssistantMessageUpdates =
+      window.batchImager?.subscribeAgentAssistantMessageUpdates ?? window.batchImager?.subscribeEsseAssistantMessageUpdates;
+    const unsubscribe = subscribeAssistantMessageUpdates?.((event) => {
+      if (!event.content.trim() || event.operationId !== activeAgentOperationIdRef.current) {
+        return;
+      }
+
+      setAgentStatusTokenCount(activeAgentInputTokenCountRef.current + estimateTokenCount(event.content));
+      const messageId = activeAgentAssistantMessageIdRef.current;
       if (!messageId) {
         return;
       }
@@ -613,8 +720,8 @@ export function App() {
     });
   }
 
-  function handleSendWorkspaceImageToEsse(payload: { fileName: string; imagePath: string }): void {
-    setQueuedEsseReferences((currentReferences) => [
+  function handleSendWorkspaceImageToAgent(payload: { fileName: string; imagePath: string }): void {
+    setQueuedAgentReferences((currentReferences) => [
       ...currentReferences,
       {
         fileName: payload.fileName,
@@ -718,9 +825,11 @@ export function App() {
   }
 
   function handleStopProjectWork(): void {
-    cancelOperation(activeEsseOperationIdRef.current);
-    activeEsseOperationIdRef.current = null;
-    activeEsseAssistantMessageIdRef.current = null;
+    cancelOperation(activeAgentOperationIdRef.current);
+    activeAgentOperationIdRef.current = null;
+    activeAgentAssistantMessageIdRef.current = null;
+    activeAgentInputTokenCountRef.current = 0;
+    setAgentStatusTokenCount(null);
 
     const affectedSessionIds = new Set<string>();
     for (const [operationId, sessionId] of activeProjectOperationIdsRef.current.entries()) {
@@ -744,39 +853,7 @@ export function App() {
     persistProjectSnapshot(nextSessions, selectedSessionIdRef.current, nextProjectManagerState);
   }
 
-  async function cancelPendingEssePreflightsForNewRequest(state: ProjectManagerState): Promise<ProjectManagerState> {
-    const pendingRequests = state.conversation.messages
-      .filter((message) => message.preflightRequest && (message.preflightDecision ?? "pending") === "pending")
-      .map((message) => message.preflightRequest as EssePreflightRequest);
-
-    if (pendingRequests.length === 0) {
-      return state;
-    }
-
-    activeEsseOperationIdRef.current = null;
-    setIsCreatingProjectPlan(false);
-
-    let nextState = state;
-    for (const request of pendingRequests) {
-      nextState = markEssePreflightDecision(nextState, request.requestId, "cancel");
-      await window.batchImager
-        ?.respondEssePreflight({
-          decision: "cancel",
-          detail: "用户提出了新的调整要求，旧计划作废。",
-          requestId: request.requestId
-        })
-        .catch((error) => {
-          console.error("[BatchImager UI] Esse preflight auto-cancel failed", error);
-        });
-    }
-
-    setProjectManagerState(nextState);
-    projectManagerStateRef.current = nextState;
-    persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, nextState);
-    return nextState;
-  }
-
-  async function handleSendEsseMessage(
+  async function handleSendAgentMessage(
     content: string,
     outputSize?: string,
     referenceImagePaths: string[] = [],
@@ -785,8 +862,8 @@ export function App() {
     await ensureProjectForImport();
 
     const currentSessions = sessionsRef.current;
-    const userMessageId = createMessageId("esse-user");
-    const baseProjectManagerState = await cancelPendingEssePreflightsForNewRequest(projectManagerStateRef.current);
+    const userMessageId = createMessageId("agent-user");
+    const baseProjectManagerState = projectManagerStateRef.current;
     const resolvedReferences = resolveProjectManagerReferenceImages(
       baseProjectManagerState,
       content,
@@ -805,26 +882,30 @@ export function App() {
     persistProjectSnapshot(currentSessions, selectedSessionIdRef.current, nextState);
 
     if (resolvedReferences.errorMessage) {
-      const errorState = appendProjectManagerError(nextState, resolvedReferences.errorMessage, createMessageId("esse-error"));
+      const errorState = appendProjectManagerError(nextState, resolvedReferences.errorMessage, createMessageId("agent-error"));
       setProjectManagerState(errorState);
       projectManagerStateRef.current = errorState;
       persistProjectSnapshot(currentSessions, selectedSessionIdRef.current, errorState);
       return;
     }
 
+    const history = buildAgentHistoryMessages(nextState);
+    const inputTokenCount = estimateAgentInputTokenCount(history, currentSessions, resolvedReferences.referenceImagePaths);
+    activeAgentInputTokenCountRef.current = inputTokenCount;
     setIsCreatingProjectPlan(true);
-    const operationId = createOperationId("esse");
-    const assistantMessageId = createMessageId("esse-assistant");
-    activeEsseOperationIdRef.current = operationId;
-    activeEsseAssistantMessageIdRef.current = assistantMessageId;
+    setAgentStatusTokenCount(inputTokenCount);
+    const operationId = createOperationId("agent");
+    const assistantMessageId = createMessageId("agent-assistant");
+    activeAgentOperationIdRef.current = operationId;
+    activeAgentAssistantMessageIdRef.current = assistantMessageId;
 
     try {
-      const history = buildEsseAgentHistoryMessages(nextState);
-      const result = await window.batchImager?.sendEsseMessage({
+      const agentRequest = {
         messages: history,
         operationId,
         ...(outputSize ? { outputSize } : {}),
         ...(persona ? { persona } : {}),
+        projectManagerState: nextState,
         ...(resolvedReferences.referenceImagePaths.length ? { referenceImagePaths: resolvedReferences.referenceImagePaths } : {}),
         selectedSessionId: selectedSessionIdRef.current,
         sessions: currentSessions.map((session) => ({
@@ -833,12 +914,18 @@ export function App() {
           ...(session.generatedFilePaths?.length ? { generatedFilePaths: session.generatedFilePaths } : {}),
           id: session.id
         }))
-      });
+      };
+      const result = window.batchImager?.sendAgentMessage
+        ? await window.batchImager.sendAgentMessage({
+            ...agentRequest,
+            providerId: activeAgentProvider.id
+          })
+        : await window.batchImager?.sendEsseMessage(agentRequest);
 
       if (!result) {
-        throw new Error("当前运行环境不支持 Esse 智能体");
+        throw new Error(`当前运行环境不支持 ${activeAgentProvider.shortLabel} 智能体`);
       }
-      if (activeEsseOperationIdRef.current !== operationId) {
+      if (activeAgentOperationIdRef.current !== operationId) {
         return;
       }
 
@@ -860,21 +947,23 @@ export function App() {
       selectedSessionIdRef.current = nextSelectedSessionId;
       persistProjectSnapshot(nextSessions, nextSelectedSessionId, updatedState);
     } catch (error) {
-      if (activeEsseOperationIdRef.current !== operationId || isCanceledError(error)) {
+      if (activeAgentOperationIdRef.current !== operationId || isCanceledError(error)) {
         return;
       }
       const errorState = appendProjectManagerError(
         projectManagerStateRef.current,
-        getEsseDisplayErrorMessage(error),
-        createMessageId("esse-error")
+        getAgentDisplayErrorMessage(error, activeAgentProvider.shortLabel),
+        createMessageId("agent-error")
       );
       setProjectManagerState(errorState);
       projectManagerStateRef.current = errorState;
       persistProjectSnapshot(sessionsRef.current, selectedSessionIdRef.current, errorState);
     } finally {
-      if (activeEsseOperationIdRef.current === operationId) {
-        activeEsseOperationIdRef.current = null;
-        activeEsseAssistantMessageIdRef.current = null;
+      if (activeAgentOperationIdRef.current === operationId) {
+        activeAgentOperationIdRef.current = null;
+        activeAgentAssistantMessageIdRef.current = null;
+        activeAgentInputTokenCountRef.current = 0;
+        setAgentStatusTokenCount(null);
         setIsCreatingProjectPlan(false);
       }
     }
@@ -908,12 +997,13 @@ export function App() {
     }
   }
 
-  async function handleResolveEssePreflight(
+  async function handleResolveAgentPreflight(
     requestId: string,
-    decision: EssePreflightResponse["decision"],
-    modifiedCommands?: EssePreflightCommand[]
+    decision: AgentPreflightResponse["decision"],
+    modifiedCommands?: AgentPreflightCommand[]
   ): Promise<void> {
-    const result = await window.batchImager?.respondEssePreflight({
+    const respondPreflight = window.batchImager?.respondAgentPreflight ?? window.batchImager?.respondEssePreflight;
+    const result = await respondPreflight?.({
       requestId,
       decision,
       ...(modifiedCommands ? { modifiedCommands } : {})
@@ -922,43 +1012,48 @@ export function App() {
       return;
     }
 
-    const nextState = markEssePreflightDecision(projectManagerStateRef.current, requestId, decision);
+    const nextState = markAgentPreflightDecision(projectManagerStateRef.current, requestId, decision);
     projectManagerStateRef.current = nextState;
     setProjectManagerState(nextState);
   }
 
-  async function handleResolveEssePermission(requestId: string, decision: EssePermissionResponse["decision"]): Promise<void> {
-    const result = await window.batchImager?.respondEssePermission({ requestId, decision });
+  async function handleResolveAgentPermission(requestId: string, decision: AgentPermissionResponse["decision"]): Promise<void> {
+    const respondPermission = window.batchImager?.respondAgentPermission ?? window.batchImager?.respondEssePermission;
+    const result = await respondPermission?.({ requestId, decision });
     if (!result?.accepted) {
       return;
     }
 
-    const nextState = markEssePermissionDecision(projectManagerStateRef.current, requestId, decision);
+    const nextState = markAgentPermissionDecision(projectManagerStateRef.current, requestId, decision);
     projectManagerStateRef.current = nextState;
     setProjectManagerState(nextState);
   }
 
-  function handleCancelEsseBatchTaskItem(batchTaskId: string, sessionId: string): void {
-    void window.batchImager?.cancelEsseBatchTaskItem({ batchTaskId, sessionId }).catch((error) => {
-      console.error("[BatchImager UI] Esse batch item cancel failed", error);
+  function handleCancelAgentBatchTaskItem(batchTaskId: string, sessionId: string): void {
+    const cancelItem = window.batchImager?.cancelAgentBatchTaskItem ?? window.batchImager?.cancelEsseBatchTaskItem;
+    void cancelItem?.({ batchTaskId, sessionId }).catch((error) => {
+      console.error("[BatchImager UI] Agent batch item cancel failed", error);
     });
   }
 
-  function handleCancelEsseBatchTaskAll(batchTaskId: string): void {
-    void window.batchImager?.cancelEsseBatchTaskAll({ batchTaskId }).catch((error) => {
-      console.error("[BatchImager UI] Esse batch cancel failed", error);
+  function handleCancelAgentBatchTaskAll(batchTaskId: string): void {
+    const cancelAll = window.batchImager?.cancelAgentBatchTaskAll ?? window.batchImager?.cancelEsseBatchTaskAll;
+    void cancelAll?.({ batchTaskId }).catch((error) => {
+      console.error("[BatchImager UI] Agent batch cancel failed", error);
     });
   }
 
-  function handleRetryEsseBatchTaskItem(batchTaskId: string, sessionId: string): void {
-    void window.batchImager?.retryEsseBatchTaskItem({ batchTaskId, sessionId }).catch((error) => {
-      console.error("[BatchImager UI] Esse batch item retry failed", error);
+  function handleRetryAgentBatchTaskItem(batchTaskId: string, sessionId: string): void {
+    const retryItem = window.batchImager?.retryAgentBatchTaskItem ?? window.batchImager?.retryEsseBatchTaskItem;
+    void retryItem?.({ batchTaskId, sessionId }).catch((error) => {
+      console.error("[BatchImager UI] Agent batch item retry failed", error);
     });
   }
 
-  function handleRetryEsseBatchTaskFailed(batchTaskId: string): void {
-    void window.batchImager?.retryEsseBatchTaskFailed({ batchTaskId }).catch((error) => {
-      console.error("[BatchImager UI] Esse batch failed retry failed", error);
+  function handleRetryAgentBatchTaskFailed(batchTaskId: string): void {
+    const retryFailed = window.batchImager?.retryAgentBatchTaskFailed ?? window.batchImager?.retryEsseBatchTaskFailed;
+    void retryFailed?.({ batchTaskId }).catch((error) => {
+      console.error("[BatchImager UI] Agent batch failed retry failed", error);
     });
   }
 
@@ -975,13 +1070,13 @@ export function App() {
     commands: WorkerCommand[],
     baseProjectManagerState: ProjectManagerState
   ): Promise<void> {
-    const preparedTasks: Array<{ command: WorkerCommand; task: EsseDispatchTask }> = [];
+    const preparedTasks: Array<{ command: WorkerCommand; task: AgentDispatchTask }> = [];
     let nextSessions = sessionsRef.current;
 
     for (const command of commands) {
       const referenceImages = getCommandReferenceImages(plan, command);
       const referenceImagePaths = referenceImages.map((referenceImage) => referenceImage.filePath);
-      const imageRequest: EsseImageRequest = {
+      const imageRequest: AgentImageRequest = {
         id: command.id,
         mode: command.generationMode ?? (command.sourceSessionId ? "edit" : "generate"),
         prompt: command.instruction,
@@ -991,7 +1086,7 @@ export function App() {
       };
 
       try {
-        const prepared = await prepareEsseImageTasks(nextSessions, [imageRequest], referenceImagePaths);
+        const prepared = await prepareAgentImageTasks(nextSessions, [imageRequest], referenceImagePaths);
         const task = prepared.dispatchTasks[0];
 
         if (!task) {
@@ -1024,7 +1119,7 @@ export function App() {
     await Promise.all(
       preparedTasks.map(async ({ command, task }) => {
         try {
-          const generatedImagePath = await runEsseImageTask(task);
+          const generatedImagePath = await runAgentImageTask(task);
           applyProjectCommandReport(
             plan.id,
             makeWorkerReport({ ...command, targetSessionId: task.sessionId }, "completed", generatedImagePath, "已完成生成。"),
@@ -1058,17 +1153,17 @@ export function App() {
     });
   }
 
-  async function prepareEsseImageTasks(
+  async function prepareAgentImageTasks(
     currentSessions: ImageSession[],
-    imageRequests: EsseImageRequest[],
+    imageRequests: AgentImageRequest[],
     promptReferenceImagePaths: string[] = []
-  ): Promise<{ dispatchTasks: EsseDispatchTask[]; nextSessions: ImageSession[] }> {
+  ): Promise<{ dispatchTasks: AgentDispatchTask[]; nextSessions: ImageSession[] }> {
     if (imageRequests.length === 0) {
       return { dispatchTasks: [], nextSessions: currentSessions };
     }
 
     const nextSessions = [...currentSessions];
-    const dispatchTasks: EsseDispatchTask[] = [];
+    const dispatchTasks: AgentDispatchTask[] = [];
 
     for (const imageRequest of imageRequests) {
       const sourceSession = imageRequest.sourceSessionId
@@ -1108,18 +1203,18 @@ export function App() {
     return { dispatchTasks, nextSessions };
   }
 
-  async function runEsseImageTask(task: EsseDispatchTask): Promise<string | undefined> {
+  async function runAgentImageTask(task: AgentDispatchTask): Promise<string | undefined> {
     const session = sessionsRef.current.find((currentSession) => currentSession.id === task.sessionId);
 
     if (!session) {
       throw new Error("图片不存在");
     }
-    const operationId = createOperationId("esse-image");
+    const operationId = createOperationId("agent-image");
     registerProjectOperation(operationId, task.sessionId);
 
     setSessions((currentSessions) =>
       updateAndPersistSessions(
-        markSessionEsseTask(
+        markSessionAgentTask(
           currentSessions,
           task.sessionId,
           {
@@ -1127,7 +1222,8 @@ export function App() {
             referenceFilePaths: task.referenceImagePaths,
             ...(task.generationMode === "edit" ? { sourceFilePath: task.sourceImagePath } : {})
           },
-          createMessageId("esse-task")
+          createMessageId("agent-task"),
+          activeAgentProvider.shortLabel
         ),
         selectedSessionIdRef.current
       )
@@ -1150,7 +1246,7 @@ export function App() {
               referenceImages: task.referenceImagePaths.map((filePath, index) => ({
                 filePath,
                 id: `prompt-ref-${index + 1}`,
-                label: `Esse 提示图 ${index + 1}：${getFileName(filePath)}`
+                label: `${activeAgentProvider.shortLabel} 提示图 ${index + 1}：${getFileName(filePath)}`
               }))
             }
           : {}),
@@ -1491,7 +1587,7 @@ export function App() {
               onExportSessionImage={(sessionId) => {
                 void handleExportWorkspaceSessionImage(sessionId);
               }}
-              onSendToEsse={handleSendWorkspaceImageToEsse}
+              onSendToAgent={handleSendWorkspaceImageToAgent}
               onSelectSession={handleSelectWorkspaceSession}
             />
           )}
@@ -1521,7 +1617,7 @@ export function App() {
               onClick={() => setActiveSidebarTab("project")}
             >
               <img className="sidebar-tab-mascot" src={esseTabMascot} alt="" aria-hidden="true" draggable={false} />
-              <span className="sidebar-tab-label">Esse</span>
+              <span className="sidebar-tab-label">{activeAgentProvider.shortLabel}</span>
               {projectManagerState.plans.some((plan) => plan.status === "running") ? <span className="tab-dot running" /> : null}
             </button>
             <button
@@ -1538,32 +1634,36 @@ export function App() {
           </div>
           {activeSidebarTab === "project" ? (
             <ProjectPlanPanel
+              agentProvider={activeAgentProvider}
+              agentProviders={agentProviders}
               activityLogs={projectManagerActivityLogs}
               imageSessions={sessions}
               isCreatingPlan={isCreatingProjectPlan}
-              queuedWorkspaceReferences={queuedEsseReferences}
+              queuedWorkspaceReferences={queuedAgentReferences}
               projectManagerState={projectManagerState}
+              tokenCount={agentStatusTokenCount}
               onExecutePlan={handleExecuteProjectPlan}
               onCopyImage={copyImageToClipboard}
-              onCancelBatchTaskAll={handleCancelEsseBatchTaskAll}
-              onCancelBatchTaskItem={handleCancelEsseBatchTaskItem}
+              onCancelBatchTaskAll={handleCancelAgentBatchTaskAll}
+              onCancelBatchTaskItem={handleCancelAgentBatchTaskItem}
               onOpenImagePreview={handleOpenChatImagePreview}
               onQueuedWorkspaceReferencesConsumed={(ids) => {
-                setQueuedEsseReferences((currentReferences) =>
+                setQueuedAgentReferences((currentReferences) =>
                   currentReferences.filter((reference) => !ids.includes(reference.id))
                 );
               }}
-              onRetryBatchTaskFailed={handleRetryEsseBatchTaskFailed}
-              onRetryBatchTaskItem={handleRetryEsseBatchTaskItem}
+              onRetryBatchTaskFailed={handleRetryAgentBatchTaskFailed}
+              onRetryBatchTaskItem={handleRetryAgentBatchTaskItem}
               onResolvePermission={(requestId, decision) => {
-                void handleResolveEssePermission(requestId, decision);
+                void handleResolveAgentPermission(requestId, decision);
               }}
               onResolvePreflight={(requestId, decision, modifiedCommands) => {
-                void handleResolveEssePreflight(requestId, decision, modifiedCommands);
+                void handleResolveAgentPreflight(requestId, decision, modifiedCommands);
               }}
               onSendMessage={(content, outputSize, referenceImagePaths, persona) => {
-                void handleSendEsseMessage(content, outputSize, referenceImagePaths, persona);
+                void handleSendAgentMessage(content, outputSize, referenceImagePaths, persona);
               }}
+              onSelectAgentProvider={setActiveAgentProviderId}
               onStopWork={handleStopProjectWork}
             />
           ) : (
@@ -1628,17 +1728,23 @@ function isChatHistoryMessage(
   return message.role === "user" || message.role === "assistant";
 }
 
-function buildEsseAgentHistoryMessages(state: ProjectManagerState): EsseAgentHistoryMessage[] {
+function buildAgentHistoryMessages(state: ProjectManagerState): EsseAgentHistoryMessage[] {
   return state.conversation.messages.flatMap((message) => {
     if ((message.role === "user" || message.role === "assistant") && message.content.trim()) {
-      return [{ role: message.role, content: message.content }];
+      return [
+        {
+          role: message.role,
+          content: message.content,
+          ...(message.referenceFilePaths?.length ? { referenceFilePaths: message.referenceFilePaths } : {})
+        }
+      ];
     }
 
     if (message.preflightRequest) {
       return [
         {
           role: "assistant" as const,
-          content: formatEssePreflightForAgent(message)
+          content: formatAgentPreflightForProvider(message)
         }
       ];
     }
@@ -1647,7 +1753,7 @@ function buildEsseAgentHistoryMessages(state: ProjectManagerState): EsseAgentHis
       return [
         {
           role: "assistant" as const,
-          content: formatEsseBatchTaskForAgent(message)
+          content: formatAgentBatchTaskForProvider(message)
         }
       ];
     }
@@ -1656,36 +1762,36 @@ function buildEsseAgentHistoryMessages(state: ProjectManagerState): EsseAgentHis
   });
 }
 
-function formatEssePreflightForAgent(message: ProjectManagerMessage): string {
+function formatAgentPreflightForProvider(message: ProjectManagerMessage): string {
   const request = message.preflightRequest;
   if (!request) {
     return "";
   }
 
   const decision = message.preflightDecision ?? "pending";
-  const commandLines = request.payload.commands.map((command, index) => formatEssePreflightCommandForAgent(command, index));
+  const commandLines = request.payload.commands.map((command, index) => formatAgentPreflightCommandForProvider(command, index));
 
   return [
-    `【Esse上一版待确认计划】状态：${formatEssePreflightDecisionForAgent(decision)}；工具：${request.payload.tool}；任务数：${request.payload.commands.length}；requestId：${request.requestId}`,
+    `【上一版待确认计划】状态：${formatAgentPreflightDecisionForProvider(decision)}；工具：${request.payload.tool}；任务数：${request.payload.commands.length}；requestId：${request.requestId}`,
     ...commandLines
   ].join("\n");
 }
 
-function formatEsseBatchTaskForAgent(message: ProjectManagerMessage): string {
+function formatAgentBatchTaskForProvider(message: ProjectManagerMessage): string {
   const batchTask = message.batchTask;
   if (!batchTask) {
     return "";
   }
 
   return [
-    `【Esse已提交生成计划】batchTaskId：${batchTask.batchTaskId}；任务数：${batchTask.items.length}`,
+    `【已提交生成计划】batchTaskId：${batchTask.batchTaskId}；任务数：${batchTask.items.length}`,
     ...batchTask.items.map((item, index) =>
       `任务${index + 1}：${item.displayLabel}；mode=${item.mode}；referenceImageIds=${item.command.referenceImageIds?.length ? item.command.referenceImageIds.join(",") : "无"}；referenceImageNames=${item.command.referenceImageNames?.length ? item.command.referenceImageNames.join(",") : "无"}；prompt=${item.command.prompt ?? item.promptSummary}`
     )
   ].join("\n");
 }
 
-function formatEssePreflightCommandForAgent(command: EssePreflightCommand, index: number): string {
+function formatAgentPreflightCommandForProvider(command: AgentPreflightCommand, index: number): string {
   const target =
     command.target?.type === "new"
       ? `new${command.target.sourceSessionId ? ` sourceSessionId=${command.target.sourceSessionId}` : ""}${command.target.fileName ? ` fileName=${command.target.fileName}` : ""}`
@@ -1697,7 +1803,7 @@ function formatEssePreflightCommandForAgent(command: EssePreflightCommand, index
   return `任务${index + 1}：displayLabel=${command.displayLabel ?? "未命名"}；target=${target}；mode=${command.mode ?? "未指定"}；size=${size}；referenceImageIds=${references}；referenceImageNames=${referenceNames}；prompt=${command.prompt ?? ""}`;
 }
 
-function formatEssePreflightDecisionForAgent(
+function formatAgentPreflightDecisionForProvider(
   decision: NonNullable<ProjectManagerMessage["preflightDecision"]>
 ): string {
   if (decision === "execute") {
@@ -1744,7 +1850,13 @@ function getSessionRetryRequest(
 
   const generationContext = [...session.chatMessages]
     .reverse()
-    .find((message) => message.contextType === "batch-prompt" || message.contextType === "project-command" || message.contextType === "esse-task");
+    .find(
+      (message) =>
+        message.contextType === "batch-prompt" ||
+        message.contextType === "project-command" ||
+        message.contextType === "agent-task" ||
+        message.contextType === "esse-task"
+    );
 
   return {
     prompt,
@@ -1892,12 +2004,13 @@ function appendProjectManagerError(state: ProjectManagerState, content: string, 
   };
 }
 
-function getEsseDisplayErrorMessage(error: unknown): string {
+function getAgentDisplayErrorMessage(error: unknown, providerLabel: string): string {
+  const fallback = `${providerLabel} 处理失败`;
   if (!(error instanceof Error) || !error.message) {
-    return "Esse 处理失败";
+    return fallback;
   }
 
-  return error.message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i, "").trim() || "Esse 处理失败";
+  return error.message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i, "").trim() || fallback;
 }
 
 function upsertProjectManagerAssistantMessage(
@@ -1923,9 +2036,9 @@ function upsertProjectManagerAssistantMessage(
   };
 }
 
-function appendEssePreflightMessage(
+function appendAgentPreflightMessage(
   state: ProjectManagerState,
-  request: EssePreflightRequest,
+  request: AgentPreflightRequest,
   messageId: string
 ): ProjectManagerState {
   return {
@@ -1946,9 +2059,9 @@ function appendEssePreflightMessage(
   };
 }
 
-function appendEssePermissionMessage(
+function appendAgentPermissionMessage(
   state: ProjectManagerState,
-  request: EssePermissionRequest,
+  request: AgentPermissionRequest,
   messageId: string
 ): ProjectManagerState {
   return {
@@ -1969,9 +2082,9 @@ function appendEssePermissionMessage(
   };
 }
 
-function upsertEsseBashExecutionMessage(
+function upsertAgentBashExecutionMessage(
   state: ProjectManagerState,
-  event: EsseBashExecutionEvent,
+  event: AgentBashExecutionEvent,
   messageId: string
 ): ProjectManagerState {
   const existing = state.conversation.messages.find((message) => message.bashExecution?.toolCallId === event.toolCallId);
@@ -1981,7 +2094,7 @@ function upsertEsseBashExecutionMessage(
       ...event
     },
     content: "",
-    contextType: "esse-bash-execution",
+    contextType: "agent-bash-execution",
     id: existing?.id ?? messageId,
     role: "context"
   };
@@ -1997,7 +2110,11 @@ function upsertEsseBashExecutionMessage(
   };
 }
 
-function markEssePreflightDecision(
+function hasBashExecutionOutputUpdate(event: AgentBashExecutionEvent): boolean {
+  return Boolean(event.output || event.outputPath || event.fullOutputPath);
+}
+
+function markAgentPreflightDecision(
   state: ProjectManagerState,
   requestId: string,
   decision: Exclude<ProjectManagerMessage["preflightDecision"], "pending" | undefined>
@@ -2018,7 +2135,7 @@ function markEssePreflightDecision(
   };
 }
 
-function markEssePermissionDecision(
+function markAgentPermissionDecision(
   state: ProjectManagerState,
   requestId: string,
   decision: Exclude<ProjectManagerMessage["permissionDecision"], "pending" | undefined>
@@ -2086,6 +2203,38 @@ function formatProjectLabel(createdAt: string): string {
 function getFileName(filePath: string): string {
   const lastSlash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
   return filePath.slice(lastSlash + 1);
+}
+
+function estimateTokenCount(text: string): number {
+  const trimmedText = text.trim();
+  if (!trimmedText) {
+    return 0;
+  }
+
+  const cjkCharacters = trimmedText.match(/[\u3400-\u9fff\uf900-\ufaff]/g)?.length ?? 0;
+  const nonCjkCharacterCount = trimmedText
+    .replace(/[\u3400-\u9fff\uf900-\ufaff]/g, " ")
+    .replace(/\s+/g, "").length;
+
+  return Math.max(1, cjkCharacters + Math.ceil(nonCjkCharacterCount / 4));
+}
+
+function estimateAgentInputTokenCount(
+  history: EsseAgentHistoryMessage[],
+  sessions: ImageSession[],
+  referenceImagePaths: string[]
+): number {
+  const contextText = JSON.stringify({
+    messages: history,
+    referenceImageCount: referenceImagePaths.length,
+    sessions: sessions.map((session) => ({
+      fileName: session.fileName,
+      generatedFileCount: session.generatedFilePaths?.length ?? 0,
+      id: session.id
+    }))
+  });
+
+  return estimateTokenCount(contextText);
 }
 
 function getBrowserStorage(): Pick<Storage, "getItem" | "setItem"> | undefined {

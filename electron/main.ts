@@ -1,4 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, protocol, screen, shell } from "electron";
+import type { IpcMainInvokeEvent } from "electron";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { appendFile, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
@@ -6,9 +7,11 @@ import { pathToFileURL } from "node:url";
 import type {
   AddEsseSkillPathRequest,
   AddEsseMemoryRequest,
+  CancelAgentBatchTaskAllRequest,
+  CancelAgentBatchTaskAllResponse,
+  CancelAgentBatchTaskItemRequest,
+  CancelAgentBatchTaskItemResponse,
   CancelOperationRequest,
-  CancelEsseBatchTaskAllRequest,
-  CancelEsseBatchTaskItemRequest,
   CopyImageToClipboardRequest,
   CreatePlaceholderImageRequest,
   DeleteProjectRequest,
@@ -19,23 +22,31 @@ import type {
   OpenProjectRequest,
   RemoveEsseMemoryRequest,
   RemoveEsseSkillRequest,
-  RetryEsseBatchTaskFailedRequest,
-  RetryEsseBatchTaskItemRequest,
+  RetryAgentBatchTaskFailedRequest,
+  RetryAgentBatchTaskFailedResponse,
+  RetryAgentBatchTaskItemRequest,
+  RetryAgentBatchTaskItemResponse,
   ReadEsseSkillFileRequest,
   RenameProjectRequest,
   SaveApiSettingsRequest,
   SaveReferenceImageRequest,
   SaveProjectSnapshotRequest,
+  AgentPermissionResponse,
+  AgentPreflightResponse,
+  AgentProviderId,
+  SendAgentMessageRequest,
+  SendAgentMessageResponse,
   SendChatMessageRequest,
   SendEsseMessageRequest,
-  EssePermissionResponse,
-  EssePreflightResponse,
+  SendEsseMessageResponse,
   ShowFileInFolderRequest,
   SetEsseSkillEnabledRequest,
   ProjectSnapshot
 } from "./ipcTypes";
 import { createAppLogger, type AppLogger } from "./services/appLogger";
 import { createBatchImagerCommandPolicy } from "./services/agentCommandPolicy";
+import { getAgentProviderDescriptor, isAgentProviderId } from "./services/agentProviders";
+import { createAgentProviderRegistry } from "./services/agentProviderRegistry";
 import { createEsseBashTool } from "./services/esseBashTool";
 import { syncBuiltInSkills } from "./services/esseBuiltInSkills";
 import { createBlankGenerationSeed } from "./services/blankGenerationSeed";
@@ -45,7 +56,7 @@ import { createEsseImagePreflightExecutor, retryEsseBatchTaskItem } from "./serv
 import { createEsseMemoryStore, type EsseMemoryStore } from "./services/esseMemoryStore";
 import { createEssePackagePreflightExecutor } from "./services/essePackagePreflightExecutor";
 import { EssePermissionBroker } from "./services/essePermissionBroker";
-import { DEFAULT_ESSE_PERMISSION_POLICY } from "./services/essePermissionPolicy";
+import { DEFAULT_AGENT_WORKSPACE_PERMISSION_POLICY } from "./services/agentWorkspacePermissionPolicy";
 import { createProjectSnapshotWorkspaceRuntime } from "./services/esseWorkspaceRuntime";
 import { EssePreflightBroker } from "./services/essePreflightBroker";
 import { createEsseSkillLoader, type EsseSkillLoader } from "./services/esseSkillLoader";
@@ -279,6 +290,13 @@ function registerImageProtocol(): void {
 }
 
 function registerIpc(appLogger: AppLogger): void {
+  const agentProviderRegistry = createAgentProviderRegistry<IpcMainInvokeEvent>([
+    {
+      descriptor: requireAgentProviderDescriptor("esse"),
+      run: (request, event) => runEsseProviderTurn(event, request)
+    }
+  ]);
+
   appLogger.subscribe((entry) => {
     for (const window of BrowserWindow.getAllWindows()) {
       window.webContents.send("logs:entry", entry);
@@ -647,7 +665,7 @@ function registerIpc(appLogger: AppLogger): void {
 
     const result = await packageGeneratedImages({
       desktopDirectory: app.getPath("desktop"),
-      fileName: request.fileName ?? "Esse-导出图片.zip",
+      fileName: request.fileName ?? "BatchImager-导出图片.zip",
       imagePaths: request.imagePaths
     });
 
@@ -732,188 +750,65 @@ function registerIpc(appLogger: AppLogger): void {
     }
   });
 
-  ipcMain.handle("esse:send-message", async (event, request: SendEsseMessageRequest) => {
+  ipcMain.handle("agent:list-providers", () => agentProviderRegistry.listProviders());
+
+  ipcMain.handle("agent:send-message", async (event, request: SendAgentMessageRequest): Promise<SendAgentMessageResponse> => {
+    assertSendAgentMessageRequest(request);
+    return agentProviderRegistry.dispatchMessage(request, event);
+  });
+
+  ipcMain.handle("esse:send-message", async (event, request: SendEsseMessageRequest): Promise<SendEsseMessageResponse> => {
     assertSendEsseMessageRequest(request);
-    const projectDirectory = requireActiveProjectDirectory();
-
-    appLogger.info("Esse IPC received", {
-      context: "esse-agent",
-      data: {
-        imageCount: request.sessions.length,
-        messageCount: request.messages.length,
-        outputSize: request.outputSize,
-        persona: request.persona
-      },
-      publicMessage: "收到 Esse 消息。"
-    });
-
-    try {
-      const result = await withCancelableOperation(request.operationId, async (signal) => {
-        const permissionAllowList = new Set<string>();
-        const skillLoader = requireEsseSkillLoader();
-        await skillLoader.reload();
-        const bashTool = await createEsseBashTool({
-          commandPolicy: createBatchImagerCommandPolicy({ projectDirectory }),
-          permissionBroker: essePermissionBroker,
-          projectDirectory,
-          sessionAllowList: permissionAllowList,
-          sessionId: "esse-agent",
-          signal,
-          skillLoader,
-          userDataDirectory: app.getPath("userData"),
-          webContents: event.sender
-        });
-        const workspaceToolRuntime = createProjectSnapshotWorkspaceRuntime({
-          executeImagePreflightTool: createEsseImagePreflightExecutor({
-            batchTaskRegistry: esseBatchTaskRegistry,
-            generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger),
-            projectDirectory
-          }),
-          executePackagePreflightTool: createEssePackagePreflightExecutor({
-            desktopDirectory: app.getPath("desktop"),
-            packageGeneratedImages
-          }),
-          initialSnapshot: await openProject(projectDirectory),
-          memoryStore: getEsseMemoryStore(),
-          recordToolCalls: true,
-          requestPermission: (payload) =>
-            essePermissionBroker.request(event.sender, payload, {
-              policy: DEFAULT_ESSE_PERMISSION_POLICY,
-              sessionAllowList: permissionAllowList,
-              signal
-            }),
-          requestPreflight: (payload) => essePreflightBroker.request(event.sender, payload, { signal }),
-          getTurnReferenceImagePaths: () => request.referenceImagePaths ?? [],
-          sink: getProjectSnapshotSink(projectDirectory)
-        });
-
-        return await runEsseAgentTurn(request, loadTuziLlmConfig(), projectDirectory, {
-          bashTool,
-          logger: appLogger,
-          onAssistantMessageUpdate: (content) => {
-            event.sender.send("esse:assistant-message-update", {
-              content,
-              ...(request.operationId ? { operationId: request.operationId } : {})
-            });
-          },
-          signal,
-          skillLoader,
-          workspaceToolRuntime
-        });
-      });
-
-      return {
-        reply: result.reply
-      };
-    } catch (error) {
-      appLogger.error("Esse request failed", {
-        context: "esse-agent",
-        error,
-        publicMessage: `Esse 处理失败：${toUserErrorMessage(error)}`
-      });
-      throw error;
-    }
+    return runEsseProviderTurn(event, request);
   });
 
-  ipcMain.handle("esse:preflight-response", async (_event, response: EssePreflightResponse) => {
-    assertEssePreflightResponse(response);
-    const accepted = essePreflightBroker.respond(response);
-    if (accepted) {
-      await markEssePreflightDecision(requireActiveProjectDirectory(), response);
-    }
-    return { accepted };
-  });
+  ipcMain.handle("agent:preflight-response", async (_event, response: AgentPreflightResponse) =>
+    handleAgentPreflightResponse(response)
+  );
 
-  ipcMain.handle("esse:permission-response", async (_event, response: EssePermissionResponse) => {
-    assertEssePermissionResponse(response);
-    const accepted = essePermissionBroker.respond(response);
-    if (accepted) {
-      await markEssePermissionDecision(requireActiveProjectDirectory(), response);
-    }
-    return { accepted };
-  });
+  ipcMain.handle("esse:preflight-response", async (_event, response: AgentPreflightResponse) =>
+    handleAgentPreflightResponse(response)
+  );
 
-  ipcMain.handle("esse:batch-task-cancel-item", (_event, request: CancelEsseBatchTaskItemRequest) => {
-    assertCancelEsseBatchTaskItemRequest(request);
-    const result = esseBatchTaskRegistry.cancelItem(request.batchTaskId, request.sessionId);
-    if (result.canceled) {
-      appLogger.info("Esse batch task item canceled", {
-        context: `esse-batch:${request.batchTaskId}`,
-        data: { sessionId: request.sessionId },
-        publicMessage: "已取消这张图的生成。"
-      });
-    }
-    return { canceled: result.canceled };
-  });
+  ipcMain.handle("agent:permission-response", async (_event, response: AgentPermissionResponse) =>
+    handleAgentPermissionResponse(response)
+  );
 
-  ipcMain.handle("esse:batch-task-cancel-all", (_event, request: CancelEsseBatchTaskAllRequest) => {
-    assertCancelEsseBatchTaskAllRequest(request);
-    const result = esseBatchTaskRegistry.cancelAll(request.batchTaskId);
-    if (result.canceledCount > 0) {
-      appLogger.info("Esse batch task canceled", {
-        context: `esse-batch:${request.batchTaskId}`,
-        data: { canceledCount: result.canceledCount },
-        publicMessage: `已取消 ${result.canceledCount} 个生成任务。`
-      });
-    }
-    return result;
-  });
+  ipcMain.handle("esse:permission-response", async (_event, response: AgentPermissionResponse) =>
+    handleAgentPermissionResponse(response)
+  );
 
-  ipcMain.handle("esse:batch-task-retry-item", async (_event, request: RetryEsseBatchTaskItemRequest) => {
-    assertRetryEsseBatchTaskItemRequest(request);
-    const projectDirectory = requireActiveProjectDirectory();
-    const result = await retryEsseBatchTaskItem(
-      request,
-      {
-        batchTaskRegistry: esseBatchTaskRegistry,
-        generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger),
-        projectDirectory
-      },
-      await createRetryWorkspaceRuntime(projectDirectory)
-    );
-    if (result.accepted) {
-      appLogger.info("Esse batch task item retry accepted", {
-        context: `esse-batch:${request.batchTaskId}`,
-        data: { retryCount: result.retryCount, sessionId: request.sessionId },
-        publicMessage: "已重新提交这张图。"
-      });
-    }
-    return result;
-  });
+  ipcMain.handle("agent:batch-task-cancel-item", (_event, request: CancelAgentBatchTaskItemRequest) =>
+    handleAgentBatchTaskCancelItem(request)
+  );
 
-  ipcMain.handle("esse:batch-task-retry-failed", async (_event, request: RetryEsseBatchTaskFailedRequest) => {
-    assertRetryEsseBatchTaskFailedRequest(request);
-    const projectDirectory = requireActiveProjectDirectory();
-    const runtime = await createRetryWorkspaceRuntime(projectDirectory);
-    const snapshot = runtime.getState();
-    const failedSessionIds = findBatchTaskFailedSessionIds(snapshot, request.batchTaskId);
-    const rejected: Array<{ reason: string; sessionId: string }> = [];
-    let acceptedCount = 0;
-    for (const sessionId of failedSessionIds) {
-      const result = await retryEsseBatchTaskItem(
-        { batchTaskId: request.batchTaskId, sessionId },
-        {
-          batchTaskRegistry: esseBatchTaskRegistry,
-          generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger),
-          projectDirectory
-        },
-        runtime
-      );
-      if (result.accepted) {
-        acceptedCount += 1;
-      } else {
-        rejected.push({ reason: result.reason, sessionId });
-      }
-    }
-    if (acceptedCount > 0) {
-      appLogger.info("Esse batch task failed items retry accepted", {
-        context: `esse-batch:${request.batchTaskId}`,
-        data: { acceptedCount, rejectedCount: rejected.length },
-        publicMessage: `已重新提交 ${acceptedCount} 个失败任务。`
-      });
-    }
-    return { acceptedCount, rejected };
-  });
+  ipcMain.handle("esse:batch-task-cancel-item", (_event, request: CancelAgentBatchTaskItemRequest) =>
+    handleAgentBatchTaskCancelItem(request)
+  );
+
+  ipcMain.handle("agent:batch-task-cancel-all", (_event, request: CancelAgentBatchTaskAllRequest) =>
+    handleAgentBatchTaskCancelAll(request)
+  );
+
+  ipcMain.handle("esse:batch-task-cancel-all", (_event, request: CancelAgentBatchTaskAllRequest) =>
+    handleAgentBatchTaskCancelAll(request)
+  );
+
+  ipcMain.handle("agent:batch-task-retry-item", async (_event, request: RetryAgentBatchTaskItemRequest) =>
+    handleAgentBatchTaskRetryItem(request)
+  );
+
+  ipcMain.handle("esse:batch-task-retry-item", async (_event, request: RetryAgentBatchTaskItemRequest) =>
+    handleAgentBatchTaskRetryItem(request)
+  );
+
+  ipcMain.handle("agent:batch-task-retry-failed", async (_event, request: RetryAgentBatchTaskFailedRequest) =>
+    handleAgentBatchTaskRetryFailed(request)
+  );
+
+  ipcMain.handle("esse:batch-task-retry-failed", async (_event, request: RetryAgentBatchTaskFailedRequest) =>
+    handleAgentBatchTaskRetryFailed(request)
+  );
 
   ipcMain.handle("logs:list", () => appLogger.getEntries());
 }
@@ -925,7 +820,212 @@ async function createRetryWorkspaceRuntime(projectDirectory: string) {
   });
 }
 
-async function markEssePreflightDecision(projectDirectory: string, response: EssePreflightResponse): Promise<void> {
+function handleAgentBatchTaskCancelItem(request: CancelAgentBatchTaskItemRequest): CancelAgentBatchTaskItemResponse {
+  assertCancelAgentBatchTaskItemRequest(request);
+  const appLogger = requireLogger();
+  const result = esseBatchTaskRegistry.cancelItem(request.batchTaskId, request.sessionId);
+  if (result.canceled) {
+    appLogger.info("Agent batch task item canceled", {
+      context: `agent-batch:${request.batchTaskId}`,
+      data: { sessionId: request.sessionId },
+      publicMessage: "已取消这张图的生成。"
+    });
+  }
+  return { canceled: result.canceled };
+}
+
+function handleAgentBatchTaskCancelAll(request: CancelAgentBatchTaskAllRequest): CancelAgentBatchTaskAllResponse {
+  assertCancelAgentBatchTaskAllRequest(request);
+  const appLogger = requireLogger();
+  const result = esseBatchTaskRegistry.cancelAll(request.batchTaskId);
+  if (result.canceledCount > 0) {
+    appLogger.info("Agent batch task canceled", {
+      context: `agent-batch:${request.batchTaskId}`,
+      data: { canceledCount: result.canceledCount },
+      publicMessage: `已取消 ${result.canceledCount} 个生成任务。`
+    });
+  }
+  return result;
+}
+
+async function handleAgentBatchTaskRetryItem(
+  request: RetryAgentBatchTaskItemRequest
+): Promise<RetryAgentBatchTaskItemResponse> {
+  assertRetryAgentBatchTaskItemRequest(request);
+  const projectDirectory = requireActiveProjectDirectory();
+  const appLogger = requireLogger();
+  const result = await retryEsseBatchTaskItem(
+    request,
+    {
+      batchTaskRegistry: esseBatchTaskRegistry,
+      generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger),
+      projectDirectory
+    },
+    await createRetryWorkspaceRuntime(projectDirectory)
+  );
+  if (result.accepted) {
+    appLogger.info("Agent batch task item retry accepted", {
+      context: `agent-batch:${request.batchTaskId}`,
+      data: { retryCount: result.retryCount, sessionId: request.sessionId },
+      publicMessage: "已重新提交这张图。"
+    });
+  }
+  return result;
+}
+
+async function handleAgentBatchTaskRetryFailed(
+  request: RetryAgentBatchTaskFailedRequest
+): Promise<RetryAgentBatchTaskFailedResponse> {
+  assertRetryAgentBatchTaskFailedRequest(request);
+  const projectDirectory = requireActiveProjectDirectory();
+  const appLogger = requireLogger();
+  const runtime = await createRetryWorkspaceRuntime(projectDirectory);
+  const snapshot = runtime.getState();
+  const failedSessionIds = findBatchTaskFailedSessionIds(snapshot, request.batchTaskId);
+  const rejected: Array<{ reason: string; sessionId: string }> = [];
+  let acceptedCount = 0;
+  for (const sessionId of failedSessionIds) {
+    const result = await retryEsseBatchTaskItem(
+      { batchTaskId: request.batchTaskId, sessionId },
+      {
+        batchTaskRegistry: esseBatchTaskRegistry,
+        generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger),
+        projectDirectory
+      },
+      runtime
+    );
+    if (result.accepted) {
+      acceptedCount += 1;
+    } else {
+      rejected.push({ reason: result.reason, sessionId });
+    }
+  }
+  if (acceptedCount > 0) {
+    appLogger.info("Agent batch task failed items retry accepted", {
+      context: `agent-batch:${request.batchTaskId}`,
+      data: { acceptedCount, rejectedCount: rejected.length },
+      publicMessage: `已重新提交 ${acceptedCount} 个失败任务。`
+    });
+  }
+  return { acceptedCount, rejected };
+}
+
+function requireAgentProviderDescriptor(providerId: AgentProviderId) {
+  const descriptor = getAgentProviderDescriptor(providerId);
+  if (!descriptor) {
+    throw new Error(`Agent provider descriptor not found: ${providerId}`);
+  }
+  return descriptor;
+}
+
+async function runEsseProviderTurn(event: IpcMainInvokeEvent, request: SendEsseMessageRequest): Promise<SendEsseMessageResponse> {
+  const appLogger = requireLogger();
+  const projectDirectory = requireActiveProjectDirectory();
+
+  appLogger.info("Esse agent provider IPC received", {
+    context: "agent-provider:esse",
+    data: {
+      imageCount: request.sessions.length,
+      messageCount: request.messages.length,
+      outputSize: request.outputSize,
+      persona: request.persona
+    },
+    publicMessage: "收到 Esse 消息。"
+  });
+
+  try {
+    const result = await withCancelableOperation(request.operationId, async (signal) => {
+      const permissionAllowList = new Set<string>();
+      const skillLoader = requireEsseSkillLoader();
+      await skillLoader.reload();
+      const bashTool = await createEsseBashTool({
+        commandPolicy: createBatchImagerCommandPolicy({ projectDirectory }),
+        permissionBroker: essePermissionBroker,
+        projectDirectory,
+        sessionAllowList: permissionAllowList,
+        sessionId: "esse-agent",
+        signal,
+        skillLoader,
+        userDataDirectory: app.getPath("userData"),
+        webContents: event.sender
+      });
+      const openedSnapshot = await openProject(projectDirectory);
+      const workspaceSnapshot = request.projectManagerState
+        ? { ...openedSnapshot, projectManagerState: request.projectManagerState }
+        : openedSnapshot;
+      const workspaceToolRuntime = createProjectSnapshotWorkspaceRuntime({
+        executeImagePreflightTool: createEsseImagePreflightExecutor({
+          batchTaskRegistry: esseBatchTaskRegistry,
+          generateImage: createProjectImageGenerationExecutor(projectDirectory, appLogger),
+          projectDirectory
+        }),
+        executePackagePreflightTool: createEssePackagePreflightExecutor({
+          desktopDirectory: app.getPath("desktop"),
+          packageGeneratedImages
+        }),
+        initialSnapshot: workspaceSnapshot,
+        memoryStore: getEsseMemoryStore(),
+        recordToolCalls: true,
+        requestPermission: (payload) =>
+          essePermissionBroker.request(event.sender, payload, {
+            policy: DEFAULT_AGENT_WORKSPACE_PERMISSION_POLICY,
+            sessionAllowList: permissionAllowList,
+            signal
+          }),
+        requestPreflight: (payload) => essePreflightBroker.request(event.sender, payload, { signal }),
+        getTurnReferenceImagePaths: () => request.referenceImagePaths ?? [],
+        sink: getProjectSnapshotSink(projectDirectory)
+      });
+
+      return await runEsseAgentTurn(request, loadTuziLlmConfig(), projectDirectory, {
+        bashTool,
+        logger: appLogger,
+        onAssistantMessageUpdate: (content) => {
+          const updateEvent = {
+            content,
+            ...(request.operationId ? { operationId: request.operationId } : {})
+          };
+          event.sender.send("agent:assistant-message-update", updateEvent);
+          event.sender.send("esse:assistant-message-update", updateEvent);
+        },
+        signal,
+        skillLoader,
+        workspaceToolRuntime
+      });
+    });
+
+    return {
+      reply: result.reply
+    };
+  } catch (error) {
+    appLogger.error("Esse agent provider request failed", {
+      context: "agent-provider:esse",
+      error,
+      publicMessage: `Esse 处理失败：${toUserErrorMessage(error)}`
+    });
+    throw error;
+  }
+}
+
+async function handleAgentPreflightResponse(response: AgentPreflightResponse): Promise<{ accepted: boolean }> {
+  assertAgentPreflightResponse(response);
+  const accepted = essePreflightBroker.respond(response);
+  if (accepted) {
+    await markAgentPreflightDecision(requireActiveProjectDirectory(), response);
+  }
+  return { accepted };
+}
+
+async function handleAgentPermissionResponse(response: AgentPermissionResponse): Promise<{ accepted: boolean }> {
+  assertAgentPermissionResponse(response);
+  const accepted = essePermissionBroker.respond(response);
+  if (accepted) {
+    await markAgentPermissionDecision(requireActiveProjectDirectory(), response);
+  }
+  return { accepted };
+}
+
+async function markAgentPreflightDecision(projectDirectory: string, response: AgentPreflightResponse): Promise<void> {
   await getProjectSnapshotSink(projectDirectory).apply((snapshot) => ({
     ...snapshot,
     projectManagerState: snapshot.projectManagerState
@@ -944,7 +1044,7 @@ async function markEssePreflightDecision(projectDirectory: string, response: Ess
   }), { countRevision: false });
 }
 
-async function markEssePermissionDecision(projectDirectory: string, response: EssePermissionResponse): Promise<void> {
+async function markAgentPermissionDecision(projectDirectory: string, response: AgentPermissionResponse): Promise<void> {
   await getProjectSnapshotSink(projectDirectory).apply((snapshot) => ({
     ...snapshot,
     projectManagerState: snapshot.projectManagerState
@@ -1425,7 +1525,7 @@ function assertShowFileInFolderRequest(request: ShowFileInFolderRequest): void {
   }
 }
 
-function assertCancelEsseBatchTaskItemRequest(request: CancelEsseBatchTaskItemRequest): void {
+function assertCancelAgentBatchTaskItemRequest(request: CancelAgentBatchTaskItemRequest): void {
   if (
     typeof request !== "object" ||
     request === null ||
@@ -1434,17 +1534,17 @@ function assertCancelEsseBatchTaskItemRequest(request: CancelEsseBatchTaskItemRe
     typeof request.sessionId !== "string" ||
     !request.sessionId.trim()
   ) {
-    throw new Error("Invalid Esse batch task item cancel request");
+    throw new Error("Invalid agent batch task item cancel request");
   }
 }
 
-function assertCancelEsseBatchTaskAllRequest(request: CancelEsseBatchTaskAllRequest): void {
+function assertCancelAgentBatchTaskAllRequest(request: CancelAgentBatchTaskAllRequest): void {
   if (typeof request !== "object" || request === null || typeof request.batchTaskId !== "string" || !request.batchTaskId.trim()) {
-    throw new Error("Invalid Esse batch task cancel request");
+    throw new Error("Invalid agent batch task cancel request");
   }
 }
 
-function assertRetryEsseBatchTaskItemRequest(request: RetryEsseBatchTaskItemRequest): void {
+function assertRetryAgentBatchTaskItemRequest(request: RetryAgentBatchTaskItemRequest): void {
   if (
     typeof request !== "object" ||
     request === null ||
@@ -1453,13 +1553,13 @@ function assertRetryEsseBatchTaskItemRequest(request: RetryEsseBatchTaskItemRequ
     typeof request.sessionId !== "string" ||
     !request.sessionId.trim()
   ) {
-    throw new Error("Invalid Esse batch task item retry request");
+    throw new Error("Invalid agent batch task item retry request");
   }
 }
 
-function assertRetryEsseBatchTaskFailedRequest(request: RetryEsseBatchTaskFailedRequest): void {
+function assertRetryAgentBatchTaskFailedRequest(request: RetryAgentBatchTaskFailedRequest): void {
   if (typeof request !== "object" || request === null || typeof request.batchTaskId !== "string" || !request.batchTaskId.trim()) {
-    throw new Error("Invalid Esse batch task retry request");
+    throw new Error("Invalid agent batch task retry request");
   }
 }
 
@@ -1525,7 +1625,7 @@ function assertDeleteProjectRequest(request: DeleteProjectRequest): void {
   }
 }
 
-function assertEssePreflightResponse(response: EssePreflightResponse): void {
+function assertAgentPreflightResponse(response: AgentPreflightResponse): void {
   if (
     typeof response !== "object" ||
     response === null ||
@@ -1535,11 +1635,11 @@ function assertEssePreflightResponse(response: EssePreflightResponse): void {
     (response.detail !== undefined && typeof response.detail !== "string") ||
     (response.modifiedCommands !== undefined && !Array.isArray(response.modifiedCommands))
   ) {
-    throw new Error("Invalid Esse preflight response");
+    throw new Error("Invalid agent preflight response");
   }
 }
 
-function assertEssePermissionResponse(response: EssePermissionResponse): void {
+function assertAgentPermissionResponse(response: AgentPermissionResponse): void {
   if (
     typeof response !== "object" ||
     response === null ||
@@ -1548,7 +1648,7 @@ function assertEssePermissionResponse(response: EssePermissionResponse): void {
     (response.decision !== "allow-once" && response.decision !== "allow-session" && response.decision !== "deny") ||
     (response.reason !== undefined && typeof response.reason !== "string")
   ) {
-    throw new Error("Invalid Esse permission response");
+    throw new Error("Invalid agent permission response");
   }
 }
 
@@ -1558,6 +1658,14 @@ function requireActiveProjectDirectory(): string {
   }
 
   return activeProjectDirectory;
+}
+
+function requireLogger(): AppLogger {
+  if (!logger) {
+    throw new Error("Logger is not ready");
+  }
+
+  return logger;
 }
 
 function assertSaveReferenceImageRequest(request: SaveReferenceImageRequest): void {
@@ -1682,6 +1790,14 @@ function warmupImageSessionAgent(appLogger: AppLogger): void {
     });
 }
 
+function assertSendAgentMessageRequest(request: SendAgentMessageRequest): void {
+  if (typeof request !== "object" || request === null || !isAgentProviderId(request.providerId)) {
+    throw new Error("Invalid agent message request");
+  }
+
+  assertSendEsseMessageRequest(request);
+}
+
 function assertSendEsseMessageRequest(request: SendEsseMessageRequest): void {
   if (
     typeof request !== "object" ||
@@ -1699,8 +1815,18 @@ function assertSendEsseMessageRequest(request: SendEsseMessageRequest): void {
         typeof message === "object" &&
         message !== null &&
         (message.role === "user" || message.role === "assistant") &&
-        typeof message.content === "string"
+        typeof message.content === "string" &&
+        (message.referenceFilePaths === undefined ||
+          (Array.isArray(message.referenceFilePaths) &&
+            message.referenceFilePaths.every((referenceFilePath) => typeof referenceFilePath === "string")))
     ) ||
+    (request.projectManagerState !== undefined &&
+      (typeof request.projectManagerState !== "object" ||
+        request.projectManagerState === null ||
+        !Array.isArray(request.projectManagerState.plans) ||
+        typeof request.projectManagerState.conversation !== "object" ||
+        request.projectManagerState.conversation === null ||
+        !Array.isArray(request.projectManagerState.conversation.messages))) ||
     !Array.isArray(request.sessions) ||
     !request.sessions.every(
       (session) =>

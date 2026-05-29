@@ -12,7 +12,7 @@ describe("session activity UI", () => {
     expect(readProjectFile("src/App.tsx")).toContain("activityLogs={selectedSessionActivityLogs}");
   });
 
-  test("uses one lightweight agent status line for Esse and image sessions", () => {
+  test("uses one lightweight agent status line for project and image sessions", () => {
     const appSource = readProjectFile("src/App.tsx");
     const sessionPanelSource = readProjectFile("src/components/SessionPanel.tsx");
     const panelSource = readProjectFile("src/components/ProjectPlanPanel.tsx");
@@ -25,6 +25,7 @@ describe("session activity UI", () => {
     expect(sessionPanelSource).toContain("<AgentStatusLine");
     expect(statusLineSource).toContain("agent-status-line");
     expect(statusLineSource).toContain("agent-status-text");
+    expect(statusLineSource).toContain("agent-status-token");
     expect(panelSource).toContain("currentActivityLog");
     expect(sessionPanelSource).toContain("currentActivityLog");
     expect(panelSource).not.toContain("Esse 状态");

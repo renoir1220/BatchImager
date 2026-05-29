@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent, FormEvent, MouseEvent } from "react";
 import type {
+  AgentPermissionRequest,
+  AgentPermissionResponse,
+  AgentPreflightCommand,
+  AgentPreflightRequest,
+  AgentPreflightResponse,
+  AgentProviderDescriptor,
+  AgentProviderId,
   AppLogEntry,
-  EssePermissionRequest,
-  EssePermissionResponse,
-  EssePreflightCommand,
-  EssePreflightRequest,
-  EssePreflightResponse
 } from "../../electron/ipcTypes";
 import type {
   BatchPlan,
@@ -44,11 +46,14 @@ import { getSessionGenerationSourcePath } from "../domain/imageSessions";
 import type { ImageSession } from "../types/image";
 
 interface ProjectPlanPanelProps {
+  agentProvider?: AgentProviderDescriptor;
+  agentProviders?: AgentProviderDescriptor[];
   activityLogs: AppLogEntry[];
   imageSessions?: ImageSession[];
   isCreatingPlan: boolean;
   projectManagerState: ProjectManagerState;
   queuedWorkspaceReferences?: QueuedWorkspaceReference[];
+  tokenCount?: number | null;
   onExecutePlan: (planId: string, mode: ProjectPlanExecutionMode) => void;
   onCopyImage: (imagePath: string) => void;
   onCancelBatchTaskAll: (batchTaskId: string) => void;
@@ -57,9 +62,10 @@ interface ProjectPlanPanelProps {
   onQueuedWorkspaceReferencesConsumed?: (ids: string[]) => void;
   onRetryBatchTaskFailed: (batchTaskId: string) => void;
   onRetryBatchTaskItem: (batchTaskId: string, sessionId: string) => void;
-  onResolvePermission: (requestId: string, decision: EssePermissionResponse["decision"]) => void;
-  onResolvePreflight: (requestId: string, decision: EssePreflightResponse["decision"], modifiedCommands?: EssePreflightCommand[]) => void;
+  onResolvePermission: (requestId: string, decision: AgentPermissionResponse["decision"]) => void;
+  onResolvePreflight: (requestId: string, decision: AgentPreflightResponse["decision"], modifiedCommands?: AgentPreflightCommand[]) => void;
   onSendMessage: (content: string, outputSize?: string, referenceImagePaths?: string[], persona?: EssePersona) => void;
+  onSelectAgentProvider?: (providerId: AgentProviderId) => void;
   onStopWork: () => void;
 }
 
@@ -75,12 +81,33 @@ const ESSE_PERSONA_OPTIONS: OsSelectOption<EssePersona>[] = [
   { description: "爱问细节", label: "问题少女", value: "question-girl" },
   { description: "规则优先", label: "无情的机器人", value: "robot" }
 ];
+
+const DEFAULT_AGENT_PROVIDER: AgentProviderDescriptor = {
+  description: "BatchImager 当前内置的图片工作台协作 agent。",
+  id: "esse",
+  label: "Esse",
+  shortLabel: "Esse",
+  status: "available",
+  supportsPersona: true,
+  workbenchCapabilityIds: [
+    "get_project_overview",
+    "list_sessions",
+    "get_session_records",
+    "read_image_metadata",
+    "list_reference_images",
+    "list_remembered_preferences",
+    "scan_unreferenced_files"
+  ]
+};
 export function ProjectPlanPanel({
+  agentProvider = DEFAULT_AGENT_PROVIDER,
+  agentProviders = [DEFAULT_AGENT_PROVIDER],
   activityLogs,
   imageSessions = [],
   isCreatingPlan,
   projectManagerState,
   queuedWorkspaceReferences = [],
+  tokenCount,
   onExecutePlan,
   onCopyImage,
   onCancelBatchTaskAll,
@@ -92,10 +119,15 @@ export function ProjectPlanPanel({
   onResolvePermission,
   onResolvePreflight,
   onSendMessage,
+  onSelectAgentProvider,
   onStopWork
 }: ProjectPlanPanelProps) {
   const [expandedPlanIds, setExpandedPlanIds] = useState<Set<string>>(() => new Set());
   const [collapsedPlanIds, setCollapsedPlanIds] = useState<Set<string>>(() => new Set());
+  const [expandedPermissionRequestIds, setExpandedPermissionRequestIds] = useState<Set<string>>(() => new Set());
+  const [collapsedPermissionRequestIds, setCollapsedPermissionRequestIds] = useState<Set<string>>(() => new Set());
+  const [expandedBashExecutionIds, setExpandedBashExecutionIds] = useState<Set<string>>(() => new Set());
+  const [collapsedBashExecutionIds, setCollapsedBashExecutionIds] = useState<Set<string>>(() => new Set());
   const [composerSnapshot, setComposerSnapshot] = useState<InlineComposerSnapshot>({ referenceImagePaths: [], text: "" });
   const [selectedSize, setSelectedSize] = useState("");
   const [customSize, setCustomSize] = useState("");
@@ -106,11 +138,21 @@ export function ProjectPlanPanel({
   const insertedReferencePathsRef = useRef(new Set<string>());
   const consumedQueuedReferenceIdsRef = useRef(new Set<string>());
   const pastedReferences = usePastedReferenceImages();
+  const agentProviderOptions = useMemo<OsSelectOption<AgentProviderId>[]>(
+    () =>
+      agentProviders.map((provider) => ({
+        description: provider.description,
+        label: provider.label,
+        value: provider.id
+      })),
+    [agentProviders]
+  );
   const isAgentWorking = isCreatingPlan || projectManagerState.plans.some((plan) => plan.status === "running");
   const hasPendingPreflight = projectManagerState.conversation.messages.some(
     (message) => message.preflightRequest && (message.preflightDecision ?? "pending") === "pending"
   );
   const currentActivityLog = activityLogs.at(-1);
+  const agentProviderLabel = agentProvider.shortLabel || agentProvider.label || "智能体";
   const canSend = Boolean(
     composerSnapshot.text.trim() && !pastedReferences.isSavingReference && isGenerationSizeSelectionValid(selectedSize, customSize)
   );
@@ -270,7 +312,26 @@ export function ProjectPlanPanel({
             const collapsed = Boolean(
               plan && (collapsedPlanIds.has(plan.id) || (shouldAutoCollapse && !expandedPlanIds.has(plan.id)))
             );
+            const permissionDecision = message.permissionDecision ?? "pending";
+            const permissionRequestId = message.permissionRequest?.requestId ?? "";
+            const shouldAutoCollapsePermission = Boolean(
+              permissionRequestId &&
+                isApprovedPermissionDecision(permissionDecision) &&
+                index < projectManagerState.conversation.messages.length - 1
+            );
+            const isPermissionCollapsed = Boolean(
+              permissionRequestId &&
+                permissionDecision !== "pending" &&
+                (collapsedPermissionRequestIds.has(permissionRequestId) ||
+                  (shouldAutoCollapsePermission && !expandedPermissionRequestIds.has(permissionRequestId)))
+            );
             const hasMessageContent = !plan && message.content.trim().length > 0;
+            const bashToolCallId = message.bashExecution?.toolCallId ?? "";
+            const isBashCollapsed = Boolean(
+              bashToolCallId &&
+                (collapsedBashExecutionIds.has(bashToolCallId) ||
+                  (message.bashExecution?.status === "completed" && !expandedBashExecutionIds.has(bashToolCallId)))
+            );
             const shouldRenderInlineReferences = Boolean(
               message.role === "user" && message.referenceFilePaths?.length && /【图片\d+】/.test(message.content)
             );
@@ -314,6 +375,7 @@ export function ProjectPlanPanel({
                       collapsed={collapsed}
                       imageSessions={imageSessions}
                       plan={plan}
+                      providerLabel={agentProviderLabel}
                       onOpenImagePreview={onOpenImagePreview}
                       onExecutePlan={onExecutePlan}
                       onToggleCollapse={() => togglePlanCollapse(plan.id, collapsed)}
@@ -323,6 +385,7 @@ export function ProjectPlanPanel({
                     <EssePreflightCard
                       decision={message.preflightDecision ?? "pending"}
                       imageSessions={imageSessions}
+                      providerLabel={agentProviderLabel}
                       request={message.preflightRequest}
                       onResolve={onResolvePreflight}
                       onOpenImagePreview={onOpenImagePreview}
@@ -330,8 +393,11 @@ export function ProjectPlanPanel({
                   ) : null}
                   {message.permissionRequest ? (
                     <EssePermissionCard
-                      decision={message.permissionDecision ?? "pending"}
+                      collapsed={isPermissionCollapsed}
+                      decision={permissionDecision}
+                      providerLabel={agentProviderLabel}
                       request={message.permissionRequest}
+                      onToggleCollapse={() => togglePermissionCollapse(permissionRequestId, isPermissionCollapsed)}
                       onResolve={onResolvePermission}
                     />
                   ) : null}
@@ -339,6 +405,7 @@ export function ProjectPlanPanel({
                     <EsseBatchTaskCard
                       batchTask={message.batchTask}
                       imageSessions={imageSessions}
+                      providerLabel={agentProviderLabel}
                       onCancelAll={onCancelBatchTaskAll}
                       onCancelItem={onCancelBatchTaskItem}
                       onOpenImagePreview={onOpenImagePreview}
@@ -346,7 +413,15 @@ export function ProjectPlanPanel({
                       onRetryItem={onRetryBatchTaskItem}
                     />
                   ) : null}
-                  {message.bashExecution ? <EsseBashExecutionCard execution={message.bashExecution} onStop={onStopWork} /> : null}
+                  {message.bashExecution ? (
+                    <EsseBashExecutionCard
+                      collapsed={isBashCollapsed}
+                      execution={message.bashExecution}
+                      providerLabel={agentProviderLabel}
+                      onStop={onStopWork}
+                      onToggleCollapse={() => toggleBashCollapse(message.bashExecution?.toolCallId ?? "", isBashCollapsed)}
+                    />
+                  ) : null}
                 </div>
                 {hasMessageContent ? <MessageActions content={message.content} referenceFilePaths={message.referenceFilePaths} /> : null}
               </div>
@@ -356,16 +431,17 @@ export function ProjectPlanPanel({
       </div>
 
       <div className="session-control-dock">
-        <AgentStatusLine isWorking={isAgentWorking} message={currentActivityLog?.message} />
+        <AgentStatusLine isWorking={isAgentWorking} message={currentActivityLog?.message} tokenCount={tokenCount} />
         <form className="session-composer" onSubmit={handleSubmit} onPaste={pastedReferences.handlePaste}>
           <InlineReferenceComposer
+            ariaLabel={`${agentProvider.shortLabel} 输入`}
             footer={
               <>
                 {pastedReferences.isSavingReference ? <div className="composer-reference-note">正在保存参考图...</div> : null}
                 {pastedReferences.referenceError ? <div className="composer-reference-error">{pastedReferences.referenceError}</div> : null}
               </>
             }
-            placeholder="和 Esse 讨论、生成新图或安排批处理... 可直接粘贴参考图"
+            placeholder={`和 ${agentProvider.shortLabel} 讨论、生成新图或安排批处理... 可直接粘贴参考图`}
             ref={composerRef}
             onChange={setComposerSnapshot}
             onOpenReference={openComposerReferencePreview}
@@ -381,13 +457,20 @@ export function ProjectPlanPanel({
           <div className="composer-toolbar">
             <GenerationSizeControl
               customValue={customSize}
-              idPrefix="esse"
+              idPrefix={agentProvider.id}
               label="生成尺寸："
               selectedValue={selectedSize}
               onCustomValueChange={setCustomSize}
               onSelectedValueChange={setSelectedSize}
             />
-            <EssePersonaSelect value={selectedPersona} onChange={setSelectedPersona} />
+            {agentProviderOptions.length > 1 ? (
+              <AgentProviderSelect
+                options={agentProviderOptions}
+                value={agentProvider.id}
+                onChange={(providerId) => onSelectAgentProvider?.(providerId)}
+              />
+            ) : null}
+            {agentProvider.supportsPersona ? <EssePersonaSelect value={selectedPersona} onChange={setSelectedPersona} /> : null}
           </div>
           <button
             type="submit"
@@ -426,6 +509,60 @@ export function ProjectPlanPanel({
     });
   }
 
+  function togglePermissionCollapse(requestId: string, isCollapsed: boolean): void {
+    if (!requestId) {
+      return;
+    }
+
+    setExpandedPermissionRequestIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+
+      if (isCollapsed) {
+        nextIds.add(requestId);
+      } else {
+        nextIds.delete(requestId);
+      }
+
+      return nextIds;
+    });
+    setCollapsedPermissionRequestIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+
+      if (isCollapsed) {
+        nextIds.delete(requestId);
+      } else {
+        nextIds.add(requestId);
+      }
+
+      return nextIds;
+    });
+  }
+
+  function toggleBashCollapse(toolCallId: string, isCollapsed: boolean): void {
+    if (!toolCallId) {
+      return;
+    }
+
+    setExpandedBashExecutionIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      if (isCollapsed) {
+        nextIds.add(toolCallId);
+      } else {
+        nextIds.delete(toolCallId);
+      }
+      return nextIds;
+    });
+    setCollapsedBashExecutionIds((currentIds) => {
+      const nextIds = new Set(currentIds);
+      if (isCollapsed) {
+        nextIds.delete(toolCallId);
+      } else {
+        nextIds.add(toolCallId);
+      }
+      return nextIds;
+    });
+  }
+
   function openComposerReferencePreview(selectedPath: string): void {
     const paths = composerRef.current?.snapshot().referenceImagePaths ?? composerSnapshot.referenceImagePaths;
     onOpenImagePreview(
@@ -450,21 +587,35 @@ function createReferenceId(filePath: string): string {
 }
 
 function EsseBashExecutionCard({
+  collapsed,
   execution,
-  onStop
+  providerLabel,
+  onStop,
+  onToggleCollapse
 }: {
+  collapsed: boolean;
   execution: NonNullable<ProjectManagerState["conversation"]["messages"][number]["bashExecution"]>;
+  providerLabel: string;
   onStop: () => void;
+  onToggleCollapse: () => void;
 }) {
   const statusLabel = execution.status === "running" ? "运行中" : execution.status === "completed" ? "完成" : "失败";
   const output = execution.output?.trim();
 
   return (
-    <section className={`esse-bash-card ${execution.status}`} aria-label="Esse Bash 执行">
+    <section className={`esse-bash-card ${execution.status} ${collapsed ? "collapsed" : ""}`} aria-label={`${providerLabel} Bash 执行`}>
       <header>
         <strong>{execution.skillName ? `${execution.skillName} · bash` : "bash"}</strong>
         <div className="esse-bash-status-actions">
           <span>{statusLabel}{execution.exitCode !== undefined ? ` · exit ${execution.exitCode ?? "null"}` : ""}</span>
+          <button
+            className="plan-toggle-button"
+            type="button"
+            aria-label={collapsed ? "展开 bash 输出" : "收起 bash 输出"}
+            onClick={onToggleCollapse}
+          >
+            <span className="plan-toggle-icon" aria-hidden="true" />
+          </button>
           {execution.status === "running" ? (
             <button className="toolbar-button" type="button" onClick={onStop}>
               中止
@@ -472,22 +623,26 @@ function EsseBashExecutionCard({
           ) : null}
         </div>
       </header>
-      <code>{execution.command}</code>
-      {output ? <pre>{tailLines(output, 200)}</pre> : <p>等待输出...</p>}
-      {execution.outputPath || execution.fullOutputPath ? (
-        <footer>
-          {execution.outputPath ? (
-            <button className="toolbar-button" type="button" onClick={() => showFileInFolder(execution.outputPath ?? "")}>
-              打开输出文件
-            </button>
+      {collapsed ? null : (
+        <>
+          <code>{execution.command}</code>
+          {output ? <pre>{tailLines(output, 200)}</pre> : <p>等待输出...</p>}
+          {execution.outputPath || execution.fullOutputPath ? (
+            <footer>
+              {execution.outputPath ? (
+                <button className="toolbar-button" type="button" onClick={() => showFileInFolder(execution.outputPath ?? "")}>
+                  打开输出文件
+                </button>
+              ) : null}
+              {execution.fullOutputPath ? (
+                <button className="toolbar-button" type="button" onClick={() => showFileInFolder(execution.fullOutputPath ?? "")}>
+                  打开完整日志
+                </button>
+              ) : null}
+            </footer>
           ) : null}
-          {execution.fullOutputPath ? (
-            <button className="toolbar-button" type="button" onClick={() => showFileInFolder(execution.fullOutputPath ?? "")}>
-              打开完整日志
-            </button>
-          ) : null}
-        </footer>
-      ) : null}
+        </>
+      )}
     </section>
   );
 }
@@ -514,6 +669,36 @@ function EssePersonaSelect({
   );
 }
 
+function AgentProviderSelect({
+  onChange,
+  options,
+  value
+}: {
+  onChange: (value: AgentProviderId) => void;
+  options: OsSelectOption<AgentProviderId>[];
+  value: AgentProviderId;
+}) {
+  return (
+    <OsSelect
+      ariaLabel="选择 Agent"
+      icon={<AgentProviderIcon />}
+      listLabel="Agent"
+      options={options}
+      value={value}
+      onValueChange={onChange}
+    />
+  );
+}
+
+function AgentProviderIcon() {
+  return (
+    <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true">
+      <path d="M4.5 2.5h7l2 3.5-5.5 7.5L2.5 6z" />
+      <path d="M5.2 6h5.6" />
+    </svg>
+  );
+}
+
 function EssePersonaIcon() {
   return (
     <svg viewBox="0 0 20 20" focusable="false" aria-hidden="true">
@@ -529,7 +714,7 @@ function EsseCommandPreviewStrip({
   onOpenImagePreview,
   referenceImages
 }: {
-  command: EssePreflightCommand;
+  command: AgentPreflightCommand;
   imageSessions: ImageSession[];
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
   referenceImages: BatchPlanReferenceImage[];
@@ -578,7 +763,7 @@ interface EsseCommandPreview {
 }
 
 function getEsseCommandPreviews(
-  command: EssePreflightCommand,
+  command: AgentPreflightCommand,
   imageSessions: ImageSession[],
   referenceImages: BatchPlanReferenceImage[]
 ): EsseCommandPreview[] {
@@ -634,22 +819,24 @@ function EssePreflightCard({
   imageSessions,
   onOpenImagePreview,
   onResolve,
+  providerLabel,
   request
 }: {
   decision: NonNullable<ProjectManagerState["conversation"]["messages"][number]["preflightDecision"]>;
   imageSessions: ImageSession[];
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
-  onResolve: (requestId: string, decision: EssePreflightResponse["decision"], modifiedCommands?: EssePreflightCommand[]) => void;
-  request: EssePreflightRequest;
+  onResolve: (requestId: string, decision: AgentPreflightResponse["decision"], modifiedCommands?: AgentPreflightCommand[]) => void;
+  providerLabel: string;
+  request: AgentPreflightRequest;
 }) {
   const commandLabel = formatPreflightToolLabel(request.payload.tool);
   const isPending = decision === "pending";
   const canModify = request.payload.tool !== "package_generated_images";
   const [isEditing, setIsEditing] = useState(false);
-  const [editedCommands, setEditedCommands] = useState<EssePreflightCommand[]>(() => request.payload.commands);
+  const [editedCommands, setEditedCommands] = useState<AgentPreflightCommand[]>(() => request.payload.commands);
 
   return (
-    <section className={`esse-preflight-card ${decision}`} aria-label="Esse 生成确认">
+    <section className={`esse-preflight-card ${decision}`} aria-label={`${providerLabel} 生成确认`}>
       <header>
         <strong>{commandLabel}</strong>
         <span>{request.payload.estimatedApiCalls} 次 API 调用</span>
@@ -761,48 +948,70 @@ function EssePreflightCard({
 }
 
 function EssePermissionCard({
+  collapsed,
   decision,
   onResolve,
+  onToggleCollapse,
+  providerLabel,
   request
 }: {
+  collapsed: boolean;
   decision: NonNullable<ProjectManagerState["conversation"]["messages"][number]["permissionDecision"]>;
-  onResolve: (requestId: string, decision: EssePermissionResponse["decision"]) => void;
-  request: EssePermissionRequest;
+  onResolve: (requestId: string, decision: AgentPermissionResponse["decision"]) => void;
+  onToggleCollapse: () => void;
+  providerLabel: string;
+  request: AgentPermissionRequest;
 }) {
   const isPending = decision === "pending";
   const affected = [request.payload.affectedDisplayLabel, request.payload.affectedFileName].filter(Boolean).join(" / ");
 
   return (
-    <section className={`esse-preflight-card esse-permission-card ${decision}`} aria-label="Esse 操作确认">
+    <section className={`esse-preflight-card esse-permission-card ${decision} ${collapsed ? "collapsed" : ""}`} aria-label={`${providerLabel} 操作确认`}>
       <header>
-        <strong>Esse 请求确认</strong>
-        <span>{formatPermissionRiskLabel(request.payload.risk)}</span>
-      </header>
-      <div className="esse-preflight-command-list">
-        <div className="esse-preflight-command">
-          <span>{request.payload.label}</span>
-          <strong>{request.payload.toolName}</strong>
-          {affected ? <em>{affected}</em> : null}
-          <p>{formatPermissionDescription(request)}</p>
+        <strong>{collapsed ? `${providerLabel} 请求确认：${request.payload.label}` : `${providerLabel} 请求确认`}</strong>
+        <div className="esse-permission-card-summary">
+          <span>{isPending ? formatPermissionRiskLabel(request.payload.risk) : formatPermissionDecision(decision)}</span>
+          {!isPending ? (
+            <button
+              className="plan-toggle-button"
+              type="button"
+              aria-label={collapsed ? "展开请求" : "收起请求"}
+              onClick={onToggleCollapse}
+            >
+              <span className="plan-toggle-icon" aria-hidden="true" />
+            </button>
+          ) : null}
         </div>
-      </div>
-      <footer>
-        {isPending ? (
-          <>
-            <button className="toolbar-button primary" type="button" onClick={() => onResolve(request.requestId, "allow-once")}>
-              允许一次
-            </button>
-            <button className="toolbar-button" type="button" onClick={() => onResolve(request.requestId, "allow-session")}>
-              本次会话允许
-            </button>
-            <button className="toolbar-button" type="button" onClick={() => onResolve(request.requestId, "deny")}>
-              拒绝
-            </button>
-          </>
-        ) : (
-          <span>{formatPermissionDecision(decision)}</span>
-        )}
-      </footer>
+      </header>
+      {collapsed ? null : (
+        <div className="esse-preflight-command-list">
+          <div className="esse-preflight-command">
+            <span>{request.payload.label}</span>
+            <strong>{request.payload.toolName}</strong>
+            {affected ? <em>{affected}</em> : null}
+            <p>{formatPermissionDescription(request, providerLabel)}</p>
+          </div>
+        </div>
+      )}
+      {collapsed ? null : (
+        <footer>
+          {isPending ? (
+            <>
+              <button className="toolbar-button primary" type="button" onClick={() => onResolve(request.requestId, "allow-once")}>
+                允许一次
+              </button>
+              <button className="toolbar-button" type="button" onClick={() => onResolve(request.requestId, "allow-session")}>
+                本次会话允许
+              </button>
+              <button className="toolbar-button" type="button" onClick={() => onResolve(request.requestId, "deny")}>
+                拒绝
+              </button>
+            </>
+          ) : (
+            <span>{formatPermissionDecision(decision)}</span>
+          )}
+        </footer>
+      )}
     </section>
   );
 }
@@ -813,6 +1022,7 @@ function EsseBatchTaskCard({
   onCancelAll,
   onCancelItem,
   onOpenImagePreview,
+  providerLabel,
   onRetryFailed,
   onRetryItem
 }: {
@@ -821,6 +1031,7 @@ function EsseBatchTaskCard({
   onCancelAll: (batchTaskId: string) => void;
   onCancelItem: (batchTaskId: string, sessionId: string) => void;
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
+  providerLabel: string;
   onRetryFailed: (batchTaskId: string) => void;
   onRetryItem: (batchTaskId: string, sessionId: string) => void;
 }) {
@@ -830,7 +1041,7 @@ function EsseBatchTaskCard({
   const hasActiveItems = activeItems.length > 0;
 
   return (
-    <section className="esse-batch-task-card" aria-label="Esse 生成任务">
+    <section className="esse-batch-task-card" aria-label={`${providerLabel} 生成任务`}>
       <header>
         <strong>已提交 {batchTask.items.length} 个生成任务</strong>
         <div className="esse-batch-task-card-actions">
@@ -919,7 +1130,7 @@ function formatBatchTaskStatus(status: ImageSession["status"], errorMessage?: st
   return "待处理";
 }
 
-function formatPreflightToolLabel(tool: EssePreflightRequest["payload"]["tool"]): string {
+function formatPreflightToolLabel(tool: AgentPreflightRequest["payload"]["tool"]): string {
   if (tool === "run_batch_generation") {
     return "批量生成";
   }
@@ -929,7 +1140,7 @@ function formatPreflightToolLabel(tool: EssePreflightRequest["payload"]["tool"])
   return "生成图片";
 }
 
-function formatPreflightCommandMode(mode: EssePreflightRequest["payload"]["commands"][number]["mode"]): string {
+function formatPreflightCommandMode(mode: AgentPreflightRequest["payload"]["commands"][number]["mode"]): string {
   if (mode === "generate") {
     return "生成";
   }
@@ -939,7 +1150,7 @@ function formatPreflightCommandMode(mode: EssePreflightRequest["payload"]["comma
   return "文件";
 }
 
-function formatPermissionRiskLabel(risk: EssePermissionRequest["payload"]["risk"]): string {
+function formatPermissionRiskLabel(risk: AgentPermissionRequest["payload"]["risk"]): string {
   if (risk === "destructive") {
     return "高风险操作";
   }
@@ -949,9 +1160,9 @@ function formatPermissionRiskLabel(risk: EssePermissionRequest["payload"]["risk"
   return "工作区修改";
 }
 
-function formatPermissionDescription(request: EssePermissionRequest): string {
+function formatPermissionDescription(request: AgentPermissionRequest, providerLabel: string): string {
   const params = summarizePermissionParams(request.payload.params);
-  return params ? `Esse 想执行这个操作：${params}` : "Esse 想执行这个操作。";
+  return params ? `${providerLabel} 想执行这个操作：${params}` : `${providerLabel} 想执行这个操作。`;
 }
 
 function summarizePermissionParams(params: Record<string, unknown>): string {
@@ -971,10 +1182,17 @@ function formatPermissionDecision(decision: Exclude<ProjectManagerState["convers
   return "已拒绝";
 }
 
+function isApprovedPermissionDecision(
+  decision: ProjectManagerState["conversation"]["messages"][number]["permissionDecision"]
+): boolean {
+  return decision === "allow-once" || decision === "allow-session";
+}
+
 function PlanCard({
   collapsed,
   imageSessions,
   plan,
+  providerLabel,
   onOpenImagePreview,
   onExecutePlan,
   onToggleCollapse
@@ -982,6 +1200,7 @@ function PlanCard({
   collapsed: boolean;
   imageSessions: ImageSession[];
   plan: BatchPlan;
+  providerLabel: string;
   onOpenImagePreview: (title: string, images: PreviewImage[], initialPath: string) => void;
   onExecutePlan: (planId: string, mode: ProjectPlanExecutionMode) => void;
   onToggleCollapse: () => void;
@@ -994,7 +1213,7 @@ function PlanCard({
       <header>
         <div className="plan-title-row">
           {plan.status === "running" ? <span className="plan-title-spinner" role="img" aria-label="任务执行中" /> : null}
-          <strong className="plan-title">{formatPlanApprovalTitle(plan)}</strong>
+          <strong className="plan-title">{formatPlanApprovalTitle(plan, providerLabel)}</strong>
         </div>
         <button
           className="plan-toggle-button"
@@ -1181,26 +1400,26 @@ function getCommandReferencePreviews(plan: BatchPlan, command: WorkerCommand): B
     .filter((referenceImage): referenceImage is BatchPlanReferenceImage => Boolean(referenceImage));
 }
 
-function formatPlanApprovalTitle(plan: BatchPlan): string {
+function formatPlanApprovalTitle(plan: BatchPlan, providerLabel: string): string {
   if (plan.status === "running") {
     const reportedCount = countReportedCommands(plan);
-    return `Esse工作进度：${reportedCount}/${plan.commands.length}`;
+    return `${providerLabel}工作进度：${reportedCount}/${plan.commands.length}`;
   }
 
   if (plan.status === "completed") {
-    return `Esse完成了${plan.commands.length}个任务`;
+    return `${providerLabel}完成了${plan.commands.length}个任务`;
   }
 
   if (plan.status === "failed") {
     const failedCount = plan.reports?.filter((report) => report.status === "failed").length ?? 0;
-    return `Esse有${failedCount || plan.commands.length}个任务失败`;
+    return `${providerLabel}有${failedCount || plan.commands.length}个任务失败`;
   }
 
   if (plan.status === "paused") {
-    return `Esse暂停了${plan.commands.length}个任务`;
+    return `${providerLabel}暂停了${plan.commands.length}个任务`;
   }
 
-  return `Esse有${plan.commands.length}个任务等你确认`;
+  return `${providerLabel}有${plan.commands.length}个任务等你确认`;
 }
 
 function countReportedCommands(plan: BatchPlan): number {

@@ -11,6 +11,7 @@ describe("agentCommandPolicy", () => {
     expect(policy.checkCommand("npm run build").allowed).toBe(true);
     expect(policy.checkCommand("git status --short").allowed).toBe(true);
     expect(policy.checkCommand("Remove-Item -Recurse .\\dist").allowed).toBe(true);
+    expect(policy.checkCommand("chmod +x ./scripts/export.mjs").allowed).toBe(true);
   });
 
   test.each([
@@ -48,10 +49,39 @@ describe("agentCommandPolicy", () => {
     expect(policy.checkCommand(`Move-Item "${referencePath}" "${path.join(projectDirectory, "trash", "room.png")}"`).allowed).toBe(false);
   });
 
+  test("allows copying protected image inputs for derived artifacts", () => {
+    const originalPath = path.join(projectDirectory, "images", "original", "flower.jpg");
+    const referencePath = path.join(projectDirectory, "references", "room.png");
+
+    expect(policy.checkCommand(`cp "${originalPath}" "${path.join(projectDirectory, "exports", "flower.jpg")}"`).allowed).toBe(true);
+    expect(policy.checkCommand(`Copy-Item "${referencePath}" "${path.join(projectDirectory, "exports", "room.png")}"`).allowed).toBe(true);
+  });
+
   test("allows deleting generated outputs and build artifacts inside the project", () => {
     expect(policy.checkCommand(`rm -rf "${path.join(projectDirectory, "images", "generated", "old")}"`).allowed).toBe(true);
     expect(policy.checkCommand(`Remove-Item -Recurse "${path.join(projectDirectory, "dist")}"`).allowed).toBe(true);
   });
+
+  test.each([
+    "cat .env.local",
+    "Get-Content .env",
+    "rg TUZI_API_KEY .env.local"
+  ])("denies bash reads of local secret files: %s", (command) => {
+    const decision = policy.checkCommand(command);
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.reason).toContain("密钥");
+  });
+
+  test.each(["chmod -R 777 /Users/ldy", "chown -R ldy C:\\Users\\ldy"])(
+    "denies permission changes of user directories: %s",
+    (command) => {
+      const decision = policy.checkCommand(command);
+
+      expect(decision.allowed).toBe(false);
+      expect(decision.reason).toContain("权限修改");
+    }
+  );
 
   test.each([
     "sqlite3 project.sqlite \".tables\"",

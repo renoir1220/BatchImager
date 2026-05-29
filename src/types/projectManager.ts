@@ -1,4 +1,10 @@
-import type { EsseBashExecutionEvent, EsseBatchTaskCardData, EssePermissionRequest, EssePreflightRequest } from "../../electron/ipcTypes";
+import type {
+  AgentBashExecutionEvent,
+  AgentBatchTaskCardData,
+  AgentPermissionRequest,
+  AgentPreflightRequest,
+  ProjectManagerContextType
+} from "../../electron/ipcTypes";
 
 export type ProjectManagerMessageRole = "user" | "assistant" | "error" | "context";
 export type BatchPlanStatus = "draft" | "running" | "completed" | "failed" | "paused";
@@ -8,14 +14,14 @@ export interface ProjectManagerMessage {
   id: string;
   role: ProjectManagerMessageRole;
   content: string;
-  bashExecution?: EsseBashExecutionEvent;
-  batchTask?: EsseBatchTaskCardData;
-  contextType?: "esse-bash-execution" | "esse-batch-task" | "esse-tool-call";
+  bashExecution?: AgentBashExecutionEvent;
+  batchTask?: AgentBatchTaskCardData;
+  contextType?: ProjectManagerContextType;
   planId?: string;
   permissionDecision?: "pending" | "allow-once" | "allow-session" | "deny";
-  permissionRequest?: EssePermissionRequest;
+  permissionRequest?: AgentPermissionRequest;
   preflightDecision?: "pending" | "execute" | "modify" | "cancel";
-  preflightRequest?: EssePreflightRequest;
+  preflightRequest?: AgentPreflightRequest;
   referenceFilePaths?: string[];
 }
 
@@ -72,7 +78,7 @@ export interface ProjectManagerState {
   plans: BatchPlan[];
 }
 
-export interface EsseImageRequest {
+export interface AgentImageRequest {
   id: string;
   mode: "edit" | "generate";
   prompt: string;
@@ -80,5 +86,7 @@ export interface EsseImageRequest {
   sourceSessionId?: string;
   target: "existing" | "new";
 }
+
+export type EsseImageRequest = AgentImageRequest;
 
 export type EssePersona = "old-ox" | "excellent-employee" | "question-girl" | "robot";

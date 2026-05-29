@@ -10,6 +10,7 @@
     "eval:esse": "vitest run electron/services/esseWorkspaceAgentEvaluation.test.ts electron/services/esseWorkspaceRuntime.test.ts electron/services/esseImagePreflightExecutor.test.ts electron/services/essePackagePreflightExecutor.test.ts electron/services/essePreflightBroker.test.ts electron/services/projectUnreferencedFiles.test.ts src/domain/projectWorkspaceAgentEvaluation.test.ts",
     "eval:esse:llm": "node scripts/run-esse-llm-eval.mjs",
     "test": "vitest run",
+    "test:e2e": "vitest run src/App.e2e.test.tsx",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "electron:dev": "electron .",
     "package:mac": "node scripts/package-mac-private.mjs",
@@ -39,7 +40,7 @@
   },
   "build": {
     "appId": "com.batchimager.desktop",
-    "productName": "Esse",
+    "productName": "BatchImager",
     "directories": {
       "output": "release"
     },

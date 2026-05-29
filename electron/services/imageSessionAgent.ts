@@ -7,10 +7,6 @@ import type { AgentRuntime, CreateAgentRuntimeOptions } from "./agentRuntime";
 import { createAgentRuntime, warmupAgentRuntime } from "./agentRuntime";
 import { type AgentRuntimeRegistry, getSharedAgentRuntimeRegistry } from "./agentRuntimeRegistry";
 import type { ProductImageResult } from "./tuziImageApi";
-import {
-  MISSING_REFERENCE_IMAGE_REPLY,
-  shouldReportMissingReferenceImage
-} from "./referenceAttachmentGuard";
 import { isPathInsideOrSame, normalizePathForComparison, resolvePathForComparison } from "./pathUtils";
 import { runSharedGenerateImageCore } from "./sharedGenerateImageCore";
 
@@ -99,19 +95,6 @@ export async function runImageSessionAgent(
   const latestUserMessage = getLatestUserMessage(input);
   let generatedImage: ProductImageResult | undefined;
   let generatedMode: "edit" | "generate" | undefined;
-
-  if (
-    shouldReportMissingReferenceImage({
-      messages: input.messages,
-      referenceImageCount: referenceImages.length
-    })
-  ) {
-    deps.logger?.warn("Image session agent request referenced a missing attachment", {
-      context,
-      publicMessage: "没有收到参考图附件，请先粘贴或添加参考图。"
-    });
-    throw new Error(MISSING_REFERENCE_IMAGE_REPLY);
-  }
 
   assertPathInsideProject(input.imagePath, projectDirectory, "当前图片路径");
   for (const referenceImage of referenceImages) {
@@ -410,6 +393,8 @@ function buildFullPrompt(
     for (const referenceImage of referenceImages) {
       sections.push(`- ${referenceImage.id}：${referenceImage.label}${referenceImage.pinned ? "（已固定）" : ""}`);
     }
+  } else {
+    sections.push("- 本轮没有可引用的参考图。");
   }
 
   if (history) {

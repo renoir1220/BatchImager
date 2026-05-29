@@ -102,6 +102,63 @@ describe("App image preview behavior", () => {
     expect(saveProjectSnapshot).toHaveBeenCalledTimes(1);
   });
 
+  test("does not persist every running bash output update", async () => {
+    const user = userEvent.setup();
+    let bashExecutionListener:
+      | Parameters<NonNullable<Window["batchImager"]>["subscribeEsseBashExecutionEvents"]>[0]
+      | undefined;
+    const snapshot = makeProjectSnapshot();
+    const saveProjectSnapshot = vi.fn().mockResolvedValue(snapshot);
+
+    renderWithBatchImager(<App />, {
+      createProject: vi.fn().mockResolvedValue(makeProjectSnapshot([])),
+      getLogs: vi.fn().mockResolvedValue([]),
+      importImages: vi.fn().mockResolvedValue(snapshot),
+      listProjects: vi.fn().mockResolvedValue([]),
+      saveProjectSnapshot,
+      setRunningWorkCount: vi.fn(),
+      subscribeChatImageGenerationStarted: vi.fn().mockReturnValue(() => undefined),
+      subscribeEsseBashExecutionEvents: vi.fn().mockImplementation((listener) => {
+        bashExecutionListener = listener;
+        return () => undefined;
+      }),
+      subscribeEssePermissionRequests: vi.fn().mockReturnValue(() => undefined),
+      subscribeEssePreflightRequests: vi.fn().mockReturnValue(() => undefined),
+      subscribeLogs: vi.fn().mockReturnValue(() => undefined),
+      subscribeProjectSnapshotUpdates: vi.fn().mockReturnValue(() => undefined),
+      subscribeProjectThumbnailUpdates: vi.fn().mockReturnValue(() => undefined)
+    });
+
+    await user.click(screen.getAllByRole("button", { name: "导入图片" })[0]);
+    await screen.findByAltText("flower.jpg");
+    saveProjectSnapshot.mockClear();
+
+    act(() => {
+      bashExecutionListener?.({
+        command: "avconvert --progress",
+        cwd: "/project",
+        output: "progress 1\nprogress 2",
+        status: "running",
+        toolCallId: "bash-1"
+      });
+    });
+
+    expect(saveProjectSnapshot).not.toHaveBeenCalled();
+
+    act(() => {
+      bashExecutionListener?.({
+        command: "avconvert --progress",
+        cwd: "/project",
+        exitCode: 0,
+        output: "done",
+        status: "completed",
+        toolCallId: "bash-1"
+      });
+    });
+
+    await waitFor(() => expect(saveProjectSnapshot).toHaveBeenCalledTimes(1));
+  });
+
   test("marks the current image as generating when the chat image tool starts", async () => {
     const user = userEvent.setup();
     let generationStartedListener:
@@ -449,11 +506,15 @@ describe("App image preview behavior", () => {
     await user.type(screen.getByRole("textbox", { name: "Esse 输入" }), "帮我做商品图");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
+    const initialTokenLabel = await screen.findByText(/约 .+ tokens/);
+    expect(initialTokenLabel).not.toHaveTextContent("约 0 tokens");
+
     act(() => {
       esseUpdateListener?.({ content: "我先拆成两个任务", operationId: esseOperationId });
     });
 
     expect(await screen.findByText("我先拆成两个任务")).toBeInTheDocument();
+    expect(screen.getByText(/约 .+ tokens/)).not.toHaveTextContent("约 0 tokens");
 
     act(() => {
       resolveEsseMessage?.({ reply: "我先拆成两个任务，已输出确认卡。" });

@@ -3,6 +3,7 @@
 import { fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
+import type { AgentProviderDescriptor } from "../../electron/ipcTypes";
 import type { BatchPlan, ProjectManagerState, WorkerReport } from "../types/projectManager";
 import type { ImageSession } from "../types/image";
 import { renderWithBatchImager } from "../test/renderWithBatchImager";
@@ -29,6 +30,7 @@ function renderProjectPlanPanelWithState(
   imageSessions: ImageSession[] = [],
   overrides: {
     isCreatingPlan?: boolean;
+    agentProvider?: AgentProviderDescriptor;
     onStopWork?: () => void;
     onOpenImagePreview?: (title: string, images: PreviewImage[], initialPath: string) => void;
     queuedWorkspaceReferences?: { fileName: string; filePath: string; id: string }[];
@@ -38,6 +40,7 @@ function renderProjectPlanPanelWithState(
   renderWithBatchImager(
     <ProjectPlanPanel
       activityLogs={[]}
+      agentProvider={overrides.agentProvider}
       imageSessions={imageSessions}
       isCreatingPlan={overrides.isCreatingPlan ?? false}
       queuedWorkspaceReferences={overrides.queuedWorkspaceReferences}
@@ -181,7 +184,7 @@ describe("ProjectPlanPanel bash execution cards", () => {
               toolCallId: "bash-1"
             },
             content: "",
-            contextType: "esse-bash-execution",
+            contextType: "agent-bash-execution",
             id: "message-bash-1",
             role: "context"
           }
@@ -191,6 +194,9 @@ describe("ProjectPlanPanel bash execution cards", () => {
     }, vi.fn(), [], { showFileInFolder });
 
     expect(screen.getByRole("region", { name: "Esse Bash 执行" })).toHaveTextContent("xlsx-export · bash");
+    expect(screen.queryByText(/Exported 1 rows/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "展开 bash 输出" }));
+
     expect(screen.getByText(/Exported 1 rows/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "打开输出文件" }));
     expect(showFileInFolder).toHaveBeenCalledWith({ filePath: "/project/exports/all-sessions.xlsx" });
@@ -213,7 +219,7 @@ describe("ProjectPlanPanel bash execution cards", () => {
               toolCallId: "bash-running"
             },
             content: "",
-            contextType: "esse-bash-execution",
+            contextType: "agent-bash-execution",
             id: "message-bash-running",
             role: "context"
           }
@@ -275,6 +281,23 @@ describe("ProjectPlanPanel plan cards", () => {
     expect(screen.getByText("Esse工作进度：2/3")).toBeInTheDocument();
     expect(screen.getByLabelText("任务执行中")).toBeInTheDocument();
     expect(screen.getByText("Esse完成了3个任务")).toBeInTheDocument();
+  });
+
+  test("uses the selected provider label for agent-owned plan and confirmation cards", () => {
+    const codexProvider: AgentProviderDescriptor = {
+      description: "Codex provider for tests.",
+      id: "codex",
+      label: "Codex",
+      shortLabel: "Codex",
+      status: "available",
+      supportsPersona: false,
+      workbenchCapabilityIds: []
+    };
+
+    renderProjectPlanPanelWithState(makeProjectManagerState(makePlan()), vi.fn(), [], { agentProvider: codexProvider });
+
+    expect(screen.getByText("Codex有3个任务等你确认")).toBeInTheDocument();
+    expect(screen.queryByText("Esse有3个任务等你确认")).not.toBeInTheDocument();
   });
 
   test("shows the edited source image thumbnail beside an edit task prompt preview", () => {
@@ -643,7 +666,7 @@ describe("ProjectPlanPanel Esse preflight cards", () => {
                   ]
                 },
                 content: "",
-                contextType: "esse-batch-task",
+                contextType: "agent-batch-task",
                 id: "batch-message-1",
                 role: "context"
               }
@@ -735,7 +758,7 @@ describe("ProjectPlanPanel Esse batch task cards", () => {
                   referenceImages: [{ filePath: "/project/ref.jpg", id: "turn-ref-1", label: "场景参考图" }]
                 },
                 content: "",
-                contextType: "esse-batch-task",
+                contextType: "agent-batch-task",
                 id: "batch-message-1",
                 role: "context"
               }
@@ -844,6 +867,62 @@ describe("ProjectPlanPanel Esse permission cards", () => {
 
     await user.click(screen.getByRole("button", { name: "本次会话允许" }));
     expect(onResolvePermission).toHaveBeenCalledWith("permission-request-1", "allow-session");
+  });
+
+  test("collapses approved permission cards once a newer message exists", async () => {
+    const user = userEvent.setup();
+
+    renderProjectPlanPanelWithState({
+      conversation: {
+        id: "conversation-1",
+        messages: [
+          {
+            content: "",
+            id: "permission-1",
+            permissionDecision: "allow-session",
+            permissionRequest: {
+              payload: {
+                affectedDisplayLabel: "img-2",
+                affectedFileName: "hero.jpg",
+                label: "运行 bash",
+                params: { command: "node export.mjs", cwd: "/project" },
+                requiresPreflight: false,
+                risk: "external-write",
+                targetKey: "bash:export",
+                toolName: "bash"
+              },
+              requestId: "permission-request-1"
+            },
+            role: "context"
+          },
+          {
+            bashExecution: {
+              command: "node export.mjs",
+              cwd: "/project",
+              output: "done",
+              status: "completed",
+              toolCallId: "bash-1"
+            },
+            content: "",
+            contextType: "agent-bash-execution",
+            id: "message-bash-1",
+            role: "context"
+          }
+        ]
+      },
+      plans: []
+    });
+
+    const card = screen.getByRole("region", { name: "Esse 操作确认" });
+
+    expect(card).toHaveTextContent("Esse 请求确认：运行 bash");
+    expect(card).toHaveTextContent("本次会话已允许");
+    expect(within(card).queryByText(/command=node export\.mjs/)).not.toBeInTheDocument();
+
+    await user.click(within(card).getByRole("button", { name: "展开请求" }));
+
+    expect(within(card).getByText(/command=node export\.mjs/)).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "收起请求" })).toBeInTheDocument();
   });
 });
 

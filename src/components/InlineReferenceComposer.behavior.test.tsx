@@ -23,7 +23,7 @@ describe("InlineReferenceComposer", () => {
       />
     );
 
-    const editor = screen.getByRole("textbox", { name: "Esse 输入" });
+    const editor = screen.getByRole("textbox", { name: "智能体输入" });
     editor.textContent = "根据生成商品图";
     const textNode = editor.firstChild;
     if (!textNode) {
@@ -75,7 +75,7 @@ describe("InlineReferenceComposer", () => {
       previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
     });
 
-    const editor = screen.getByRole("textbox", { name: "Esse 输入" });
+    const editor = screen.getByRole("textbox", { name: "智能体输入" });
     const chipsBeforeDrag = Array.from(editor.querySelectorAll<HTMLElement>(".inline-reference-chip"));
     const dropRange = document.createRange();
     dropRange.setStart(editor, 0);
@@ -107,7 +107,7 @@ describe("InlineReferenceComposer", () => {
       />
     );
 
-    const editor = screen.getByRole("textbox", { name: "Esse 输入" });
+    const editor = screen.getByRole("textbox", { name: "智能体输入" });
     fireEvent.paste(editor, {
       clipboardData: {
         files: [],
@@ -137,7 +137,7 @@ describe("InlineReferenceComposer", () => {
       />
     );
 
-    const editor = screen.getByRole("textbox", { name: "Esse 输入" });
+    const editor = screen.getByRole("textbox", { name: "智能体输入" });
     fireEvent.paste(editor, {
       clipboardData: {
         files: [],

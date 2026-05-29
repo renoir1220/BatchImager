@@ -33,12 +33,24 @@ describe("project plan UI wiring", () => {
     expect(toolbar).not.toContain("批量处理");
   });
 
-  test("Esse IPC is exposed only through preload", () => {
+  test("agent provider IPC exposes generic entrypoints while keeping Esse compatibility", () => {
     expect(readProjectFile("electron/preload.ts")).toContain("sendEsseMessage");
+    expect(readProjectFile("electron/preload.ts")).toContain("listAgentProviders");
+    expect(readProjectFile("electron/preload.ts")).toContain("sendAgentMessage");
+    expect(readProjectFile("electron/preload.ts")).toContain("subscribeAgentBashExecutionEvents");
+    expect(readProjectFile("electron/preload.ts")).toContain("subscribeAgentAssistantMessageUpdates");
     expect(readProjectFile("electron/preload.ts")).not.toContain("createProjectManagerPlan");
     expect(readProjectFile("electron/main.ts")).not.toContain("project-manager:create-plan");
     expect(readProjectFile("electron/main.ts")).toContain("esse:send-message");
+    expect(readProjectFile("electron/main.ts")).toContain("agent:list-providers");
+    expect(readProjectFile("electron/main.ts")).toContain("agent:send-message");
+    expect(readProjectFile("electron/main.ts")).toContain("agent:assistant-message-update");
     expect(readProjectFile("electron/ipcTypes.ts")).toContain("persona?: EssePersona");
+    expect(readProjectFile("electron/ipcTypes.ts")).toContain("AgentProviderId");
+    expect(readProjectFile("electron/ipcTypes.ts")).toContain("\"agent-task\"");
+    expect(readProjectFile("electron/ipcTypes.ts")).toContain("\"agent-bash-execution\"");
+    expect(readProjectFile("src/App.tsx")).toContain("activeAgentProviderId");
+    expect(readProjectFile("src/App.tsx")).toContain("sendAgentMessage");
   });
 
   test("collapsed batch plans can be expanded from the chat stream", () => {
@@ -56,11 +68,11 @@ describe("project plan UI wiring", () => {
 
     const planTitleRule = styles.match(/\.plan-title\s*\{(?<body>[^}]*)\}/)?.groups?.body ?? "";
 
-    expect(panel).toContain("formatPlanApprovalTitle(plan)");
+    expect(panel).toContain("formatPlanApprovalTitle(plan, providerLabel)");
     expect(panel).toContain('className="plan-title"');
-    expect(panel).toContain("Esse有${plan.commands.length}个任务等你确认");
-    expect(panel).toContain("Esse工作进度：${reportedCount}/${plan.commands.length}");
-    expect(panel).toContain("Esse完成了${plan.commands.length}个任务");
+    expect(panel).toContain("${providerLabel}有${plan.commands.length}个任务等你确认");
+    expect(panel).toContain("${providerLabel}工作进度：${reportedCount}/${plan.commands.length}");
+    expect(panel).toContain("${providerLabel}完成了${plan.commands.length}个任务");
     expect(panel).toContain("plan-title-spinner");
     expect(panel).not.toContain("plan-eyebrow");
     expect(panel).not.toContain("plan-summary-line");
@@ -86,19 +98,19 @@ describe("project plan UI wiring", () => {
     expect(styles).toContain(".command-reference-strip");
   });
 
-  test("Esse send-message replies no longer convert legacy imageRequests into draft plan cards", () => {
+  test("agent send-message replies no longer convert legacy imageRequests into draft plan cards", () => {
     const app = readProjectFile("src/App.tsx");
     const main = readProjectFile("electron/main.ts");
 
     expect(main).toContain("createProjectSnapshotWorkspaceRuntime");
     expect(main).not.toContain("shouldUseWorkspaceToolsForEsseRequest");
     expect(main).not.toContain("result.fileTasks");
-    expect(app).not.toContain("createEsseImageRequestPlan");
+    expect(app).not.toContain("createAgentImageRequestPlan");
     expect(app).not.toContain("setProjectManagerDraftPlan(updatedState, imageRequestPlan");
     expect(app).toContain("executeNewImagePlanCommand");
   });
 
-  test("approved Esse new-image plans reserve all placeholders before generation dispatch", () => {
+  test("approved agent new-image plans reserve all placeholders before generation dispatch", () => {
     const app = readProjectFile("src/App.tsx");
 
     expect(app).toContain("executeNewImagePlanCommands");
@@ -121,15 +133,15 @@ describe("project plan UI wiring", () => {
     );
   });
 
-  test("Esse final replies update the latest project-manager snapshot after workspace tool broadcasts", () => {
+  test("agent final replies update the latest project-manager snapshot after workspace tool broadcasts", () => {
     const app = readProjectFile("src/App.tsx").replace(/\r\n/g, "\n");
-    const sendEsseBody = app.match(
-      /async function handleSendEsseMessage\([\s\S]*?\): Promise<void> \{(?<body>[\s\S]*?)\n  \}/
+    const sendAgentBody = app.match(
+      /async function handleSendAgentMessage\([\s\S]*?\): Promise<void> \{(?<body>[\s\S]*?)\n  \}/
     )?.groups?.body ?? "";
 
-    expect(sendEsseBody).toContain("upsertProjectManagerAssistantMessage(\n        projectManagerStateRef.current");
-    expect(sendEsseBody).not.toContain("upsertProjectManagerAssistantMessage(\n        nextState");
-    expect(sendEsseBody).toContain("appendProjectManagerError(\n        projectManagerStateRef.current");
+    expect(sendAgentBody).toContain("upsertProjectManagerAssistantMessage(\n        projectManagerStateRef.current");
+    expect(sendAgentBody).not.toContain("upsertProjectManagerAssistantMessage(\n        nextState");
+    expect(sendAgentBody).toContain("appendProjectManagerError(\n        projectManagerStateRef.current");
   });
 
   test("Esse composer exposes a compact persona switch after generation ratio", () => {
@@ -176,7 +188,7 @@ describe("project plan UI wiring", () => {
     expect(tabDotRule).toContain("margin-left:");
   });
 
-  test("workspace images can be reordered and dropped into the Esse composer as references", () => {
+  test("workspace images can be reordered and dropped into the agent composer as references", () => {
     const app = readProjectFile("src/App.tsx");
     const workspace = readProjectFile("src/components/ImageWorkspace.tsx");
     const cell = readProjectFile("src/components/ImageCell.tsx");

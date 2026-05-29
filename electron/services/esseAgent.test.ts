@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { AppLogger, BackendLogOptions } from "./appLogger";
-import type { AgentRuntime } from "./agentRuntime";
+import type { AgentRuntime, CreateAgentRuntimeOptions } from "./agentRuntime";
 import { AgentRuntimeRegistry } from "./agentRuntimeRegistry";
 import { runEsseAgentTurn } from "./esseAgent";
 import type { EsseWorkspaceState, EsseWorkspaceToolRuntime } from "./esseWorkspaceTools";
@@ -99,8 +99,14 @@ describe("esseAgent", () => {
 
     expect(capturedPrompt).toContain("工作区工具模式");
     expect(capturedPrompt).toContain("禁止用 bash/sqlite 查询 project.sqlite");
+    expect(capturedPrompt).not.toContain("read_project_file");
+    expect(capturedPrompt).not.toContain("write_project_file");
+    expect(capturedPrompt).not.toContain("append_project_file");
+    expect(capturedPrompt).toContain("generate_image 和 run_batch_generation 是本项目生图 API 的唯一入口");
     expect(capturedPrompt).toContain("调用 generate_image、run_batch_generation 或 package_generated_images 会立刻在界面插入确认卡，并挂起当前 turn 等待用户选择执行、修改或取消。");
     expect(capturedPrompt).toContain("决定调用这些工具后，不要先输出追问、旧方案已取消、请确认后我再执行等自然语言");
+    expect(capturedPrompt).toContain("把 commands 拆成每批最多 10 条");
+    expect(capturedPrompt).toContain("若还有下一批未提交，继续调用 run_batch_generation 产出下一张确认卡");
     expect(capturedPrompt).not.toMatch(/\bplan\b|imageRequests/);
   });
 
@@ -128,6 +134,7 @@ describe("esseAgent", () => {
               capturedPrompt = prompt;
             }
           }),
+        registry: new AgentRuntimeRegistry(),
         workspaceToolRuntime: createTestWorkspaceRuntime({
           project: createTestProjectMetadata(),
           sessions: []
@@ -141,6 +148,44 @@ describe("esseAgent", () => {
     expect(capturedPrompt).toContain("referenceImageNames=[场景图, 目标植物, 大小参考]");
     expect(capturedPrompt).toContain("scene_from_img2 用 [turn-ref-5, turn-ref-2, turn-ref-4]");
     expect(capturedPrompt).toContain("prompt 里不要写【图片5】等用户界面编号");
+  });
+
+  test("renders reusable conversation reference candidates without auto-attaching them", async () => {
+    let capturedPrompt = "";
+
+    await runEsseAgentTurn(
+      {
+        messages: [
+          {
+            role: "user",
+            content: "先用这张参考图出一版",
+            referenceFilePaths: ["C:/project/uploads/style.jpg"]
+          },
+          { role: "assistant", content: "已提交一版。" },
+          { role: "user", content: "沿用刚才的参考图，再生成一张" }
+        ],
+        sessions: []
+      },
+      createEsseTestConfig(),
+      "C:/project",
+      {
+        createRuntime: async () =>
+          createFakeEsseRuntime({
+            onPrompt: (prompt) => {
+              capturedPrompt = prompt;
+            }
+          }),
+        registry: new AgentRuntimeRegistry(),
+        workspaceToolRuntime: createTestWorkspaceRuntime({
+          project: createTestProjectMetadata(),
+          sessions: []
+        })
+      }
+    );
+
+    expect(capturedPrompt).toContain("==== 对话参考图候选 ====");
+    expect(capturedPrompt).toContain("conversation-ref-1：fileName=style.jpg；filePath=C:/project/uploads/style.jpg");
+    expect(capturedPrompt).toContain("只有用户本轮明确要沿用、继续或使用这些图时");
   });
 
   test("returns the assistant text directly instead of parsing legacy JSON fields", async () => {
@@ -182,8 +227,8 @@ describe("esseAgent", () => {
     ).rejects.toThrow("Esse 模型调用失败：Provider returned no choices");
   });
 
-  test("does not call the runtime when the user references a missing attachment", async () => {
-    let runtimeCreated = false;
+  test("passes reference wording to Esse instead of locally blocking missing attachments", async () => {
+    let capturedPrompt = "";
 
     const result = await runEsseAgentTurn(
       {
@@ -193,17 +238,20 @@ describe("esseAgent", () => {
       createEsseTestConfig(),
       "C:/project",
       {
-        createRuntime: async () => {
-          runtimeCreated = true;
-          throw new Error("runtime should not be created");
-        }
+        createRuntime: async () =>
+          createFakeEsseRuntime({
+            getLastAssistantText: () => "我会先检查当前工作区和本轮可用图片，再决定是否需要让你补充参考图。",
+            onPrompt: (prompt) => {
+              capturedPrompt = prompt;
+            }
+          })
       }
     );
 
-    expect(runtimeCreated).toBe(false);
     expect(result).toEqual({
-      reply: "我没有收到可用的参考图附件，请先粘贴或添加参考图后再发送。"
+      reply: "我会先检查当前工作区和本轮可用图片，再决定是否需要让你补充参考图。"
     });
+    expect(capturedPrompt).toContain("按附件里的参考图继续生成三张内部设计图");
   });
 
   test("publishes Pi message updates as visible Esse progress once per turn", async () => {
@@ -267,6 +315,40 @@ describe("esseAgent", () => {
 
     expect(result).toEqual({ reply: "先做两个方向，再出确认卡。" });
     expect(streamedMessages).toEqual(["先做两个方向", "先做两个方向，再出确认卡。"]);
+  });
+
+  test("does not stream the cached previous assistant reply as the new turn starts", async () => {
+    const streamedMessages: string[] = [];
+    let currentAssistantText = "上一条回复";
+    let runtimeListener: ((event: unknown) => void) | undefined;
+
+    const result = await runEsseAgentTurn(
+      {
+        messages: [{ role: "user", content: "继续处理" }],
+        sessions: []
+      },
+      createEsseTestConfig(),
+      "C:/project",
+      {
+        createRuntime: async () =>
+          createFakeEsseRuntime({
+            getLastAssistantText: () => currentAssistantText,
+            onPrompt: () => {
+              runtimeListener?.({ type: "message_update" });
+              currentAssistantText = "新的回复";
+              runtimeListener?.({ type: "message_update" });
+            },
+            subscribe: (listener) => {
+              runtimeListener = listener;
+              return () => undefined;
+            }
+          }),
+        onAssistantMessageUpdate: (content) => streamedMessages.push(content)
+      }
+    );
+
+    expect(result).toEqual({ reply: "新的回复" });
+    expect(streamedMessages).toEqual(["新的回复"]);
   });
 
   test("reuses the cached Esse runtime on follow-up turns and sends an incremental prompt", async () => {
@@ -354,7 +436,7 @@ describe("esseAgent", () => {
           {
             role: "assistant",
             content:
-              "【Esse上一版待确认计划】状态：待用户确认；工具：generate_image；任务数：1；requestId：request-1\n任务1：displayLabel=img-1；target=existing sessionId=sess_1；mode=edit；size=未指定；referenceImageIds=无；prompt=统一做白底商品图"
+              "【上一版待确认计划】状态：待用户确认；工具：generate_image；任务数：1；requestId：request-1\n任务1：displayLabel=img-1；target=existing sessionId=sess_1；mode=edit；size=未指定；referenceImageIds=无；prompt=统一做白底商品图"
           },
           { role: "user", content: "不要白底，背景改成浅灰" }
         ],
@@ -398,7 +480,7 @@ describe("esseAgent", () => {
           {
             role: "assistant",
             content:
-              "【Esse已提交生成计划】batchTaskId：batch_1；任务数：4\n任务1：scene-1.png；mode=generate；referenceImageIds=turn-ref-5,turn-ref-1,turn-ref-4；referenceImageNames=场景图,目标植物,大小参考；prompt=以场景图为待保留场景，将目标植物自然替换进去\n任务2：scene-2.png；mode=generate；referenceImageIds=turn-ref-5,turn-ref-2,turn-ref-4；referenceImageNames=场景图,目标植物,大小参考；prompt=以场景图为待保留场景，将目标植物自然替换进去"
+              "【已提交生成计划】batchTaskId：batch_1；任务数：4\n任务1：scene-1.png；mode=generate；referenceImageIds=turn-ref-5,turn-ref-1,turn-ref-4；referenceImageNames=场景图,目标植物,大小参考；prompt=以场景图为待保留场景，将目标植物自然替换进去\n任务2：scene-2.png；mode=generate；referenceImageIds=turn-ref-5,turn-ref-2,turn-ref-4；referenceImageNames=场景图,目标植物,大小参考；prompt=以场景图为待保留场景，将目标植物自然替换进去"
           },
           { role: "user", content: "重新生成两个商品图，要保留原始的花盆" }
         ],
@@ -421,9 +503,9 @@ describe("esseAgent", () => {
     const listedFileNames: string[] = [];
     let factoryCalls = 0;
 
-    const createRuntime = async (options: { customToolDefinitions?: unknown[] }) => {
+    const createRuntime = async (options: CreateAgentRuntimeOptions) => {
       factoryCalls += 1;
-      const customTools = options.customToolDefinitions as Array<{
+      const customTools = await collectRuntimeTools(options) as Array<{
         execute: (toolCallId: string, params: Record<string, unknown>) => Promise<{ details?: Record<string, unknown> }>;
         name: string;
       }>;
@@ -499,7 +581,7 @@ describe("esseAgent", () => {
     expect(listedFileNames).toEqual(["first.jpg", "second.jpg"]);
   });
 
-  test("clears a prior Esse runtime when a fresh missing-reference turn is handled locally", async () => {
+  test("routes a fresh reference-wording turn through a rebuilt Esse runtime", async () => {
     const registry = new AgentRuntimeRegistry();
     let factoryCalls = 0;
 
@@ -522,7 +604,7 @@ describe("esseAgent", () => {
     );
     expect(registry.has("esse:c:/project")).toBe(true);
 
-    const missingResult = await runEsseAgentTurn(
+    const result = await runEsseAgentTurn(
       {
         messages: [{ role: "user", content: "按附件里的参考图继续生成三张图" }],
         sessions: []
@@ -532,8 +614,9 @@ describe("esseAgent", () => {
       deps
     );
 
-    expect(missingResult.reply).toContain("没有收到可用的参考图附件");
-    expect(registry.has("esse:c:/project")).toBe(false);
+    expect(result.reply).toBe("收到。");
+    expect(factoryCalls).toBe(2);
+    expect(registry.has("esse:c:/project")).toBe(true);
   });
 
   test("rebuilds the Esse runtime when the user starts a fresh project conversation", async () => {
@@ -606,7 +689,7 @@ describe("esseAgent", () => {
       "C:/project",
       {
         createRuntime: async (options) => {
-          const customTools = options.customToolDefinitions as Array<{
+          const customTools = await collectRuntimeTools(options) as Array<{
             execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
             name: string;
           }>;
@@ -638,6 +721,10 @@ describe("esseAgent", () => {
     );
     expect(capturedPrompt).toContain("工作区工具模式");
     expect(capturedPrompt).toContain("默认不要假设自己知道左侧工作区内容");
+    expect(capturedPrompt).toContain("用户说“左侧”“添加到左侧”“放到左侧”时，通常就是让你把图片加入或整理到这个工作区");
+    expect(capturedPrompt).toContain("多张图片必须在一次 add_workspace_image 调用里传 images=[{filePath,fileName}, ...]");
+    expect(capturedPrompt).toContain("==== 当前工作区快照 ====");
+    expect(capturedPrompt).toContain("img-1：sessionId=sess_1；referenceImageId=workspace-ref-sess_1；fileName=flower.jpg；generatedRecordCount=2；selected=true");
     expect(capturedPrompt).toContain("回退或删除记录前必须调用 get_session_records");
     expect(capturedPrompt).not.toContain("只返回一个 JSON 对象");
     expect(toolTrace).toEqual(["list_sessions", "get_session_records", "restore_session_record", "delete_session_record"]);
@@ -660,6 +747,8 @@ describe("esseAgent", () => {
       sessions: []
     });
     let capturedPrompt = "";
+    let directCustomToolNames: string[] = [];
+    let extensionToolNames: string[] = [];
     let registeredToolNames: string[] = [];
 
     await runEsseAgentTurn(
@@ -672,7 +761,9 @@ describe("esseAgent", () => {
       {
         bashTool: { name: "bash" },
         createRuntime: async (options) => {
-          const customTools = options.customToolDefinitions as Array<{ name: string }>;
+          directCustomToolNames = (options.customToolDefinitions ?? []).map((tool) => (tool as { name?: string }).name ?? "");
+          extensionToolNames = options.extensionToolNames ?? [];
+          const customTools = await collectRuntimeTools(options) as Array<{ name: string }>;
           registeredToolNames = customTools.map((tool) => tool.name);
           return createFakeEsseRuntime({
             onPrompt: (prompt) => {
@@ -686,6 +777,8 @@ describe("esseAgent", () => {
     );
 
     expect(registeredToolNames).toEqual(expect.arrayContaining(["bash", "list_sessions"]));
+    expect(directCustomToolNames).toEqual(["bash"]);
+    expect(extensionToolNames).toEqual(expect.arrayContaining(["list_sessions", "generate_image", "rename_session"]));
     expect(capturedPrompt).toContain("Available skills");
     expect(capturedPrompt).toContain("xlsx-export");
     expect(capturedPrompt).toContain("先用 read 读取对应 SKILL.md，再用 bash 执行");
@@ -736,6 +829,22 @@ function createFakeEsseRuntime(
     },
     subscribe: options.subscribe ?? (() => () => undefined)
   };
+}
+
+async function collectRuntimeTools(options: CreateAgentRuntimeOptions): Promise<unknown[]> {
+  const extensionTools: unknown[] = [];
+  for (const factory of options.extensionFactories ?? []) {
+    if (typeof factory !== "function") {
+      continue;
+    }
+    await factory({
+      registerTool: (tool: unknown) => {
+        extensionTools.push(tool);
+      }
+    });
+  }
+
+  return [...extensionTools, ...(options.customToolDefinitions ?? [])];
 }
 
 function createTestWorkspaceRuntime(initialState: EsseWorkspaceState): EsseWorkspaceToolRuntime & { getState: () => EsseWorkspaceState } {

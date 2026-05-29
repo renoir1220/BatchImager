@@ -5,6 +5,19 @@ import type {
   AddEsseMemoryRequest,
   AddEsseMemoryResponse,
   ApiSettingsSnapshot,
+  AgentAssistantMessageUpdateEvent,
+  AgentBashExecutionEvent,
+  AgentPermissionRequest,
+  AgentPermissionResponse,
+  AgentPermissionResponseAck,
+  AgentPreflightRequest,
+  AgentPreflightResponse,
+  AgentPreflightResponseAck,
+  AgentProviderDescriptor,
+  CancelAgentBatchTaskAllRequest,
+  CancelAgentBatchTaskAllResponse,
+  CancelAgentBatchTaskItemRequest,
+  CancelAgentBatchTaskItemResponse,
   CancelEsseBatchTaskAllRequest,
   CancelEsseBatchTaskAllResponse,
   CancelEsseBatchTaskItemRequest,
@@ -33,6 +46,10 @@ import type {
   RetryEsseBatchTaskFailedResponse,
   RetryEsseBatchTaskItemRequest,
   RetryEsseBatchTaskItemResponse,
+  RetryAgentBatchTaskFailedRequest,
+  RetryAgentBatchTaskFailedResponse,
+  RetryAgentBatchTaskItemRequest,
+  RetryAgentBatchTaskItemResponse,
   SaveApiSettingsRequest,
   ReadEsseSkillFileRequest,
   ReadEsseSkillFileResponse,
@@ -52,6 +69,8 @@ import type {
   EsseMemorySnapshot,
   SendEsseMessageRequest,
   SendEsseMessageResponse,
+  SendAgentMessageRequest,
+  SendAgentMessageResponse,
   EsseSkillsSnapshot,
   ShowFileInFolderRequest,
   SetEsseSkillEnabledRequest
@@ -75,6 +94,10 @@ const api = {
     ipcRenderer.invoke("generation:generate-image", request),
   cancelOperation: async (request: CancelOperationRequest): Promise<CancelOperationResponse> =>
     ipcRenderer.invoke("app:cancel-operation", request),
+  cancelAgentBatchTaskItem: async (request: CancelAgentBatchTaskItemRequest): Promise<CancelAgentBatchTaskItemResponse> =>
+    ipcRenderer.invoke("agent:batch-task-cancel-item", request),
+  cancelAgentBatchTaskAll: async (request: CancelAgentBatchTaskAllRequest): Promise<CancelAgentBatchTaskAllResponse> =>
+    ipcRenderer.invoke("agent:batch-task-cancel-all", request),
   cancelEsseBatchTaskItem: async (request: CancelEsseBatchTaskItemRequest): Promise<CancelEsseBatchTaskItemResponse> =>
     ipcRenderer.invoke("esse:batch-task-cancel-item", request),
   cancelEsseBatchTaskAll: async (request: CancelEsseBatchTaskAllRequest): Promise<CancelEsseBatchTaskAllResponse> =>
@@ -83,6 +106,10 @@ const api = {
     ipcRenderer.invoke("esse:batch-task-retry-item", request),
   retryEsseBatchTaskFailed: async (request: RetryEsseBatchTaskFailedRequest): Promise<RetryEsseBatchTaskFailedResponse> =>
     ipcRenderer.invoke("esse:batch-task-retry-failed", request),
+  retryAgentBatchTaskItem: async (request: RetryAgentBatchTaskItemRequest): Promise<RetryAgentBatchTaskItemResponse> =>
+    ipcRenderer.invoke("agent:batch-task-retry-item", request),
+  retryAgentBatchTaskFailed: async (request: RetryAgentBatchTaskFailedRequest): Promise<RetryAgentBatchTaskFailedResponse> =>
+    ipcRenderer.invoke("agent:batch-task-retry-failed", request),
   createPlaceholderImage: async (request: CreatePlaceholderImageRequest): Promise<CreatePlaceholderImageResponse> =>
     ipcRenderer.invoke("images:create-placeholder", request),
   saveReferenceImage: async (request: SaveReferenceImageRequest): Promise<SaveReferenceImageResponse> =>
@@ -95,6 +122,13 @@ const api = {
     ipcRenderer.invoke("chat:send-message", request),
   sendEsseMessage: async (request: SendEsseMessageRequest): Promise<SendEsseMessageResponse> =>
     ipcRenderer.invoke("esse:send-message", request),
+  listAgentProviders: async (): Promise<AgentProviderDescriptor[]> => ipcRenderer.invoke("agent:list-providers"),
+  sendAgentMessage: async (request: SendAgentMessageRequest): Promise<SendAgentMessageResponse> =>
+    ipcRenderer.invoke("agent:send-message", request),
+  respondAgentPreflight: async (response: AgentPreflightResponse): Promise<AgentPreflightResponseAck> =>
+    ipcRenderer.invoke("agent:preflight-response", response),
+  respondAgentPermission: async (response: AgentPermissionResponse): Promise<AgentPermissionResponseAck> =>
+    ipcRenderer.invoke("agent:permission-response", response),
   respondEssePreflight: async (response: EssePreflightResponse): Promise<EssePreflightResponseAck> =>
     ipcRenderer.invoke("esse:preflight-response", response),
   respondEssePermission: async (response: EssePermissionResponse): Promise<EssePermissionResponseAck> =>
@@ -149,6 +183,22 @@ const api = {
       ipcRenderer.removeListener("project:snapshot-updated", handler);
     };
   },
+  subscribeAgentPreflightRequests: (listener: (request: AgentPreflightRequest) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, request: AgentPreflightRequest) => listener(request);
+    ipcRenderer.on("agent:preflight-request", handler);
+
+    return () => {
+      ipcRenderer.removeListener("agent:preflight-request", handler);
+    };
+  },
+  subscribeAgentPermissionRequests: (listener: (request: AgentPermissionRequest) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, request: AgentPermissionRequest) => listener(request);
+    ipcRenderer.on("agent:permission-request", handler);
+
+    return () => {
+      ipcRenderer.removeListener("agent:permission-request", handler);
+    };
+  },
   subscribeEssePreflightRequests: (listener: (request: EssePreflightRequest) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, request: EssePreflightRequest) => listener(request);
     ipcRenderer.on("esse:preflight-request", handler);
@@ -165,12 +215,28 @@ const api = {
       ipcRenderer.removeListener("esse:permission-request", handler);
     };
   },
+  subscribeAgentBashExecutionEvents: (listener: (event: AgentBashExecutionEvent) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, bashEvent: AgentBashExecutionEvent) => listener(bashEvent);
+    ipcRenderer.on("agent:bash-execution", handler);
+
+    return () => {
+      ipcRenderer.removeListener("agent:bash-execution", handler);
+    };
+  },
   subscribeEsseBashExecutionEvents: (listener: (event: EsseBashExecutionEvent) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, bashEvent: EsseBashExecutionEvent) => listener(bashEvent);
     ipcRenderer.on("esse:bash-execution", handler);
 
     return () => {
       ipcRenderer.removeListener("esse:bash-execution", handler);
+    };
+  },
+  subscribeAgentAssistantMessageUpdates: (listener: (event: AgentAssistantMessageUpdateEvent) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, updateEvent: AgentAssistantMessageUpdateEvent) => listener(updateEvent);
+    ipcRenderer.on("agent:assistant-message-update", handler);
+
+    return () => {
+      ipcRenderer.removeListener("agent:assistant-message-update", handler);
     };
   },
   subscribeEsseAssistantMessageUpdates: (listener: (event: EsseAssistantMessageUpdateEvent) => void): (() => void) => {

@@ -1,5 +1,5 @@
 import type { WebContents } from "electron";
-import type { EssePreflightPayload, EssePreflightRequest, EssePreflightResponse } from "../ipcTypes";
+import type { AgentPreflightPayload, AgentPreflightRequest, AgentPreflightResponse } from "../ipcTypes";
 import type { EssePreflightDecision } from "./esseWorkspaceTools";
 
 interface PendingPreflight {
@@ -26,7 +26,7 @@ export class EssePreflightBroker {
 
   request(
     webContents: Pick<WebContents, "send">,
-    payload: EssePreflightPayload,
+    payload: AgentPreflightPayload,
     options: { signal?: AbortSignal } = {}
   ): Promise<EssePreflightDecision> {
     const requestId = this.options.makeId?.() ?? this.createRequestId();
@@ -34,7 +34,7 @@ export class EssePreflightBroker {
       this.resolve(requestId, { decision: "cancel", detail: "Preflight timed out" });
     }, this.options.timeoutMs ?? DEFAULT_PREFLIGHT_TIMEOUT_MS);
 
-    const request: EssePreflightRequest = { payload, requestId };
+    const request: AgentPreflightRequest = { payload, requestId };
 
     return new Promise((resolve, reject) => {
       const abort = () => {
@@ -50,11 +50,12 @@ export class EssePreflightBroker {
         timeout
       });
       options.signal?.addEventListener("abort", abort, { once: true });
+      webContents.send("agent:preflight-request", request);
       webContents.send("esse:preflight-request", request);
     });
   }
 
-  respond(response: EssePreflightResponse): boolean {
+  respond(response: AgentPreflightResponse): boolean {
     const decision: EssePreflightDecision =
       response.decision === "execute"
         ? { decision: "execute" }
@@ -92,6 +93,6 @@ export class EssePreflightBroker {
 
   private createRequestId(): string {
     this.sequence += 1;
-    return `esse-preflight-${Date.now()}-${this.sequence}`;
+    return `agent-preflight-${Date.now()}-${this.sequence}`;
   }
 }

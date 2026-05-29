@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import type { EssePreflightPayload } from "../ipcTypes";
+import type { AgentPreflightPayload } from "../ipcTypes";
 import { EssePreflightBroker } from "./essePreflightBroker";
 
 describe("EssePreflightBroker", () => {
@@ -8,7 +8,10 @@ describe("EssePreflightBroker", () => {
     const broker = new EssePreflightBroker({ makeId: () => "request-1" });
     const pending = broker.request({ send: (...args: unknown[]) => sent.push(args) }, createPayload());
 
-    expect(sent).toEqual([["esse:preflight-request", { payload: createPayload(), requestId: "request-1" }]]);
+    expect(sent).toEqual([
+      ["agent:preflight-request", { payload: createPayload(), requestId: "request-1" }],
+      ["esse:preflight-request", { payload: createPayload(), requestId: "request-1" }]
+    ]);
     expect(broker.respond({ decision: "execute", requestId: "request-1" })).toBe(true);
     await expect(pending).resolves.toEqual({ decision: "execute" });
   });
@@ -72,7 +75,7 @@ describe("EssePreflightBroker", () => {
   });
 });
 
-function createPayload(): EssePreflightPayload {
+function createPayload(): AgentPreflightPayload {
   return {
     commands: [
       {

@@ -1,10 +1,14 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { createEsseBashTool, sanitizeBashEnv, type EsseBashOperations, type EsseBashToolOptions } from "./esseBashTool";
 import type { BatchImagerCommandPolicy } from "./agentCommandPolicy";
 import type { EssePermissionBroker } from "./essePermissionBroker";
 import type { EsseSkillLoader } from "./esseSkillLoader";
 
 describe("createEsseBashTool", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   test("blocks commands rejected by policy before broker or execution", async () => {
     const exec = vi.fn();
     const permissionBroker = { request: vi.fn() } as unknown as EssePermissionBroker;
@@ -72,7 +76,7 @@ describe("createEsseBashTool", () => {
           BATCHIMAGER_PROJECT_DIR: "/project",
           BATCHIMAGER_SKILL_NAME: "xlsx-export",
           HOME: "/Users/test",
-          PATH: "/usr/bin"
+          PATH: expect.stringContaining("/usr/bin")
         })
       })
     );
@@ -125,8 +129,16 @@ describe("createEsseBashTool", () => {
     await tool.execute("call-1", { command: "node /skills/xlsx-export/scripts/export.mjs" });
 
     expect(webContents.send).toHaveBeenCalledWith(
-      "esse:bash-execution",
+      "agent:bash-execution",
       expect.objectContaining({ status: "running", toolCallId: "call-1", skillName: "xlsx-export" })
+    );
+    expect(webContents.send).toHaveBeenCalledWith(
+      "agent:bash-execution",
+      expect.objectContaining({
+        outputPath: "/project/exports/list.xlsx",
+        status: "completed",
+        toolCallId: "call-1"
+      })
     );
     expect(webContents.send).toHaveBeenCalledWith(
       "esse:bash-execution",
@@ -136,6 +148,69 @@ describe("createEsseBashTool", () => {
         toolCallId: "call-1"
       })
     );
+  });
+
+  test("coalesces high-frequency running output before publishing to the renderer", async () => {
+    vi.useFakeTimers();
+    const webContents = { send: vi.fn() };
+    let releaseExecution: ((value: unknown) => void) | undefined;
+    const executionStarted = new Promise<void>((resolve) => {
+      releaseExecution = resolve;
+    });
+    const tool = await createEsseBashTool({
+      bashSdk: {
+        createBashToolDefinition: (_cwd, _toolOptions) => ({
+          name: "bash",
+          execute: async (_toolCallId, _params, _signal, onUpdate) => {
+            onUpdate?.({ content: [{ type: "text", text: "progress 1" }] });
+            onUpdate?.({ content: [{ type: "text", text: "progress 2" }] });
+            onUpdate?.({ content: [{ type: "text", text: "progress 3" }] });
+            await executionStarted;
+            return {
+              content: [{ type: "text", text: "done" }],
+              details: { exitCode: 0 }
+            };
+          }
+        }),
+        createLocalBashOperations: () => ({ exec: vi.fn() })
+      },
+      commandPolicy: { checkCommand: () => ({ allowed: true }) },
+      permissionBroker: {
+        request: vi.fn().mockResolvedValue({ decision: "allow" })
+      } as unknown as EssePermissionBroker,
+      projectDirectory: "/project",
+      sessionAllowList: new Set(),
+      sessionId: "esse-agent",
+      skillLoader: createTestSkillLoader(),
+      userDataDirectory: "/user-data",
+      webContents
+    }) as {
+      execute: (toolCallId: string, params: { command: string }) => Promise<unknown>;
+    };
+
+    const execution = tool.execute("call-progress", { command: "printf progress" });
+    await Promise.resolve();
+    const agentEvents = () => webContents.send.mock.calls.filter(([channel]) => channel === "agent:bash-execution");
+
+    expect(agentEvents()).toHaveLength(1);
+    vi.advanceTimersByTime(249);
+    expect(agentEvents()).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(agentEvents()).toHaveLength(2);
+    expect(agentEvents().at(-1)).toEqual([
+      "agent:bash-execution",
+      expect.objectContaining({ output: "progress 3", status: "running" })
+    ]);
+
+    releaseExecution?.(undefined);
+    await execution;
+
+    expect(agentEvents().at(-1)).toEqual([
+      "agent:bash-execution",
+      expect.objectContaining({ output: "done", status: "completed" })
+    ]);
+    vi.advanceTimersByTime(250);
+    expect(agentEvents()).toHaveLength(3);
   });
 });
 
@@ -154,9 +229,22 @@ describe("sanitizeBashEnv", () => {
       BATCHIMAGER_SKILL_NAME: "",
       BATCHIMAGER_USER_DATA: "/user-data",
       HOME: "/Users/test",
-      PATH: "/usr/bin"
+      PATH: expect.stringContaining("/usr/bin")
     });
     expect(env).not.toHaveProperty("OPENAI_API_KEY");
+  });
+
+  test("adds common macOS tool directories to the sanitized bash PATH", () => {
+    const env = sanitizeBashEnv(
+      { HOME: "/Users/test", PATH: "/usr/bin" },
+      "/project",
+      "/user-data",
+      undefined
+    );
+
+    if (process.platform !== "win32") {
+      expect(env.PATH?.split(":")).toEqual(expect.arrayContaining(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]));
+    }
   });
 });
 

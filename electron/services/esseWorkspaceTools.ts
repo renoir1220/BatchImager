@@ -3,14 +3,38 @@ import type {
   EssePermissionPayload,
   EssePreflightCommand,
   EssePreflightPayload,
-  PersistedUndoEntry,
   PersistedImageSession,
-  ProjectSnapshot,
-  SerializableUndoDescriptor
+  ProjectSnapshot
 } from "../ipcTypes";
 import type { AgentToolResult, BatchImagerAgentTool, BatchImagerAgentToolRisk } from "./batchImagerAgentTools";
+import {
+  appendWorkbenchUndoEntry,
+  createWorkbenchUndoEntry,
+  deleteWorkbenchSession,
+  deleteWorkbenchSessionRecord,
+  duplicateWorkbenchSession,
+  mergeWorkbenchSessions,
+  renameWorkbenchSession,
+  reorderWorkbenchSessions,
+  restoreOriginalWorkbenchImage,
+  restoreWorkbenchSessionRecord,
+  setWorkbenchSessionPrompt,
+  splitWorkbenchSession,
+  undoLastWorkbenchActions
+} from "./batchImagerWorkbenchActions";
+import {
+  getProjectOverviewCapability,
+  getSessionRecordsCapability,
+  listReferenceImagesCapability,
+  listRememberedPreferencesCapability,
+  listSessionsCapability,
+  readImageMetadataCapability,
+  scanUnreferencedFilesCapability,
+  type BatchImagerImageMetadataRequest,
+  type BatchImagerWorkbenchCapabilityResult,
+  type BatchImagerWorkbenchCapabilityRuntime
+} from "./batchImagerWorkbenchCapabilityApi";
 import type { EsseMemoryCategory, EsseMemoryStore } from "./esseMemoryStore";
-import type { ProjectImageMetadataResult } from "./projectImageMetadata";
 import type { DeleteUnreferencedFileResult, UnreferencedFileCandidate } from "./projectUnreferencedFiles";
 
 export type EsseWorkspaceState = ProjectSnapshot;
@@ -24,6 +48,7 @@ export interface EsseWorkspaceToolRuntime {
     state: EsseWorkspaceState;
   }>;
   addReferenceImage?: (request: EsseAddReferenceImageRequest) => Promise<WorkspaceMutationResult>;
+  addWorkspaceImage?: (request: EsseAddWorkspaceImageRequest) => Promise<WorkspaceMutationResult>;
   deleteUnreferencedFiles?: (candidateIds: string[]) => Promise<DeleteUnreferencedFileResult[]>;
   createBlankSession?: (request: EsseBlankSessionRequest) => Promise<WorkspaceMutationResult>;
   executeImagePreflightTool?: (request: EsseImagePreflightExecutionRequest) => Promise<WorkspaceMutationResult>;
@@ -34,7 +59,7 @@ export interface EsseWorkspaceToolRuntime {
   getTurnBudget?: () => EsseTurnBudget | undefined;
   memoryStore?: EsseMemoryStore;
   recordToolCall?: (event: EsseWorkspaceToolCallEvent) => void | Promise<void>;
-  readImageMetadata?: (request: EsseImageMetadataRequest) => Promise<ProjectImageMetadataResult>;
+  readImageMetadata?: BatchImagerWorkbenchCapabilityRuntime["readImageMetadata"];
   removeReferenceImage?: (request: EsseRemoveReferenceImageRequest) => Promise<WorkspaceMutationResult>;
   requestPermission?: (request: EsseWorkspacePermissionRequest) => Promise<EsseWorkspacePermissionDecision>;
   requestPreflight?: (payload: EssePreflightPayload) => Promise<EssePreflightDecision>;
@@ -82,18 +107,21 @@ export interface EsseAddReferenceImageRequest {
   filePath: string;
 }
 
+export interface EsseAddWorkspaceImageRequest {
+  images: Array<{
+    fileName?: string;
+    filePath: string;
+  }>;
+}
+
 export interface EsseRemoveReferenceImageRequest {
   referenceImageId: string;
 }
 
-export interface EsseImageMetadataRequest {
-  recordIndex?: number;
-  sessionId: string;
-}
+export type EsseImageMetadataRequest = BatchImagerImageMetadataRequest;
 
 export interface EsseWorkspaceToolCallEvent {
   params: Record<string, unknown>;
-  reversible?: PersistedUndoEntry;
   result: AgentToolResult;
   toolName: string;
 }
@@ -110,6 +138,7 @@ export function createEsseWorkspaceTools(runtime: EsseWorkspaceToolRuntime): Bat
     createReorderSessionsTool(runtime),
     createSetSessionPromptTool(runtime),
     createAddBlankSessionTool(runtime),
+    createAddWorkspaceImageTool(runtime),
     createListReferenceImagesTool(runtime),
     createAddReferenceImageTool(runtime),
     createRemoveReferenceImageTool(runtime),
@@ -166,6 +195,111 @@ function createAddBlankSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImag
   };
 }
 
+function createAddWorkspaceImageTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
+  return {
+    name: "add_workspace_image",
+    label: "添加图片到工作区",
+    risk: "safe-write",
+    requiresPreflight: false,
+    description:
+      "Add one or more existing local image files as new image sessions in the left workspace. Use one call with images=[...] when the user asks to add/import/place multiple images on the left/workspace, especially image files just produced by a prior bash or skill step such as exported PPT pages. Single-image legacy filePath/fileName parameters are still accepted. Do not invent paths or use URLs. Do not use this before generate_image or run_batch_generation; generation tools create their own output sessions after preflight.",
+    parameters: addWorkspaceImageParameters(),
+    async execute(_toolCallId, params) {
+      if (!runtime.addWorkspaceImage) {
+        return toolError("add_workspace_image unavailable", undefined, "run this tool only in a project workspace runtime.");
+      }
+
+      const imageInputResult = readWorkspaceImageInputs(params);
+      if (!imageInputResult.ok) {
+        return toolError(imageInputResult.reason, imageInputResult.detail, imageInputResult.suggestedNext);
+      }
+
+      for (const image of imageInputResult.images) {
+        if (!isSupportedReferenceImagePath(image.filePath)) {
+          return toolError("unsupported image type", image.filePath, "Use jpg, jpeg, png, webp, gif, bmp, tif, tiff, heic, or heif images.");
+        }
+      }
+
+      const permission = await requestWorkspaceToolPermission(runtime, {
+        label: "添加图片到工作区",
+        name: "add_workspace_image",
+        requiresPreflight: false,
+        risk: "safe-write"
+      }, params);
+      if (permission) {
+        return permission;
+      }
+
+      const result = await runtime.addWorkspaceImage({ images: imageInputResult.images });
+      if (!result.ok) {
+        return toolError(result.reason, result.detail, result.suggestedNext);
+      }
+
+      return toolOk(result.summary, { affectedSessionIds: result.affectedSessionIds });
+    }
+  };
+}
+
+interface WorkspaceImageInput {
+  fileName?: string;
+  filePath: string;
+}
+
+function readWorkspaceImageInputs(
+  params: Record<string, unknown>
+): { images: WorkspaceImageInput[]; ok: true } | Extract<WorkspaceMutationResult, { ok: false }> {
+  const images: WorkspaceImageInput[] = [];
+  if (params.images !== undefined) {
+    if (!Array.isArray(params.images)) {
+      return {
+        ok: false,
+        reason: "images must be an array",
+        suggestedNext: "pass images as an array of { filePath, fileName } objects."
+      };
+    }
+
+    for (const [index, image] of params.images.entries()) {
+      if (!image || typeof image !== "object") {
+        return {
+          ok: false,
+          reason: "image must be an object",
+          detail: `images[${index}] is not an object`,
+          suggestedNext: "pass each image as { filePath, fileName }."
+        };
+      }
+
+      const filePath = readString((image as Record<string, unknown>).filePath);
+      if (!filePath) {
+        return {
+          ok: false,
+          reason: "image filePath is required",
+          detail: `images[${index}].filePath is missing`,
+          suggestedNext: "pass an exact local image path from an available tool result or attachment."
+        };
+      }
+
+      const fileName = readString((image as Record<string, unknown>).fileName);
+      images.push({ ...(fileName ? { fileName } : {}), filePath });
+    }
+  }
+
+  const filePath = readString(params.filePath);
+  if (filePath) {
+    const fileName = readString(params.fileName);
+    images.push({ ...(fileName ? { fileName } : {}), filePath });
+  }
+
+  if (images.length === 0) {
+    return {
+      ok: false,
+      reason: "images or filePath is required",
+      suggestedNext: "For multiple images, pass images=[{ filePath, fileName }, ...]. For one image, pass filePath."
+    };
+  }
+
+  return { images, ok: true };
+}
+
 function createListReferenceImagesTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
   return {
     name: "list_reference_images",
@@ -173,22 +307,10 @@ function createListReferenceImagesTool(runtime: EsseWorkspaceToolRuntime): Batch
     risk: "read",
     requiresPreflight: false,
     description:
-      "List reference images registered on the current project, plus any images attached in this turn. Turn attachments are temporary and can be passed directly as referenceImageIds such as turn-ref-1; do not add them to the project unless the user explicitly asks to save/register them.",
+      "List reference images registered on the current project, reusable conversation attachment candidates, plus any images attached in this turn. Turn attachments are temporary and can be passed directly as referenceImageIds such as turn-ref-1; conversation candidates use conversation-ref-N. Do not add them to the project unless the user explicitly asks to save/register them.",
     parameters: emptyParameters(),
     async execute() {
-      const referenceImages = runtime.getState().referenceImages ?? [];
-      const safeReferenceImages = [...referenceImages, ...getTurnReferenceImages(runtime)].map((referenceImage) => formatReferenceImage(referenceImage));
-
-      if (!safeReferenceImages.length) {
-        return toolOk("项目当前没有参考图，本轮也没有附件参考图。", { referenceImages: [] });
-      }
-
-      return toolOk(
-        safeReferenceImages
-          .map((referenceImage, index) => `${index + 1}. id=${referenceImage.id} label=${referenceImage.label} fileName=${referenceImage.fileName}`)
-          .join("\n"),
-        { referenceImages: safeReferenceImages }
-      );
+      return capabilityResultToToolResult(listReferenceImagesCapability(toWorkbenchCapabilityRuntime(runtime)));
     }
   };
 }
@@ -200,11 +322,11 @@ function createAddReferenceImageTool(runtime: EsseWorkspaceToolRuntime): BatchIm
     risk: "external-write",
     requiresPreflight: false,
     description:
-      "Add a reference image to the current project from a local file path the user shared in this turn. Use only when the user explicitly attached or pasted a new image and asks to register it as a reference. Do not invent file paths or download from URLs. Parameters: filePath must be from the current turn's referenceImagePaths input; fileName is optional display text.",
+      "Add a reference image to the current project from an available local image path, such as a current-turn attachment, prior bash/skill/tool output, or explicit local source. Use only when the user asks to register/save it as a reusable project reference. Do not invent file paths or download from URLs. fileName is optional display text.",
     parameters: objectParameters(
       {
         fileName: "Optional display file name for this reference image.",
-        filePath: "A local image path from the current turn's referenceImagePaths input."
+        filePath: "An available local image path from an attachment, bash/skill/tool result, or explicit local source."
       },
       ["filePath"]
     ),
@@ -216,16 +338,7 @@ function createAddReferenceImageTool(runtime: EsseWorkspaceToolRuntime): BatchIm
       const filePath = readString(params.filePath);
       const fileName = readString(params.fileName);
       if (!filePath) {
-        return toolError("filePath is required", undefined, "pass one exact path from the current turn's referenceImagePaths input.");
-      }
-
-      const allowedPaths = runtime.getTurnReferenceImagePaths?.() ?? [];
-      if (!allowedPaths.includes(filePath)) {
-        return toolError(
-          "filePath is not from this turn",
-          undefined,
-          "Only use a filePath that appears in the current turn's referenceImagePaths input."
-        );
+        return toolError("filePath is required", undefined, "pass one exact local image path from an attachment or available tool result.");
       }
 
       if (!isSupportedReferenceImagePath(filePath)) {
@@ -309,19 +422,7 @@ function createListRememberedPreferencesTool(runtime: EsseWorkspaceToolRuntime):
       "List all currently remembered user preferences with their ids and categories. Use when the user asks what Esse remembers, or before forget_user_preference.",
     parameters: emptyParameters(),
     async execute() {
-      if (!runtime.memoryStore) {
-        return toolError("memory unavailable", undefined, "run this tool only when the Esse memory store is configured.");
-      }
-
-      const entries = await runtime.memoryStore.list();
-      if (!entries.length) {
-        return toolOk("当前没有已记忆条目。", { memories: [] });
-      }
-
-      return toolOk(
-        entries.map((entry, index) => `${index + 1}. [${entry.id}] ${entry.category}：${entry.content}`).join("\n"),
-        { memories: entries }
-      );
+      return capabilityResultToToolResult(await listRememberedPreferencesCapability(toWorkbenchCapabilityRuntime(runtime)));
     }
   };
 }
@@ -343,7 +444,7 @@ function createRememberUserPreferenceTool(runtime: EsseWorkspaceToolRuntime): Ba
     ),
     async execute(_toolCallId, params) {
       if (!runtime.memoryStore) {
-        return toolError("memory unavailable", undefined, "run this tool only when the Esse memory store is configured.");
+        return toolError("memory unavailable", undefined, "run this tool only when the agent memory store is configured.");
       }
 
       const content = readString(params.content);
@@ -401,7 +502,7 @@ function createForgetUserPreferenceTool(runtime: EsseWorkspaceToolRuntime): Batc
     parameters: objectParameters({ memoryId: "Id from list_remembered_preferences." }, ["memoryId"]),
     async execute(_toolCallId, params) {
       if (!runtime.memoryStore) {
-        return toolError("memory unavailable", undefined, "run this tool only when the Esse memory store is configured.");
+        return toolError("memory unavailable", undefined, "run this tool only when the agent memory store is configured.");
       }
 
       const memoryId = readString(params.memoryId);
@@ -451,7 +552,7 @@ function createUndoLastActionsTool(runtime: EsseWorkspaceToolRuntime): BatchImag
 
       const count = Math.min(10, Math.max(1, readInteger(params.count) || 1));
       const mutation = await runtime.applyMutation(
-        (state) => undoLastActions(state, count, runtime.getSinkRevision?.()),
+        (state) => undoLastWorkbenchActions(state, count, runtime.getSinkRevision?.()),
         { countRevision: false }
       );
       if (!mutation.result.ok) {
@@ -481,10 +582,6 @@ function createReadImageMetadataTool(runtime: EsseWorkspaceToolRuntime): BatchIm
       ["sessionId"]
     ),
     async execute(_toolCallId, params) {
-      if (!runtime.readImageMetadata) {
-        return toolError("read_image_metadata unavailable", undefined, "run this tool only in a project workspace runtime.");
-      }
-
       const sessionId = readString(params.sessionId);
       const recordIndex = readInteger(params.recordIndex);
       const request = {
@@ -492,12 +589,7 @@ function createReadImageMetadataTool(runtime: EsseWorkspaceToolRuntime): BatchIm
         sessionId
       };
 
-      try {
-        const metadata = await runtime.readImageMetadata(request);
-        return toolOk(formatImageMetadata(metadata), { metadata });
-      } catch (error) {
-        return toolError("image metadata unavailable", error instanceof Error ? error.message : String(error), "call list_sessions and get_session_records to verify ids.");
-      }
+      return capabilityResultToToolResult(await readImageMetadataCapability(toWorkbenchCapabilityRuntime(runtime), request));
     }
   };
 }
@@ -598,19 +690,19 @@ function createPackageGeneratedImagesTool(runtime: EsseWorkspaceToolRuntime): Ba
         estimatedApiCalls: 0,
         tool: "package_generated_images"
       });
-  if (decision.decision === "cancel") {
-    return toolError(
-      "User canceled preflight",
-      decision.detail,
-      "Ask the user what to adjust before retrying; do NOT retry with the same parameters."
-    );
-  }
+      if (decision.decision === "cancel") {
+        return toolError(
+          "User canceled preflight",
+          decision.detail,
+          "Ask the user what to adjust before retrying; do NOT retry with the same parameters."
+        );
+      }
 
-  if (decision.decision === "modify") {
-    return toolError("package preflight cannot be modified", undefined, "Cancel and ask the user what package settings to use.");
-  }
+      if (decision.decision === "modify") {
+        return toolError("package preflight cannot be modified", undefined, "Cancel and ask the user what package settings to use.");
+      }
 
-  if (!runtime.executePackagePreflightTool) {
+      if (!runtime.executePackagePreflightTool) {
         return toolError("package execution unavailable", undefined, "preflight was confirmed, but no package executor is configured.");
       }
 
@@ -635,7 +727,7 @@ function createGenerateImageTool(runtime: EsseWorkspaceToolRuntime): BatchImager
     risk: "safe-write",
     requiresPreflight: true,
     description:
-      "Generate or edit a single image through the image API. Use this for requests such as background removal, watermark removal, white-background product images, restyling, or creating a new image. This always requires a preflight confirmation before execution: the UI will show a confirmation card and this turn will wait for the user to execute, modify, or cancel it. Do not ask clarifying or confirmation questions in plain text if you have enough information to call this tool. Image results are always added as new workspace images: use target.type='new'. For a new result based on an existing workspace image, use mode='edit' with target.type='new' and target.sourceSessionId; the tool will create/copy the new session after the user approves. Do not call duplicate_session just to prepare generation. If the user wants another workspace image or a turn attachment used as a visual reference, pass its id in referenceImageIds. referenceImageIds is the exact API upload order. When multiple images have different roles, also pass referenceImageNames with the same length/order and write the prompt using those local names, not user-facing 【图片N】 labels. Only pass size when the user clearly requested a concrete size, 2K/4K, square, orientation, or aspect ratio; omit size to keep the source image or first reference image ratio.",
+      "Generate or edit a single image through the BatchImager project image API. Use this for requests such as background removal, watermark removal, white-background product images, restyling, or creating a new image. This always requires a preflight confirmation before execution: the UI will show a confirmation card and this turn will wait for the user to execute, modify, or cancel it. Do not ask clarifying or confirmation questions in plain text if you have enough information to call this tool. Image results are always added as new workspace images: use target.type='new'. For a new result based on an existing workspace image, use mode='edit' with target.type='new' and target.sourceSessionId; the tool will create/copy the new session after the user approves. Do not call duplicate_session just to prepare generation. If the user wants another workspace image or a turn attachment used as a visual reference, pass its id in referenceImageIds. referenceImageIds is the exact API upload order. When multiple images have different roles, also pass referenceImageNames with the same length/order and write the prompt using those local names, not user-facing 【图片N】 labels. Only pass size when the user clearly requested a concrete size, 2K/4K, square, orientation, or aspect ratio; omit size to keep the source image or first reference image ratio.",
     parameters: imageGenerationParameters(),
     async execute(_toolCallId, params) {
       const commandResult = normalizeImagePreflightCommand(runtime.getState(), params);
@@ -663,7 +755,7 @@ function createRunBatchGenerationTool(runtime: EsseWorkspaceToolRuntime): BatchI
     risk: "safe-write",
     requiresPreflight: true,
     description:
-      "Run multiple image generation/edit commands. Use for multi-image, batch, all, or 'this set' requests. This always requires one preflight card before execution: the UI will show a confirmation card and this turn will wait for the user to execute, modify, or cancel it. Do not ask clarifying or confirmation questions in plain text if you have enough information to call this tool. Every command must explicitly set mode='edit' or mode='generate'; there is no default mode. Image results are always added as new workspace images: use target.type='new'. For new results based on existing workspace images, use mode='edit' with target.type='new' and target.sourceSessionId for each source image; the tool will create/copy the target sessions after approval. Do not call duplicate_session just to prepare generation. If the user wants a workspace image or turn attachment used as a visual reference, pass its id in each command's referenceImageIds. referenceImageIds is the exact API upload order. When multiple images have different roles, also pass referenceImageNames with the same length/order and write each prompt using those local names, not user-facing 【图片N】 labels. Omit size unless the user explicitly requests a size or ratio; without size each command keeps its source/first-reference ratio.",
+      "Run multiple image generation/edit commands through the BatchImager project image API. Use for multi-image, batch, all, or 'this set' requests. This always requires one preflight card before execution: the UI will show a confirmation card and this turn will wait for the user to execute, modify, or cancel it. Do not ask clarifying or confirmation questions in plain text if you have enough information to call this tool. For a large request, submit at most 10 commands in one preflight card, wait for the user decision, then submit the next card only if the user executed or modified the previous one. Every command must explicitly set mode='edit' or mode='generate'; there is no default mode. Image results are always added as new workspace images: use target.type='new'. For new results based on existing workspace images, use mode='edit' with target.type='new' and target.sourceSessionId for each source image; the tool will create/copy the target sessions after approval. Do not call duplicate_session just to prepare generation. If the user wants a workspace image or turn attachment used as a visual reference, pass its id in each command's referenceImageIds. referenceImageIds is the exact API upload order. When multiple images have different roles, also pass referenceImageNames with the same length/order and write each prompt using those local names, not user-facing 【图片N】 labels. Omit size unless the user explicitly requests a size or ratio; without size each command keeps its source/first-reference ratio.",
     parameters: batchGenerationParameters(),
     async execute(_toolCallId, params) {
       const rawCommands = Array.isArray(params.commands) ? params.commands : [];
@@ -706,42 +798,9 @@ function createScanUnreferencedFilesTool(runtime: EsseWorkspaceToolRuntime): Bat
       "Scan the project generated-image directory for files not referenced by any session, chat message, or project report. Read-only. Returns candidateId values; never returns file paths.",
     parameters: emptyParameters(),
     async execute() {
-      if (!runtime.scanUnreferencedFiles) {
-        return toolError("scan_unreferenced_files unavailable", undefined, "run this tool only in a project workspace runtime.");
-      }
-
-      const candidates = await runtime.scanUnreferencedFiles();
-      return toolOk(formatUnreferencedScanSummary(candidates), {
-        candidates
-      });
+      return capabilityResultToToolResult(await scanUnreferencedFilesCapability(toWorkbenchCapabilityRuntime(runtime)));
     }
   };
-}
-
-function formatUnreferencedScanSummary(candidates: UnreferencedFileCandidate[]): string {
-  if (candidates.length === 0) {
-    return "已扫描未引用生成文件，没有发现可清理候选。";
-  }
-
-  return [
-    `已扫描未引用生成文件，发现 ${candidates.length} 个候选：`,
-    ...candidates.map((candidate) => `- candidateId=${candidate.candidateId}; fileName=${candidate.fileName}; byteSize=${candidate.byteSize}`)
-  ].join("\n");
-}
-
-function formatImageMetadata(metadata: ProjectImageMetadataResult): string {
-  return [
-    `已读取图片信息：sessionId=${metadata.sessionId}`,
-    `sourceType=${metadata.sourceType}`,
-    metadata.recordIndex ? `recordIndex=${metadata.recordIndex}` : undefined,
-    `fileName=${metadata.fileName}`,
-    `width=${metadata.width}`,
-    `height=${metadata.height}`,
-    metadata.format ? `format=${metadata.format}` : undefined,
-    `byteSize=${metadata.byteSize}`
-  ]
-    .filter(Boolean)
-    .join("; ");
 }
 
 function createDeleteUnreferencedFilesTool(runtime: EsseWorkspaceToolRuntime): BatchImagerAgentTool {
@@ -787,14 +846,7 @@ function createGetProjectOverviewTool(runtime: EsseWorkspaceToolRuntime): BatchI
       "Get project metadata for the current BatchImager project. Use when the user asks about the project name, image count, selected session, or workspace summary.",
     parameters: emptyParameters(),
     async execute() {
-      const state = runtime.getState();
-      return toolOk("已读取项目概览。", {
-        imageCount: state.sessions.length,
-        projectDirectory: state.project.directory,
-        projectId: state.project.id,
-        projectName: state.project.name,
-        selectedSessionId: state.selectedSessionId ?? null
-      });
+      return capabilityResultToToolResult(getProjectOverviewCapability(toWorkbenchCapabilityRuntime(runtime)));
     }
   };
 }
@@ -809,18 +861,7 @@ function createListSessionsTool(runtime: EsseWorkspaceToolRuntime): BatchImagerA
       "List all image sessions in the current BatchImager project. Use before workspace writes. Returns stable id, displayLabel, and referenceImageId. Always pass stable session id to target tools. When a workspace image must be sent to the image API as a visual reference, pass its referenceImageId in referenceImageIds; mentioning an image in prompt text is not enough.",
     parameters: emptyParameters(),
     async execute() {
-      const state = runtime.getState();
-      return toolOk("已列出工作区图片。", {
-        sessions: state.sessions.map((session, index) => ({
-          currentImageSource: getCurrentImageSource(session),
-          displayLabel: `img-${index + 1}`,
-          fileName: session.fileName,
-          generatedRecordCount: session.generatedFilePaths?.length ?? 0,
-          id: session.id,
-          isSelected: session.id === state.selectedSessionId,
-          referenceImageId: getWorkspaceReferenceImageId(session.id)
-        }))
-      });
+      return capabilityResultToToolResult(listSessionsCapability(toWorkbenchCapabilityRuntime(runtime)));
     }
   };
 }
@@ -836,20 +877,7 @@ function createGetSessionRecordsTool(runtime: EsseWorkspaceToolRuntime): BatchIm
     parameters: objectParameters({ sessionId: "Stable session id from list_sessions." }, ["sessionId"]),
     async execute(_toolCallId, params) {
       const sessionId = readString(params.sessionId);
-      const session = runtime.getState().sessions.find((current) => current.id === sessionId);
-      if (!session) {
-        return toolError("session not found", `no session with id ${sessionId}`, "call list_sessions to list current ids.");
-      }
-
-      return toolOk("已列出图片记录。", {
-        records: (session.generatedFilePaths ?? []).map((filePath, index) => ({
-          fileName: basenameFromPath(filePath),
-          isCurrent: filePath === session.generatedFilePath && !session.showOriginalInList,
-          ...(session.originatedFromGeneration && index === 0 ? { isPrimary: true } : {}),
-          recordIndex: index + 1
-        })),
-        sessionId
-      });
+      return capabilityResultToToolResult(getSessionRecordsCapability(toWorkbenchCapabilityRuntime(runtime), { sessionId }));
     }
   };
 }
@@ -860,7 +888,7 @@ function createRestoreSessionRecordTool(runtime: EsseWorkspaceToolRuntime): Batc
     label: "回退记录",
     name: "restore_session_record",
     parameters: objectParameters({ recordIndex: "1-based generated record index.", sessionId: "Stable session id." }, ["sessionId", "recordIndex"]),
-    mutate: (state, params) => restoreSessionRecord(state, { sessionId: readString(params.sessionId), recordIndex: readInteger(params.recordIndex) }),
+    mutate: (state, params) => restoreWorkbenchSessionRecord(state, { sessionId: readString(params.sessionId), recordIndex: readInteger(params.recordIndex) }),
     runtime
   });
 }
@@ -871,7 +899,7 @@ function createRestoreOriginalTool(runtime: EsseWorkspaceToolRuntime): BatchImag
     label: "恢复原图",
     name: "restore_original",
     parameters: objectParameters({ sessionId: "Stable session id from list_sessions." }, ["sessionId"]),
-    mutate: (state, params) => restoreOriginal(state, { sessionId: readString(params.sessionId) }),
+    mutate: (state, params) => restoreOriginalWorkbenchImage(state, { sessionId: readString(params.sessionId) }),
     runtime
   });
 }
@@ -882,7 +910,7 @@ function createRenameSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImager
     label: "重命名图片",
     name: "rename_session",
     parameters: objectParameters({ fileName: "New non-empty display fileName.", sessionId: "Stable session id from list_sessions." }, ["sessionId", "fileName"]),
-    mutate: (state, params) => renameSession(state, { fileName: readString(params.fileName), sessionId: readString(params.sessionId) }),
+    mutate: (state, params) => renameWorkbenchSession(state, { fileName: readString(params.fileName), sessionId: readString(params.sessionId) }),
     runtime
   });
 }
@@ -893,7 +921,7 @@ function createReorderSessionsTool(runtime: EsseWorkspaceToolRuntime): BatchImag
     label: "调整顺序",
     name: "reorder_sessions",
     parameters: objectParameters({ sessionIds: "Complete ordered list of stable session ids from list_sessions." }, ["sessionIds"]),
-    mutate: (state, params) => reorderSessions(state, { sessionIds: readStringArray(params.sessionIds) }),
+    mutate: (state, params) => reorderWorkbenchSessions(state, { sessionIds: readStringArray(params.sessionIds) }),
     runtime
   });
 }
@@ -904,7 +932,7 @@ function createSetSessionPromptTool(runtime: EsseWorkspaceToolRuntime): BatchIma
     label: "设置提示词",
     name: "set_session_prompt",
     parameters: objectParameters({ prompt: "Non-empty default prompt.", sessionId: "Stable session id from list_sessions." }, ["sessionId", "prompt"]),
-    mutate: (state, params) => setSessionPrompt(state, { prompt: readString(params.prompt), sessionId: readString(params.sessionId) }),
+    mutate: (state, params) => setWorkbenchSessionPrompt(state, { prompt: readString(params.prompt), sessionId: readString(params.sessionId) }),
     runtime
   });
 }
@@ -916,7 +944,7 @@ function createDeleteSessionRecordTool(runtime: EsseWorkspaceToolRuntime): Batch
     name: "delete_session_record",
     parameters: objectParameters({ recordIndex: "1-based generated record index.", sessionId: "Stable session id." }, ["sessionId", "recordIndex"]),
     risk: "destructive",
-    mutate: (state, params) => deleteSessionRecord(state, { sessionId: readString(params.sessionId), recordIndex: readInteger(params.recordIndex) }),
+    mutate: (state, params) => deleteWorkbenchSessionRecord(state, { sessionId: readString(params.sessionId), recordIndex: readInteger(params.recordIndex) }),
     runtime
   });
 }
@@ -928,7 +956,7 @@ function createDeleteSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImager
     name: "delete_session",
     parameters: objectParameters({ sessionId: "Stable session id from list_sessions." }, ["sessionId"]),
     risk: "destructive",
-    mutate: (state, params) => deleteSession(state, { sessionId: readString(params.sessionId) }),
+    mutate: (state, params) => deleteWorkbenchSession(state, { sessionId: readString(params.sessionId) }),
     runtime
   });
 }
@@ -943,7 +971,7 @@ function createMergeSessionsTool(runtime: EsseWorkspaceToolRuntime): BatchImager
       ["targetSessionId", "sourceSessionIds"]
     ),
     mutate: (state, params) =>
-      mergeSessions(state, {
+      mergeWorkbenchSessions(state, {
         sourceSessionIds: readStringArray(params.sourceSessionIds),
         targetSessionId: readString(params.targetSessionId)
       }),
@@ -961,7 +989,7 @@ function createSplitSessionTool(runtime: EsseWorkspaceToolRuntime): BatchImagerA
     parameters: splitSessionParameters(),
     risk: "destructive",
     mutate: (state, params) =>
-      splitSession(state, {
+      splitWorkbenchSession(state, {
         fileName: readString(params.fileName),
         recordIndexes: readIntegerArray(params.recordIndexes),
         sessionId: readString(params.sessionId)
@@ -978,7 +1006,7 @@ function createDuplicateSessionTool(runtime: EsseWorkspaceToolRuntime): BatchIma
     name: "duplicate_session",
     parameters: objectParameters({ fileName: "Optional display fileName for the duplicate.", sessionId: "Stable source session id." }, ["sessionId"]),
     mutate: (state, params) =>
-      duplicateSession(state, {
+      duplicateWorkbenchSession(state, {
         fileName: readString(params.fileName),
         sessionId: readString(params.sessionId)
       }),
@@ -1015,9 +1043,10 @@ function derivePermissionContext(toolName: string, params: Record<string, unknow
   const sessionId = readString(params.sessionId) || readString(target?.sessionId);
   const displayLabel = readString(params.displayLabel);
   const fileName = readString(params.fileName) || readString(target?.fileName);
+  const relativePath = readString(params.relativePath);
   const referenceImageId = readString(params.referenceImageId);
   const memoryId = readString(params.memoryId);
-  const targetKey = sessionId || referenceImageId || memoryId || fileName || "global";
+  const targetKey = sessionId || referenceImageId || memoryId || fileName || relativePath || "global";
 
   return {
     ...(displayLabel ? { affectedDisplayLabel: displayLabel } : {}),
@@ -1085,7 +1114,7 @@ function reversibleMutationTool(options: {
 
       return {
         result: mutation.result,
-        state: appendUndoEntry(mutation.state, createUndoEntry({
+        state: appendWorkbenchUndoEntry(mutation.state, createWorkbenchUndoEntry({
           affectedSessionIds: mutation.result.affectedSessionIds,
           beforeState: state,
           sinkRevisionAfter: nextSinkRevision(options.runtime),
@@ -1097,259 +1126,9 @@ function reversibleMutationTool(options: {
   });
 }
 
-function undoLastActions(
-  state: EsseWorkspaceState,
-  count: number,
-  currentSinkRevision: number | undefined
-): { result: WorkspaceMutationResult; state: EsseWorkspaceState } {
-  const entries = [...(state.esseUndoLog ?? [])].reverse().filter((entry) => !entry.undone).slice(0, count);
-  if (!entries.length) {
-    return fail(state, "nothing to undo", undefined, "There are no reversible workspace actions to undo.");
-  }
-
-  let nextState = state;
-  const undoneSummaries: string[] = [];
-  const affectedSessionIds = new Set<string>();
-
-  for (const entry of entries) {
-    nextState = applyUndoDescriptor(nextState, entry.inverseDescriptor);
-    const undoneIds = new Set([entry.id]);
-    nextState = {
-      ...nextState,
-      esseUndoLog: (nextState.esseUndoLog ?? []).map((current) => (undoneIds.has(current.id) ? { ...current, undone: true } : current))
-    };
-    undoneSummaries.push(entry.summary);
-    for (const sessionId of entry.affectedSessionIds) {
-      affectedSessionIds.add(sessionId);
-    }
-  }
-
-  const revisionWarning = formatUndoRevisionWarning(entries, currentSinkRevision);
-  return ok(
-    nextState,
-    [...affectedSessionIds],
-    `${revisionWarning ?? ""}已撤销 ${entries.length} 个操作：${undoneSummaries.join("；")}`
-  );
-}
-
-function appendUndoEntry(state: EsseWorkspaceState, entry: PersistedUndoEntry): EsseWorkspaceState {
-  return {
-    ...state,
-    esseUndoLog: [...(state.esseUndoLog ?? []), entry].slice(-50)
-  };
-}
-
-function createUndoEntry(params: {
-  affectedSessionIds: string[];
-  beforeState: EsseWorkspaceState;
-  sinkRevisionAfter?: number;
-  summary: string;
-  toolName: string;
-}): PersistedUndoEntry {
-  return {
-    affectedSessionIds: params.affectedSessionIds,
-    createdAt: new Date().toISOString(),
-    id: `undo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    inverseDescriptor: createRestoreWorkspaceDescriptor(params.beforeState),
-    ...(params.sinkRevisionAfter !== undefined ? { sinkRevisionAfter: params.sinkRevisionAfter } : {}),
-    summary: params.summary,
-    toolName: params.toolName
-  };
-}
-
 function nextSinkRevision(runtime: EsseWorkspaceToolRuntime): number | undefined {
   const currentRevision = runtime.getSinkRevision?.();
   return currentRevision === undefined ? undefined : currentRevision + 1;
-}
-
-function formatUndoRevisionWarning(entries: PersistedUndoEntry[], currentSinkRevision: number | undefined): string | undefined {
-  if (currentSinkRevision === undefined) {
-    return undefined;
-  }
-
-  const chronologicalEntries = [...entries].reverse();
-  const revisions = chronologicalEntries.map((entry) => entry.sinkRevisionAfter);
-  if (revisions.some((revision) => revision === undefined)) {
-    return undefined;
-  }
-
-  const firstRevision = revisions[0]!;
-  const latestRelevantRevision = Math.max(currentSinkRevision, revisions.at(-1)!);
-  const observedRevisionSpan = latestRelevantRevision - firstRevision;
-  const expectedRevisionSpan = revisions.length - 1;
-  const extraRevisionCount = Math.max(0, observedRevisionSpan - expectedRevisionSpan);
-
-  return extraRevisionCount > 0
-    ? `⚠️ 撤销期间检测到 ${extraRevisionCount} 个中间工作区写入可能也被回退。`
-    : undefined;
-}
-
-function createRestoreWorkspaceDescriptor(state: EsseWorkspaceState): SerializableUndoDescriptor {
-  return {
-    kind: "restore-workspace",
-    projectImageCount: state.project.imageCount,
-    ...(state.referenceImages?.length ? { referenceImages: state.referenceImages.map((referenceImage) => ({ ...referenceImage })) } : {}),
-    selectedSessionId: state.selectedSessionId ?? null,
-    sessions: state.sessions.map(cloneSession)
-  };
-}
-
-function applyUndoDescriptor(state: EsseWorkspaceState, descriptor: SerializableUndoDescriptor): EsseWorkspaceState {
-  if (descriptor.kind !== "restore-workspace") {
-    return state;
-  }
-
-  return {
-    ...state,
-    project: {
-      ...state.project,
-      imageCount: descriptor.projectImageCount
-    },
-    referenceImages: descriptor.referenceImages?.map((referenceImage) => ({ ...referenceImage })),
-    selectedSessionId: descriptor.selectedSessionId ?? null,
-    sessions: descriptor.sessions.map(cloneSession)
-  };
-}
-
-function cloneSession(session: PersistedImageSession): PersistedImageSession {
-  return JSON.parse(JSON.stringify(session)) as PersistedImageSession;
-}
-
-function restoreSessionRecord(state: EsseWorkspaceState, params: { recordIndex: number; sessionId: string }) {
-  const resolved = resolveRecord(state, params.sessionId, params.recordIndex);
-  if (!("filePath" in resolved)) {
-    return { state, result: resolved.result };
-  }
-
-  return ok(
-    updateSession(state, params.sessionId, (session) => ({
-      ...session,
-      generatedFilePath: resolved.filePath,
-      showOriginalInList: false
-    })),
-    [params.sessionId],
-    `已切换到记录 ${params.recordIndex}。`
-  );
-}
-
-function deleteSessionRecord(state: EsseWorkspaceState, params: { recordIndex: number; sessionId: string }) {
-  const resolved = resolveRecord(state, params.sessionId, params.recordIndex);
-  if (!("filePath" in resolved)) {
-    return { state, result: resolved.result };
-  }
-
-  const remaining = resolved.session.generatedFilePaths?.filter((_filePath, index) => index !== params.recordIndex - 1) ?? [];
-  if (resolved.session.originatedFromGeneration && remaining.length === 0) {
-    return deleteSession(state, { sessionId: params.sessionId });
-  }
-
-  const fallback = chooseFallback(resolved.session, params.recordIndex, remaining);
-  return ok(
-    updateSession(state, params.sessionId, (session) => ({
-      ...session,
-      chatMessages: session.chatMessages.map((message) =>
-        message.generatedFilePath === resolved.filePath ? { ...message, generatedFilePath: undefined } : message
-      ),
-      generatedFilePath: fallback,
-      generatedFilePaths: remaining.length ? remaining : undefined,
-      showOriginalInList: !fallback
-    })),
-    [params.sessionId],
-    `已删除记录 ${params.recordIndex}。`
-  );
-}
-
-function restoreOriginal(state: EsseWorkspaceState, params: { sessionId: string }) {
-  const session = findSession(state, params.sessionId);
-  if (!session) {
-    return fail(state, "session not found", `no session with id ${params.sessionId}`, "call list_sessions to list current ids.");
-  }
-
-  if (session.originatedFromGeneration) {
-    const primaryGeneratedPath = session.generatedFilePaths?.[0] ?? session.generatedFilePath ?? session.filePath;
-    return ok(
-      updateSession(state, params.sessionId, (current) => ({
-        ...current,
-        generatedFilePath: primaryGeneratedPath,
-        showOriginalInList: false
-      })),
-      [params.sessionId],
-      "已切回第一张生成图。"
-    );
-  }
-
-  return ok(
-    updateSession(state, params.sessionId, (current) => ({
-      ...current,
-      generatedFilePath: undefined,
-      showOriginalInList: false
-    })),
-    [params.sessionId],
-    "已恢复为原图。"
-  );
-}
-
-function renameSession(state: EsseWorkspaceState, params: { fileName: string; sessionId: string }) {
-  if (!params.fileName) {
-    return fail(state, "fileName is required", undefined, "provide a non-empty fileName.");
-  }
-
-  const session = findSession(state, params.sessionId);
-  if (!session) {
-    return fail(state, "session not found", `no session with id ${params.sessionId}`, "call list_sessions to list current ids.");
-  }
-
-  return ok(
-    updateSession(state, params.sessionId, (current) => ({
-      ...current,
-      fileName: params.fileName
-    })),
-    [params.sessionId],
-    `已重命名为 ${params.fileName}。`
-  );
-}
-
-function reorderSessions(state: EsseWorkspaceState, params: { sessionIds: string[] }) {
-  const currentIds = state.sessions.map((session) => session.id);
-  const requestedIds = params.sessionIds;
-  if (requestedIds.length !== currentIds.length || new Set(requestedIds).size !== requestedIds.length) {
-    return fail(state, "sessionIds must be a full permutation", undefined, "pass every current session id exactly once.");
-  }
-
-  const byId = new Map(state.sessions.map((session) => [session.id, session]));
-  const nextSessions = requestedIds.map((id) => byId.get(id));
-  if (nextSessions.some((session) => !session)) {
-    return fail(state, "sessionIds must be a full permutation", undefined, "call list_sessions and retry with current ids.");
-  }
-
-  return ok(
-    {
-      ...state,
-      sessions: nextSessions as PersistedImageSession[]
-    },
-    requestedIds,
-    "已调整图片顺序。"
-  );
-}
-
-function setSessionPrompt(state: EsseWorkspaceState, params: { prompt: string; sessionId: string }) {
-  if (!params.prompt) {
-    return fail(state, "prompt is required", undefined, "provide a non-empty prompt.");
-  }
-
-  const session = findSession(state, params.sessionId);
-  if (!session) {
-    return fail(state, "session not found", `no session with id ${params.sessionId}`, "call list_sessions to list current ids.");
-  }
-
-  return ok(
-    updateSession(state, params.sessionId, (current) => ({
-      ...current,
-      lastPrompt: params.prompt
-    })),
-    [params.sessionId],
-    "已更新这张图的默认提示词。"
-  );
 }
 
 async function executePreflightImageTool(
@@ -1408,6 +1187,7 @@ function validateModifiedPreflightCommands(
     };
   }
 
+  const normalizedModifiedCommands: EssePreflightCommand[] = [];
   for (const [index, modifiedCommand] of modifiedCommands.entries()) {
     const originalCommand = originalCommands[index];
     if (!isSamePreflightTarget(originalCommand.target, modifiedCommand.target)) {
@@ -1438,25 +1218,24 @@ function validateModifiedPreflightCommands(
     }
 
     const referenceImageIds = modifiedCommand.referenceImageIds ?? [];
-    const referenceImageNames = modifiedCommand.referenceImageNames ?? [];
-    const referenceNamingResult = validateReferenceImageNamesForPrompt(referenceImageIds, referenceImageNames, modifiedCommand.prompt ?? "");
+    const referenceNamingResult = normalizeReferenceImageNames(referenceImageIds, modifiedCommand.referenceImageNames ?? []);
     if (!referenceNamingResult.ok) {
       return {
         ...referenceNamingResult,
         detail: `modified command ${index + 1}: ${referenceNamingResult.reason}`
       };
     }
-    if (referenceImageNames.length && referenceImageNames.length !== referenceImageIds.length) {
-      return {
-        ok: false,
-        reason: "invalid modified preflight commands",
-        detail: `modified command ${index + 1} has mismatched referenceImageNames.`,
-        suggestedNext: "Provide one referenceImageNames entry for each referenceImageIds entry, in the same order."
-      };
+
+    const normalizedModifiedCommand = { ...modifiedCommand };
+    if (referenceNamingResult.referenceImageNames.length) {
+      normalizedModifiedCommand.referenceImageNames = referenceNamingResult.referenceImageNames;
+    } else {
+      delete normalizedModifiedCommand.referenceImageNames;
     }
+    normalizedModifiedCommands.push(normalizedModifiedCommand);
   }
 
-  return modifiedCommands.map((command, index) => ({
+  return normalizedModifiedCommands.map((command, index) => ({
     ...originalCommands[index],
     ...command,
     target: originalCommands[index].target
@@ -1486,6 +1265,13 @@ function normalizeImagePreflightCommand(
   }
 
   const target = readTarget(params.target);
+  const referenceImageIds = readStringArray(params.referenceImageIds);
+  const referenceNamingResult = normalizeReferenceImageNames(referenceImageIds, readStringArray(params.referenceImageNames));
+  if (!referenceNamingResult.ok) {
+    return referenceNamingResult;
+  }
+  const referenceImageNames = referenceNamingResult.referenceImageNames;
+  const size = readString(params.size);
   if (!target) {
     return {
       ok: false,
@@ -1493,11 +1279,11 @@ function normalizeImagePreflightCommand(
       suggestedNext: "use target.type='new'. For new results based on an existing image, include target.sourceSessionId; for clicked images, include referenceImageIds and referenceImageNames that match the prompt roles."
     };
   }
-  if (mode === "edit" && target.type === "new" && !target.sourceSessionId) {
+  if (mode === "edit" && target.type === "new" && !target.sourceSessionId && referenceImageIds.length === 0) {
     return {
       ok: false,
-      reason: "edit mode with a new target requires sourceSessionId",
-      suggestedNext: "use target.type='new' with sourceSessionId for a new image based on an existing workspace image."
+      reason: "edit mode with a new target requires sourceSessionId or referenceImageIds",
+      suggestedNext: "For a new image based on an existing workspace image, include target.sourceSessionId. For clicked/attached inputs, include referenceImageIds."
     };
   }
   if (target.type === "new" && target.sourceSessionId && mode !== "edit") {
@@ -1505,21 +1291,6 @@ function normalizeImagePreflightCommand(
       ok: false,
       reason: "new target with sourceSessionId requires edit mode",
       suggestedNext: "use mode='edit' with target.type='new' and sourceSessionId so the source image is sent to the edit API."
-    };
-  }
-
-  const referenceImageIds = readStringArray(params.referenceImageIds);
-  const referenceImageNames = readStringArray(params.referenceImageNames);
-  const size = readString(params.size);
-  const referenceNamingResult = validateReferenceImageNamesForPrompt(referenceImageIds, referenceImageNames, prompt);
-  if (!referenceNamingResult.ok) {
-    return referenceNamingResult;
-  }
-  if (referenceImageNames.length && referenceImageNames.length !== referenceImageIds.length) {
-    return {
-      ok: false,
-      reason: "referenceImageNames must match referenceImageIds",
-      suggestedNext: "provide one local name for each referenceImageIds entry, in the same order."
     };
   }
 
@@ -1578,34 +1349,26 @@ function normalizeImagePreflightCommand(
   };
 }
 
-function validateReferenceImageNamesForPrompt(
+function normalizeReferenceImageNames(
   referenceImageIds: string[],
-  referenceImageNames: string[],
-  prompt: string
-): { ok: true } | Extract<WorkspaceMutationResult, { ok: false }> {
-  if (referenceImageIds.length <= 1) {
-    return { ok: true };
+  referenceImageNames: string[]
+): { ok: true; referenceImageNames: string[] } | Extract<WorkspaceMutationResult, { ok: false }> {
+  if (!referenceImageNames.length) {
+    return {
+      ok: true,
+      referenceImageNames: referenceImageIds.length > 1 ? referenceImageIds.map((_, index) => `参考图${index + 1}`) : []
+    };
   }
 
   if (referenceImageNames.length !== referenceImageIds.length) {
     return {
       ok: false,
-      reason: "referenceImageNames required for multi-image references",
-      suggestedNext:
-        "For multi-image commands, provide one local name for each referenceImageIds entry, then write the prompt using those names."
+      reason: "referenceImageNames must match referenceImageIds",
+      suggestedNext: "Provide one referenceImageNames entry for each referenceImageIds entry, in the same order, or omit referenceImageNames and let the tool assign neutral names."
     };
   }
 
-  if (/【图片\d+】/.test(prompt)) {
-    return {
-      ok: false,
-      reason: "prompt must use local image names",
-      suggestedNext:
-        "Replace user-facing labels like 【图片1】 with referenceImageNames such as 场景图、目标植物、大小参考."
-    };
-  }
-
-  return { ok: true };
+  return { ok: true, referenceImageNames };
 }
 
 function readTarget(value: unknown): { fileName?: string; sourceSessionId?: string; type: "new" } | { sessionId: string; type: "existing" } | undefined {
@@ -1625,227 +1388,6 @@ function readTarget(value: unknown): { fileName?: string; sourceSessionId?: stri
   }
 
   return undefined;
-}
-
-function deleteSession(state: EsseWorkspaceState, params: { sessionId: string }) {
-  const removedIndex = state.sessions.findIndex((session) => session.id === params.sessionId);
-  if (removedIndex < 0) {
-    return fail(state, "session not found", `no session with id ${params.sessionId}`, "call list_sessions to list current ids.");
-  }
-
-  const sessions = state.sessions.filter((session) => session.id !== params.sessionId);
-  return ok(
-    {
-      ...state,
-      project: { ...state.project, imageCount: sessions.length },
-      selectedSessionId:
-        state.selectedSessionId === params.sessionId
-          ? sessions[Math.min(removedIndex, sessions.length - 1)]?.id ?? null
-          : state.selectedSessionId,
-      sessions
-    },
-    [params.sessionId],
-    "已删除图片。"
-  );
-}
-
-function mergeSessions(state: EsseWorkspaceState, params: { sourceSessionIds: string[]; targetSessionId: string }) {
-  const target = state.sessions.find((session) => session.id === params.targetSessionId);
-  if (!target) {
-    return fail(state, "target session not found", `no session with id ${params.targetSessionId}`, "call list_sessions to list current ids.");
-  }
-
-  const sourceIds = [...new Set(params.sourceSessionIds.filter((id) => id !== params.targetSessionId))];
-  const sources = sourceIds.map((id) => state.sessions.find((session) => session.id === id));
-  const missingId = sourceIds.find((id, index) => !sources[index]);
-  if (sourceIds.length === 0) {
-    return fail(state, "sourceSessionIds are required", undefined, "provide at least one source session id different from targetSessionId.");
-  }
-  if (missingId) {
-    return fail(state, "source session not found", `no session with id ${missingId}`, "call list_sessions to list current ids.");
-  }
-
-  const sourceSessions = sources as PersistedImageSession[];
-  const mergedRecords = uniquePaths([
-    ...(target.generatedFilePaths ?? []),
-    ...sourceSessions.flatMap((session) => session.generatedFilePaths ?? []),
-    ...sourceSessions.flatMap((session) => (session.generatedFilePath ? [session.generatedFilePath] : []))
-  ]);
-  return ok(
-    {
-      ...state,
-      project: { ...state.project, imageCount: state.sessions.length - sourceIds.length },
-      selectedSessionId: sourceIds.includes(state.selectedSessionId ?? "") ? params.targetSessionId : state.selectedSessionId,
-      sessions: state.sessions
-        .filter((session) => !sourceIds.includes(session.id))
-        .map((session) =>
-          session.id === params.targetSessionId
-            ? {
-                ...session,
-                chatMessages: [...session.chatMessages, ...sourceSessions.flatMap((sourceSession) => sourceSession.chatMessages)],
-                generatedFilePath: session.generatedFilePath ?? mergedRecords.at(-1),
-                generatedFilePaths: mergedRecords.length ? mergedRecords : session.generatedFilePaths
-              }
-            : session
-        )
-    },
-    [params.targetSessionId, ...sourceIds],
-    `已合并 ${sourceIds.length} 张图片。`
-  );
-}
-
-function splitSession(state: EsseWorkspaceState, params: { fileName?: string; recordIndexes: number[]; sessionId: string }) {
-  const sourceIndex = state.sessions.findIndex((session) => session.id === params.sessionId);
-  const source = state.sessions[sourceIndex];
-  if (!source) {
-    return fail(state, "session not found", `no session with id ${params.sessionId}`, "call list_sessions to list current ids.");
-  }
-
-  const records = source.generatedFilePaths ?? [];
-  const recordIndexes = [...new Set(params.recordIndexes)];
-  if (!recordIndexes.length) {
-    return fail(state, "recordIndexes are required", undefined, "provide at least one 1-based record index.");
-  }
-
-  const invalidIndex = recordIndexes.find((recordIndex) => !Number.isInteger(recordIndex) || recordIndex < 1 || recordIndex > records.length);
-  if (invalidIndex !== undefined) {
-    return fail(
-      state,
-      "recordIndex out of range",
-      `${params.sessionId} has ${records.length} records, requested ${invalidIndex}.`,
-      "call get_session_records to verify."
-    );
-  }
-
-  if (recordIndexes.length >= records.length) {
-    return fail(state, "cannot split all records", undefined, "use delete_session or duplicate_session instead of splitting every record.");
-  }
-
-  const movedIndexes = new Set(recordIndexes.map((recordIndex) => recordIndex - 1));
-  const movedRecords = recordIndexes.map((recordIndex) => records[recordIndex - 1]);
-  const remainingRecords = records.filter((_record, index) => !movedIndexes.has(index));
-  const currentRecordIndex = source.generatedFilePath ? records.indexOf(source.generatedFilePath) + 1 : 0;
-  const fallback = currentRecordIndex > 0 && movedIndexes.has(currentRecordIndex - 1)
-    ? chooseFallback(source, currentRecordIndex, remainingRecords)
-    : source.generatedFilePath && remainingRecords.includes(source.generatedFilePath)
-      ? source.generatedFilePath
-      : remainingRecords.at(-1);
-  const newSessionId = createUniqueWorkspaceSessionId(state);
-  const newFileName = params.fileName || basenameFromPath(movedRecords[0]);
-  const newSession: PersistedImageSession = {
-    chatMessages: [],
-    chatStatus: "idle",
-    fileName: newFileName,
-    filePath: movedRecords[0],
-    generatedFilePath: movedRecords[0],
-    generatedFilePaths: movedRecords,
-    id: newSessionId,
-    originatedFromGeneration: true,
-    showOriginalInList: false,
-    status: "completed"
-  };
-
-  return ok(
-    {
-      ...state,
-      project: { ...state.project, imageCount: state.sessions.length + 1 },
-      selectedSessionId: newSessionId,
-      sessions: state.sessions.flatMap((session, index) => {
-        if (session.id !== params.sessionId) {
-          return [session];
-        }
-        const updatedSource: PersistedImageSession = {
-          ...session,
-          chatMessages: session.chatMessages.map((message) =>
-            message.generatedFilePath && movedRecords.includes(message.generatedFilePath) ? { ...message, generatedFilePath: undefined } : message
-          ),
-          generatedFilePath: fallback,
-          generatedFilePaths: remainingRecords,
-          showOriginalInList: !fallback
-        };
-        return index === sourceIndex ? [updatedSource, newSession] : [updatedSource];
-      })
-    },
-    [params.sessionId, newSessionId],
-    `已拆分 ${movedRecords.length} 条记录为 ${newFileName}。`
-  );
-}
-
-function duplicateSession(state: EsseWorkspaceState, params: { fileName?: string; sessionId: string }) {
-  const sourceIndex = state.sessions.findIndex((session) => session.id === params.sessionId);
-  const source = state.sessions[sourceIndex];
-  if (!source) {
-    return fail(state, "session not found", `no session with id ${params.sessionId}`, "call list_sessions to list current ids.");
-  }
-
-  const newSessionId = createUniqueWorkspaceSessionId(state);
-  const duplicate: PersistedImageSession = {
-    chatMessages: [],
-    chatStatus: "idle",
-    fileName: params.fileName || `副本-${source.fileName}`,
-    filePath: source.filePath,
-    id: newSessionId,
-    status: "completed",
-    ...(source.generatedFilePath ? { generatedFilePath: source.generatedFilePath } : {}),
-    ...(source.generatedFilePaths?.length ? { generatedFilePaths: [...source.generatedFilePaths] } : {}),
-    ...(source.generationMode ? { generationMode: source.generationMode } : {}),
-    ...(source.lastPrompt ? { lastPrompt: source.lastPrompt } : {}),
-    ...(source.originatedFromGeneration ? { originatedFromGeneration: true } : {}),
-    showOriginalInList: source.showOriginalInList
-  };
-
-  return ok(
-    {
-      ...state,
-      project: { ...state.project, imageCount: state.sessions.length + 1 },
-      selectedSessionId: newSessionId,
-      sessions: state.sessions.flatMap((session, index) => (index === sourceIndex ? [session, duplicate] : [session]))
-    },
-    [params.sessionId, newSessionId],
-    `已复制 ${source.fileName}。新副本是 img-${sourceIndex + 2}，sessionId=${newSessionId}。`
-  );
-}
-
-function resolveRecord(
-  state: EsseWorkspaceState,
-  sessionId: string,
-  recordIndex: number
-): { filePath: string; result: Extract<WorkspaceMutationResult, { ok: true }>; session: PersistedImageSession } | { result: Extract<WorkspaceMutationResult, { ok: false }> } {
-  const session = state.sessions.find((current) => current.id === sessionId);
-  if (!session) {
-    return { result: { ok: false, reason: "session not found", detail: `no session with id ${sessionId}`, suggestedNext: "call list_sessions to list current ids." } };
-  }
-  const records = session.generatedFilePaths ?? [];
-  if (!Number.isInteger(recordIndex) || recordIndex < 1 || recordIndex > records.length) {
-    return {
-      result: {
-        ok: false,
-        reason: "recordIndex out of range",
-        detail: `${sessionId} has ${records.length} records, requested ${recordIndex}.`,
-        suggestedNext: "call get_session_records to verify."
-      }
-    };
-  }
-  return { filePath: records[recordIndex - 1], result: { ok: true, affectedSessionIds: [sessionId], summary: "record resolved" }, session };
-}
-
-function findSession(state: EsseWorkspaceState, sessionId: string): PersistedImageSession | undefined {
-  return state.sessions.find((session) => session.id === sessionId);
-}
-
-function updateSession(state: EsseWorkspaceState, sessionId: string, update: (session: PersistedImageSession) => PersistedImageSession): EsseWorkspaceState {
-  return {
-    ...state,
-    sessions: state.sessions.map((session) => (session.id === sessionId ? update(session) : session))
-  };
-}
-
-function chooseFallback(session: PersistedImageSession, recordIndex: number, remainingRecords: string[]): string | undefined {
-  if (session.generatedFilePath !== session.generatedFilePaths?.[recordIndex - 1]) {
-    return session.generatedFilePath && remainingRecords.includes(session.generatedFilePath) ? session.generatedFilePath : remainingRecords.at(-1);
-  }
-
-  return remainingRecords[Math.max(0, recordIndex - 2)] ?? remainingRecords[0];
 }
 
 function getCurrentImageSource(session: PersistedImageSession): "generated" | "original" {
@@ -1899,6 +1441,9 @@ function collectPreflightReferenceImages(
       byId.set(referenceImage.id, referenceImage);
     }
   }
+  for (const conversationReferenceImage of getConversationReferenceImages(runtime.getState())) {
+    byId.set(conversationReferenceImage.id, conversationReferenceImage);
+  }
   for (const workspaceReferenceImage of getWorkspaceReferenceImages(runtime.getState())) {
     byId.set(workspaceReferenceImage.id, workspaceReferenceImage);
   }
@@ -1921,6 +1466,28 @@ function getTurnReferenceImages(runtime: EsseWorkspaceToolRuntime): BatchPlanRef
   }));
 }
 
+function getConversationReferenceImages(state: EsseWorkspaceState): BatchPlanReferenceImage[] {
+  const seen = new Set<string>();
+  const referenceImages: BatchPlanReferenceImage[] = [];
+
+  for (const message of state.projectManagerState?.conversation.messages ?? []) {
+    for (const filePath of message.referenceFilePaths ?? []) {
+      const trimmedPath = filePath.trim();
+      if (!trimmedPath || seen.has(trimmedPath)) {
+        continue;
+      }
+      seen.add(trimmedPath);
+      referenceImages.push({
+        filePath: trimmedPath,
+        id: `conversation-ref-${referenceImages.length + 1}`,
+        label: `对话参考图 ${referenceImages.length + 1}`
+      });
+    }
+  }
+
+  return referenceImages;
+}
+
 function getWorkspaceReferenceImages(state: EsseWorkspaceState): BatchPlanReferenceImage[] {
   return state.sessions.map((session, index) => ({
     filePath: getCurrentImagePath(session),
@@ -1933,12 +1500,20 @@ function isSupportedReferenceImagePath(filePath: string): boolean {
   return /\.(jpe?g|png|webp|gif|bmp|tiff?|heic|heif)$/i.test(filePath);
 }
 
-function ok(state: EsseWorkspaceState, affectedSessionIds: string[], summary: string) {
-  return { state, result: { ok: true as const, affectedSessionIds, summary } };
+function toWorkbenchCapabilityRuntime(runtime: EsseWorkspaceToolRuntime): BatchImagerWorkbenchCapabilityRuntime {
+  return {
+    state: runtime.getState(),
+    ...(runtime.getTurnReferenceImagePaths ? { getTurnReferenceImagePaths: runtime.getTurnReferenceImagePaths } : {}),
+    ...(runtime.memoryStore ? { memoryStore: runtime.memoryStore } : {}),
+    ...(runtime.readImageMetadata ? { readImageMetadata: runtime.readImageMetadata } : {}),
+    ...(runtime.scanUnreferencedFiles ? { scanUnreferencedFiles: runtime.scanUnreferencedFiles } : {})
+  };
 }
 
-function fail(state: EsseWorkspaceState, reason: string, detail?: string, suggestedNext?: string) {
-  return { state, result: { ok: false as const, ...(detail ? { detail } : {}), reason, ...(suggestedNext ? { suggestedNext } : {}) } };
+function capabilityResultToToolResult<TDetails extends Record<string, unknown>>(
+  result: BatchImagerWorkbenchCapabilityResult<TDetails>
+): AgentToolResult {
+  return result.ok ? toolOk(result.text, result.details) : toolError(result.reason, result.detail, result.suggestedNext);
 }
 
 function toolOk(text: string, details?: Record<string, unknown>): AgentToolResult {
@@ -1971,6 +1546,35 @@ function objectParameters(properties: Record<string, string>, required: string[]
     type: "object",
     properties: Object.fromEntries(Object.entries(properties).map(([name, description]) => [name, { type: name.endsWith("Ids") ? "array" : "string", description }])),
     required,
+    additionalProperties: false
+  };
+}
+
+function addWorkspaceImageParameters(): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      fileName: { type: "string", description: "Legacy single-image display fileName. Prefer images[].fileName for multiple images." },
+      filePath: {
+        type: "string",
+        description:
+          "Legacy single-image local file path from a prior tool result, current turn attachment, or another explicit available local source."
+      },
+      images: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            fileName: { type: "string", description: "Optional display fileName for this workspace image." },
+            filePath: { type: "string", description: "Exact local image file path from an available tool result or attachment." }
+          },
+          required: ["filePath"],
+          additionalProperties: false
+        },
+        description:
+          "Preferred way to add multiple images to the left workspace in one tool call, e.g. PPT-exported pages."
+      }
+    },
     additionalProperties: false
   };
 }
@@ -2070,19 +1674,4 @@ function readInteger(value: unknown): number {
   }
 
   return Number.NaN;
-}
-
-function uniquePaths(paths: string[]): string[] {
-  return [...new Set(paths)];
-}
-
-function createUniqueWorkspaceSessionId(state: EsseWorkspaceState): string {
-  const existingIds = new Set(state.sessions.map((session) => session.id));
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const candidate = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    if (!existingIds.has(candidate)) {
-      return candidate;
-    }
-  }
-  return `sess_${existingIds.size + 1}_${Math.random().toString(36).slice(2, 8)}`;
 }

@@ -72,7 +72,7 @@ export function createEsseImagePreflightExecutor(options: CreateEsseImagePreflig
 
     const affectedSessionIds = preparedCommands.map(({ prepared }) => prepared.sessionId);
     const queuedMutation = await context.applyMutation((state) =>
-      appendBatchTaskCardMessage(appendEsseTaskMessages(markSessionsQueued(state, affectedSessionIds).state, preparedCommands), {
+      appendBatchTaskCardMessage(appendAgentTaskMessages(markSessionsQueued(state, affectedSessionIds).state, preparedCommands), {
         batchTaskId,
         preparedCommands
       })
@@ -153,7 +153,7 @@ export async function retryEsseBatchTaskItem(
     const queued = markSessionsQueued(state, [request.sessionId]);
     return {
       result: queued.result,
-      state: appendEsseTaskMessages(queued.state, [{ command, prepared }])
+      state: appendAgentTaskMessages(queued.state, [{ command, prepared }])
     };
   });
   if (!mutation.result.ok) {
@@ -487,10 +487,10 @@ function appendGeneratedResult(
               chatMessages: [
                 ...current.chatMessages,
                 {
-                  content: params.prompt ? `Esse 生成完成：${params.prompt}` : "Esse 生成完成。",
+                  content: params.prompt ? `智能体生成完成：${params.prompt}` : "智能体生成完成。",
                   contextType: "generated-image",
                   generatedFilePath: params.outputPath,
-                  id: createMessageId("esse-generated"),
+                  id: createMessageId("agent-generated"),
                   role: "context"
                 }
               ],
@@ -530,7 +530,7 @@ function markSessionsQueued(
   };
 }
 
-function appendEsseTaskMessages(state: ProjectSnapshot, preparedCommands: PreparedCommand[]): ProjectSnapshot {
+function appendAgentTaskMessages(state: ProjectSnapshot, preparedCommands: PreparedCommand[]): ProjectSnapshot {
   return {
     ...state,
     sessions: state.sessions.map((session) => {
@@ -547,9 +547,9 @@ function appendEsseTaskMessages(state: ProjectSnapshot, preparedCommands: Prepar
         chatMessages: [
           ...session.chatMessages,
           {
-            content: `来自 Esse智能体：${prompt}${referenceFilePaths.length > 0 ? `\n参考图：${referenceFilePaths.length} 张` : ""}`,
-            contextType: "esse-task",
-            id: createMessageId("esse-task"),
+            content: `来自智能体：${prompt}${referenceFilePaths.length > 0 ? `\n参考图：${referenceFilePaths.length} 张` : ""}`,
+            contextType: "agent-task",
+            id: createMessageId("agent-task"),
             role: "context",
             ...(referenceFilePaths.length > 0 ? { referenceFilePaths } : {}),
             ...(sourceFilePath ? { sourceFilePath } : {})
@@ -610,8 +610,8 @@ function appendBatchTaskCardMessage(
                 ...(referenceImages.length ? { referenceImages } : {})
               },
               content: "",
-              contextType: "esse-batch-task",
-              id: createMessageId("esse-batch-task"),
+              contextType: "agent-batch-task",
+              id: createMessageId("agent-batch-task"),
               role: "context"
             }
           ]
@@ -693,6 +693,12 @@ function selectReferenceImages(
     }
   }
 
+  for (const referenceImage of getConversationReferenceImages(state)) {
+    if (!byId.has(referenceImage.id)) {
+      byId.set(referenceImage.id, referenceImage);
+    }
+  }
+
   for (const [index, session] of state.sessions.entries()) {
     const id = getWorkspaceReferenceImageId(session.id);
     if (!byId.has(id)) {
@@ -718,6 +724,28 @@ function selectReferenceImages(
   return uniqueReferenceImages(
     referenceImageIds.map((id) => byId.get(id)).filter((referenceImage): referenceImage is BatchPlanReferenceImage => Boolean(referenceImage))
   );
+}
+
+function getConversationReferenceImages(state: ProjectSnapshot): BatchPlanReferenceImage[] {
+  const seen = new Set<string>();
+  const referenceImages: BatchPlanReferenceImage[] = [];
+
+  for (const message of state.projectManagerState?.conversation.messages ?? []) {
+    for (const filePath of message.referenceFilePaths ?? []) {
+      const trimmedPath = filePath.trim();
+      if (!trimmedPath || seen.has(trimmedPath)) {
+        continue;
+      }
+      seen.add(trimmedPath);
+      referenceImages.push({
+        filePath: trimmedPath,
+        id: `conversation-ref-${referenceImages.length + 1}`,
+        label: `对话参考图 ${referenceImages.length + 1}`
+      });
+    }
+  }
+
+  return referenceImages;
 }
 
 function uniqueReferenceImages(referenceImages: BatchPlanReferenceImage[]): BatchPlanReferenceImage[] {

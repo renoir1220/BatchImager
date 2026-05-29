@@ -37,7 +37,7 @@ interface WorkspaceTraceCheck {
 }
 
 describe("project workspace agent evaluation", () => {
-  test("simulates realistic Esse workspace tasks without image API calls", () => {
+  test("simulates realistic agent workspace tasks without image API calls", () => {
     const report = runWorkspaceAgentEvaluation(createWorkspaceScenarios());
 
     expect(report.failures).toEqual([]);

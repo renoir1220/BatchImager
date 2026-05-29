@@ -179,6 +179,68 @@ describe("esseImagePreflightExecutor", () => {
     await waitUntil(() => snapshot.sessions.find((session) => session.id === "sess_turn_ref_1")?.status === "completed");
   });
 
+  test("resolves reusable conversation reference ids into generation requests", async () => {
+    let snapshot = createSnapshot({
+      projectManagerState: {
+        conversation: {
+          id: "conv_1",
+          messages: [
+            {
+              content: "用这张参考图先出一版",
+              id: "user-1",
+              referenceFilePaths: ["/project/uploads/style.png"],
+              role: "user"
+            }
+          ]
+        },
+        plans: []
+      }
+    });
+    const generation = createDeferred<ProductImageResult>();
+    const generatedRequests: UnifiedImageGenerationRequest[] = [];
+    const runtime = createRuntime(snapshot, (nextSnapshot) => {
+      snapshot = nextSnapshot;
+    });
+    const executor = createEsseImagePreflightExecutor({
+      generateImage: async (request) => {
+        generatedRequests.push(request);
+        return await generation.promise;
+      },
+      makeSessionId: () => "sess_conversation_ref_1",
+      projectDirectory: "/project"
+    });
+
+    await executor(
+      {
+        commands: [
+          {
+            displayLabel: "img-1",
+            mode: "edit",
+            prompt: "沿用对话参考图重做",
+            referenceImageIds: ["conversation-ref-1"],
+            target: { sessionId: "sess_1", type: "existing" }
+          }
+        ],
+        tool: "generate_image"
+      },
+      runtime
+    );
+
+    await waitUntil(() => generatedRequests.length === 1);
+    expect(generatedRequests[0]).toMatchObject({
+      referenceImagePaths: ["/project/uploads/style.png"]
+    });
+    expect(snapshot.projectManagerState?.conversation.messages.at(-1)?.batchTask?.referenceImages).toEqual([
+      {
+        filePath: "/project/uploads/style.png",
+        id: "conversation-ref-1",
+        label: "对话参考图 1"
+      }
+    ]);
+    generation.resolve({ outputPath: "/project/images/generated/out-conversation-ref.png", requestSize: "auto" });
+    await waitUntil(() => snapshot.sessions.find((session) => session.id === "sess_conversation_ref_1")?.status === "completed");
+  });
+
   test("resolves workspace reference image ids from list_sessions into generation requests", async () => {
     let snapshot = createSnapshot({
       projectManagerState: {
@@ -320,8 +382,8 @@ describe("esseImagePreflightExecutor", () => {
       referenceImagePaths: ["/project/original/scene.jpg", "/project/uploads/material.png", "/project/references/style.png"]
     });
     expect(snapshot.sessions.find((session) => session.id === "sess_multi_ref_1")?.chatMessages.at(-1)).toMatchObject({
-      content: "来自 Esse智能体：按多张参考图重做商品图\n参考图：3 张",
-      contextType: "esse-task",
+      content: "来自智能体：按多张参考图重做商品图\n参考图：3 张",
+      contextType: "agent-task",
       referenceFilePaths: ["/project/original/scene.jpg", "/project/uploads/material.png", "/project/references/style.png"],
       sourceFilePath: "/project/original/product.jpg"
     });
@@ -690,8 +752,8 @@ describe("esseImagePreflightExecutor", () => {
     expect(snapshot.sessions[1]).toMatchObject({
       chatMessages: [
         {
-          content: "来自 Esse智能体：基于源图生成一张新商品图，保留原图不动",
-          contextType: "esse-task",
+          content: "来自智能体：基于源图生成一张新商品图，保留原图不动",
+          contextType: "agent-task",
           role: "context",
           sourceFilePath: "/project/generated/source-current.png"
         }
@@ -707,7 +769,7 @@ describe("esseImagePreflightExecutor", () => {
     await waitUntil(() => snapshot.sessions[1]?.status === "completed");
     expect(snapshot.sessions[1]?.chatMessages).toMatchObject([
       {
-        contextType: "esse-task",
+        contextType: "agent-task",
         sourceFilePath: "/project/generated/source-current.png"
       },
       {
@@ -816,7 +878,7 @@ describe("esseImagePreflightExecutor", () => {
           }
         ]
       },
-      contextType: "esse-batch-task",
+      contextType: "agent-batch-task",
       role: "context"
     });
     expect(registry.has("batch_1")).toBe(true);
@@ -1043,7 +1105,7 @@ function createSnapshotWithBatchTask(options: { sessionStatus: ProjectSnapshot["
               ]
             },
             content: "",
-            contextType: "esse-batch-task",
+            contextType: "agent-batch-task",
             id: "batch-message-1",
             role: "context"
           }

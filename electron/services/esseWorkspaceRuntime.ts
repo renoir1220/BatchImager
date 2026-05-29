@@ -4,6 +4,7 @@ import path from "node:path";
 import type { EssePreflightPayload, ProjectSnapshot } from "../ipcTypes";
 import type {
   EsseAddReferenceImageRequest,
+  EsseAddWorkspaceImageRequest,
   EsseBlankSessionRequest,
   EsseWorkspaceToolCallEvent,
   EsseImagePreflightExecutionRequest,
@@ -64,6 +65,7 @@ export function createProjectSnapshotWorkspaceRuntime(options: ProjectSnapshotWo
 
   const runtime: EsseWorkspaceToolRuntime = {
     addReferenceImage: async (request) => addReferenceImage(runtime, request, () => currentSnapshot),
+    addWorkspaceImage: async (request) => addWorkspaceImage(runtime, request, () => currentSnapshot),
     async applyMutation(mutator, applyOptions) {
       try {
         let committedResult: WorkspaceMutationResult | undefined;
@@ -146,6 +148,58 @@ async function createBlankSession(
     filePath: seedPath,
     sessionId
   }));
+
+  return mutation.result;
+}
+
+async function addWorkspaceImage(
+  runtime: EsseWorkspaceToolRuntime,
+  request: EsseAddWorkspaceImageRequest,
+  getSnapshot: () => ProjectSnapshot
+): Promise<WorkspaceMutationResult> {
+  if (request.images.length === 0) {
+    return { ok: false, reason: "images are required", suggestedNext: "Pass one or more image file paths." };
+  }
+
+  for (const image of request.images) {
+    if (!isSupportedReferenceImagePath(image.filePath)) {
+      return { ok: false, detail: image.filePath, reason: "unsupported image type", suggestedNext: "Use supported image files." };
+    }
+  }
+
+  const snapshot = getSnapshot();
+  const destinationDirectory = path.join(snapshot.project.directory, "images", "original");
+  const reservedSessionIds = new Set<string>();
+  const plannedImages: Array<{ fileName: string; filePath: string; sessionId: string }> = [];
+  const copiedPaths: string[] = [];
+
+  await mkdir(destinationDirectory, { recursive: true });
+  try {
+    for (const image of request.images) {
+      const sourcePath = path.resolve(image.filePath);
+      const sessionId = createUniqueSessionId(snapshot, reservedSessionIds);
+      reservedSessionIds.add(sessionId);
+      const displayFileName = image.fileName?.trim() || path.basename(sourcePath) || "image.png";
+      const destinationPath = path.join(destinationDirectory, `${sessionId}-${toSafeWorkspaceImageFileName(displayFileName, path.extname(sourcePath))}`);
+
+      await copyFile(sourcePath, destinationPath);
+      copiedPaths.push(destinationPath);
+      plannedImages.push({
+        fileName: displayFileName,
+        filePath: destinationPath,
+        sessionId
+      });
+    }
+  } catch (error) {
+    await Promise.all(copiedPaths.map(unlinkIfExists));
+    throw error;
+  }
+
+  const mutation = await runtime.applyMutation((state) => addImageSessions(state, plannedImages));
+
+  if (!mutation.result.ok) {
+    await Promise.all(copiedPaths.map(unlinkIfExists));
+  }
 
   return mutation.result;
 }
@@ -255,6 +309,14 @@ function addBlankSession(
   state: ProjectSnapshot,
   params: { fileName: string; filePath: string; sessionId: string }
 ): { result: WorkspaceMutationResult; state: ProjectSnapshot } {
+  return addImageSession(state, params, `已添加空白图片位：${params.fileName}`);
+}
+
+function addImageSession(
+  state: ProjectSnapshot,
+  params: { fileName: string; filePath: string; sessionId: string },
+  summary = `已添加图片到工作区：${params.fileName}`
+): { result: WorkspaceMutationResult; state: ProjectSnapshot } {
   if (state.sessions.some((session) => session.id === params.sessionId)) {
     return {
       result: {
@@ -270,7 +332,7 @@ function addBlankSession(
     result: {
       affectedSessionIds: [params.sessionId],
       ok: true,
-      summary: `已添加空白图片位：${params.fileName}`
+      summary
     },
     state: {
       ...state,
@@ -291,8 +353,64 @@ function addBlankSession(
   };
 }
 
-function createUniqueSessionId(snapshot: ProjectSnapshot): string {
-  const existingIds = new Set(snapshot.sessions.map((session) => session.id));
+function addImageSessions(
+  state: ProjectSnapshot,
+  images: Array<{ fileName: string; filePath: string; sessionId: string }>
+): { result: WorkspaceMutationResult; state: ProjectSnapshot } {
+  const existingIds = new Set(state.sessions.map((session) => session.id));
+  const newIds = new Set<string>();
+  for (const image of images) {
+    if (existingIds.has(image.sessionId) || newIds.has(image.sessionId)) {
+      return {
+        result: {
+          ok: false,
+          reason: "sessionId must be unique",
+          suggestedNext: "retry with new generated session ids."
+        },
+        state
+      };
+    }
+    newIds.add(image.sessionId);
+  }
+
+  const affectedSessionIds = images.map((image) => image.sessionId);
+  return {
+    result: {
+      affectedSessionIds,
+      ok: true,
+      summary: formatWorkspaceImageAddSummary(images.map((image) => image.fileName))
+    },
+    state: {
+      ...state,
+      project: { ...state.project, imageCount: state.sessions.length + images.length },
+      selectedSessionId: affectedSessionIds.at(-1) ?? state.selectedSessionId,
+      sessions: [
+        ...state.sessions,
+        ...images.map((image) => ({
+          chatMessages: [],
+          chatStatus: "idle" as const,
+          fileName: image.fileName,
+          filePath: image.filePath,
+          id: image.sessionId,
+          status: "idle" as const
+        }))
+      ]
+    }
+  };
+}
+
+function formatWorkspaceImageAddSummary(fileNames: string[]): string {
+  if (fileNames.length === 1) {
+    return `已添加图片到工作区：${fileNames[0]}`;
+  }
+
+  const preview = fileNames.slice(0, 5).join("、");
+  const suffix = fileNames.length > 5 ? " 等" : "";
+  return `已添加 ${fileNames.length} 张图片到工作区：${preview}${suffix}`;
+}
+
+function createUniqueSessionId(snapshot: ProjectSnapshot, reservedIds: Set<string> = new Set()): string {
+  const existingIds = new Set([...snapshot.sessions.map((session) => session.id), ...reservedIds]);
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const candidate = `sess_${randomBytes(10).toString("hex")}`;
     if (!existingIds.has(candidate)) {
@@ -317,6 +435,17 @@ function createUniqueReferenceImageId(snapshot: ProjectSnapshot): string {
 
 function isSupportedReferenceImagePath(filePath: string): boolean {
   return /\.(jpe?g|png|webp|gif|bmp|tiff?|heic|heif)$/i.test(filePath);
+}
+
+function toSafeWorkspaceImageFileName(fileName: string, fallbackExtension: string): string {
+  const extension = path.extname(fileName) || fallbackExtension || ".png";
+  const baseName = path.basename(fileName, path.extname(fileName));
+  const safeBaseName =
+    baseName
+      .replace(/[^a-zA-Z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase() || "image";
+  return `${safeBaseName}${extension.toLowerCase()}`;
 }
 
 function toSafeReferenceFileName(fileName: string): string {
@@ -357,7 +486,7 @@ function appendToolCallMessage(state: ProjectSnapshot, event: EsseWorkspaceToolC
           ...projectManagerState.conversation.messages,
           {
             content: formatToolCallMessage(event),
-            contextType: "esse-tool-call",
+            contextType: "agent-tool-call",
             id: createToolCallMessageId(),
             role: "context"
           }
@@ -371,7 +500,7 @@ function formatToolCallMessage(event: EsseWorkspaceToolCallEvent): string {
   const status = event.result.isError ? "失败" : "完成";
   const summary = truncateToolText(event.result.content[0]?.text ?? "");
 
-  return [`Esse 工具调用：${event.toolName}（${status}）`, summary ? `结果：${summary}` : undefined].filter(Boolean).join("\n");
+  return [`智能体工具调用：${event.toolName}（${status}）`, summary ? `结果：${summary}` : undefined].filter(Boolean).join("\n");
 }
 
 function truncateToolText(text: string): string {

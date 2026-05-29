@@ -1,0 +1,900 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BatchImager Tools Design Viewer</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f7f8fa;
+        --panel: #ffffff;
+        --panel-2: #f0f3f6;
+        --text: #171b22;
+        --muted: #687180;
+        --line: #d9dee6;
+        --accent: #216c5d;
+        --accent-2: #1c5f8f;
+        --danger: #9a3e33;
+        --warn: #8a6416;
+        --shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .app {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        height: 100vh;
+        overflow: hidden;
+      }
+
+      header {
+        display: flex;
+        gap: 16px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 18px;
+        line-height: 1.2;
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(360px, 42%) 1fr;
+        height: 100%;
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      aside {
+        min-width: 0;
+        min-height: 0;
+        border-right: 1px solid var(--line);
+        background: var(--panel);
+        display: grid;
+        grid-template-rows: auto 1fr;
+        overflow: hidden;
+      }
+
+      .filters {
+        display: grid;
+        gap: 10px;
+        padding: 12px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      input,
+      select,
+      button {
+        font: inherit;
+      }
+
+      input,
+      select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 7px 9px;
+        background: #fff;
+        color: var(--text);
+      }
+
+      .filter-row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .summary-row {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        height: 22px;
+        padding: 0 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--panel-2);
+        white-space: nowrap;
+      }
+
+      .tool-list {
+        overflow: auto;
+        min-height: 0;
+      }
+
+      .tool-item {
+        display: grid;
+        gap: 5px;
+        width: 100%;
+        padding: 10px 12px;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+        background: transparent;
+        color: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .tool-item:hover,
+      .tool-item.active {
+        background: #edf5f2;
+      }
+
+      .tool-title {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .tool-name {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .tool-desc {
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .tags {
+        display: flex;
+        gap: 5px;
+        flex-wrap: wrap;
+      }
+
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        min-height: 19px;
+        padding: 1px 6px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        color: var(--muted);
+        background: #fff;
+        font-size: 11px;
+      }
+
+      .tag.read { color: var(--accent); }
+      .tag.destructive { color: var(--danger); }
+      .tag.safe-write,
+      .tag.external-write { color: var(--warn); }
+      .tag.migration-done {
+        border-color: #b8d8cf;
+        color: var(--accent);
+        background: #edf7f4;
+      }
+      .tag.migration-recommended {
+        border-color: #bcd4e8;
+        color: var(--accent-2);
+        background: #eef6fc;
+      }
+      .tag.migration-hold {
+        border-color: #dfc98d;
+        color: var(--warn);
+        background: #fff8e7;
+      }
+      .tag.reduction-keep {
+        border-color: #b8d8cf;
+        color: var(--accent);
+        background: #edf7f4;
+      }
+      .tag.reduction-delete {
+        border-color: #e0b4ad;
+        color: var(--danger);
+        background: #fff0ee;
+      }
+      .tag.reduction-basic {
+        border-color: #bcd4e8;
+        color: var(--accent-2);
+        background: #eef6fc;
+      }
+      .tag.reduction-disabled {
+        border-color: #dfc98d;
+        color: var(--warn);
+        background: #fff8e7;
+      }
+
+      main {
+        overflow: auto;
+        min-width: 0;
+        min-height: 0;
+        padding: 18px;
+      }
+
+      .detail {
+        max-width: 1040px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+        padding: 14px;
+      }
+
+      .panel h2,
+      .panel h3 {
+        margin: 0 0 10px;
+        font-size: 15px;
+      }
+
+      details.panel {
+        padding: 0;
+      }
+
+      details.panel summary {
+        cursor: pointer;
+        padding: 12px 14px;
+        font-weight: 650;
+      }
+
+      details.panel > .details-body {
+        padding: 0 14px 14px;
+      }
+
+      .detail-head {
+        display: grid;
+        gap: 8px;
+      }
+
+      .detail-name {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 22px;
+        font-weight: 700;
+      }
+
+      .kv {
+        display: grid;
+        grid-template-columns: 160px 1fr;
+        border-top: 1px solid var(--line);
+      }
+
+      .kv > div {
+        padding: 8px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .kv > div:nth-child(odd) {
+        color: var(--muted);
+        padding-right: 12px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        overflow-wrap: anywhere;
+      }
+
+      th,
+      td {
+        border-bottom: 1px solid var(--line);
+        padding: 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        background: var(--panel-2);
+      }
+
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+      }
+
+      .empty,
+      .load-state {
+        padding: 24px;
+        color: var(--muted);
+      }
+
+      @media (max-width: 900px) {
+        .layout {
+          grid-template-columns: 1fr;
+          grid-template-rows: minmax(220px, 44%) 1fr;
+        }
+
+        aside {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .kv {
+          grid-template-columns: 1fr;
+        }
+
+        .kv > div:nth-child(odd) {
+          padding-bottom: 0;
+          border-bottom: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <div>
+          <h1 id="pageTitle">Tools Design</h1>
+          <div class="meta" id="pageMeta">Loading JSON database...</div>
+        </div>
+      </header>
+      <div class="layout">
+        <aside>
+          <section class="filters">
+            <input id="search" type="search" placeholder="搜索 tool / description / file..." />
+            <div class="filter-row">
+              <select id="surface"></select>
+              <select id="risk"></select>
+              <select id="visibleTo"></select>
+              <select id="migration"></select>
+              <select id="reduction"></select>
+              <select id="owner"></select>
+              <select id="followUp"></select>
+            </div>
+            <div class="summary-row" id="summary"></div>
+          </section>
+          <section class="tool-list" id="toolList">
+            <div class="load-state">Loading...</div>
+          </section>
+        </aside>
+        <main>
+          <section class="detail" id="detail">
+            <div class="empty">Select a tool.</div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        db: null,
+        filtered: [],
+        selectedName: null
+      };
+
+      const els = {
+        detail: document.getElementById("detail"),
+        list: document.getElementById("toolList"),
+        meta: document.getElementById("pageMeta"),
+        migration: document.getElementById("migration"),
+        owner: document.getElementById("owner"),
+        reduction: document.getElementById("reduction"),
+        followUp: document.getElementById("followUp"),
+        risk: document.getElementById("risk"),
+        search: document.getElementById("search"),
+        summary: document.getElementById("summary"),
+        surface: document.getElementById("surface"),
+        title: document.getElementById("pageTitle"),
+        visibleTo: document.getElementById("visibleTo")
+      };
+
+      const html = (value) =>
+        String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;");
+
+      const asArray = (value) => Array.isArray(value) ? value : value ? [value] : [];
+
+      async function loadDatabase() {
+        const params = new URLSearchParams(location.search);
+        const src = params.get("src") || "tools-design.json";
+        try {
+          const response = await fetch(src, { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`${response.status} ${response.statusText}`);
+          }
+          return response.json();
+        } catch (error) {
+          if (location.protocol === "file:") {
+            const fallbackSrc = src.replace(/\.json(?:$|\?)/, ".data.js");
+            try {
+              await loadScript(fallbackSrc);
+              if (window.__BATCHIMAGER_TOOLS_DESIGN__) {
+                return window.__BATCHIMAGER_TOOLS_DESIGN__;
+              }
+            } catch (fallbackError) {
+              els.meta.textContent = `Cannot load local data fallback: ${fallbackError.message}`;
+              throw fallbackError;
+            }
+          }
+          els.meta.textContent = `Cannot auto-load JSON database: ${error.message}`;
+          throw error;
+        }
+      }
+
+      function loadScript(src) {
+        return new Promise((resolve, reject) => {
+          const script = document.createElement("script");
+          script.src = src;
+          script.onload = () => resolve();
+          script.onerror = () => reject(new Error(`failed to load ${src}`));
+          document.head.appendChild(script);
+        });
+      }
+
+      function option(select, value, label) {
+        const item = document.createElement("option");
+        item.value = value;
+        item.textContent = label;
+        select.appendChild(item);
+      }
+
+      function populateFilters(db) {
+        const surfaces = [...new Set(db.tools.map((tool) => tool.surface))].sort();
+        const risks = [...new Set(db.tools.map((tool) => tool.risk))].sort();
+        const visible = [...new Set(db.tools.flatMap((tool) => asArray(tool.agentVisibleTo)))].sort();
+        const migrationOrder = asArray(db.migrationStatuses).map((item) => item.status).filter(Boolean);
+        const migrations = [
+          ...migrationOrder,
+          ...db.tools.map((tool) => tool.migration?.status).filter(Boolean)
+        ].filter((value, index, list) => list.indexOf(value) === index);
+        const reductionOrder = asArray(db.reductionStatuses).map((item) => item.status).filter(Boolean);
+        const reductions = [
+          ...reductionOrder,
+          ...db.tools.map((tool) => tool.reduction?.status).filter(Boolean)
+        ].filter((value, index, list) => list.indexOf(value) === index);
+        const owners = [...new Set(db.tools.map((tool) => tool.capability?.owner).filter(Boolean))].sort();
+        const followUps = [...new Set(db.tools.map((tool) => tool.followUp?.action).filter(Boolean))].sort();
+
+        els.surface.innerHTML = "";
+        els.risk.innerHTML = "";
+        els.visibleTo.innerHTML = "";
+        els.migration.innerHTML = "";
+        els.reduction.innerHTML = "";
+        els.owner.innerHTML = "";
+        els.followUp.innerHTML = "";
+        option(els.surface, "", "全部 surface");
+        option(els.risk, "", "全部 risk");
+        option(els.visibleTo, "", "全部 agent");
+        option(els.migration, "", "全部迁移状态");
+        option(els.reduction, "", "全部减法决策");
+        option(els.owner, "", "全部能力归属");
+        option(els.followUp, "", "全部后续动作");
+        surfaces.forEach((value) => option(els.surface, value, value));
+        risks.forEach((value) => option(els.risk, value, value));
+        visible.forEach((value) => option(els.visibleTo, value, value));
+        migrations.forEach((value) => option(els.migration, value, value));
+        reductions.forEach((value) => option(els.reduction, value, value));
+        owners.forEach((value) => option(els.owner, value, value));
+        followUps.forEach((value) => option(els.followUp, value, value));
+      }
+
+      function applyFilters() {
+        const q = els.search.value.trim().toLowerCase();
+        const surface = els.surface.value;
+        const risk = els.risk.value;
+        const visibleTo = els.visibleTo.value;
+        const migration = els.migration.value;
+        const reduction = els.reduction.value;
+        const owner = els.owner.value;
+        const followUp = els.followUp.value;
+        state.filtered = state.db.tools.filter((tool) => {
+          const haystack = [
+            tool.name,
+            tool.label,
+            tool.description,
+            tool.surface,
+            tool.risk,
+            tool.status,
+            tool.migration?.status,
+            tool.migration?.batch,
+            tool.migration?.target,
+            tool.migration?.rationale,
+            tool.reduction?.status,
+            tool.reduction?.originalPurpose,
+            tool.reduction?.replacement,
+            tool.reduction?.rationale,
+            tool.capability?.owner,
+            tool.capability?.layer,
+            tool.capability?.interfacePlan,
+            tool.followUp?.action,
+            tool.followUp?.phase,
+            tool.followUp?.nextStep,
+            ...asArray(tool.agentVisibleTo),
+            ...(tool.implementation?.files || [])
+          ].join(" ").toLowerCase();
+          return (!q || haystack.includes(q)) &&
+            (!surface || tool.surface === surface) &&
+            (!risk || tool.risk === risk) &&
+            (!visibleTo || asArray(tool.agentVisibleTo).includes(visibleTo)) &&
+            (!migration || tool.migration?.status === migration) &&
+            (!reduction || tool.reduction?.status === reduction) &&
+            (!owner || tool.capability?.owner === owner) &&
+            (!followUp || tool.followUp?.action === followUp);
+        });
+        if (!state.filtered.find((tool) => keyOf(tool) === state.selectedName)) {
+          state.selectedName = state.filtered[0] ? keyOf(state.filtered[0]) : null;
+        }
+        renderList();
+        renderDetail();
+      }
+
+      function keyOf(tool) {
+        return `${tool.surface}:${tool.name}`;
+      }
+
+      function renderSummary() {
+        const total = state.db.tools.length;
+        const shown = state.filtered.length;
+        const enabled = state.filtered.filter((tool) => tool.status === "enabled" || tool.status === "wrapped").length;
+        const preflight = state.filtered.filter((tool) => tool.requiresPreflight).length;
+        const recommended = state.filtered.filter((tool) => tool.migration?.status === "建议做").length;
+        const done = state.filtered.filter((tool) => tool.migration?.status === "已完成").length;
+        const deleteRecommended = state.filtered.filter((tool) => tool.reduction?.status === "建议删除").length;
+        const batchimagerOwned = state.filtered.filter((tool) => tool.capability?.owner === "BatchImager").length;
+        els.summary.innerHTML = [
+          `${shown}/${total} tools`,
+          `${enabled} active`,
+          `${batchimagerOwned} BatchImager`,
+          `${recommended} 建议做`,
+          `${done} 已完成`,
+          `${deleteRecommended} 建议删除`,
+          `${preflight} preflight`
+        ].map((text) => `<span class="pill">${html(text)}</span>`).join("");
+      }
+
+      function renderList() {
+        renderSummary();
+        if (state.filtered.length === 0) {
+          els.list.innerHTML = '<div class="empty">No tools match.</div>';
+          return;
+        }
+        els.list.innerHTML = state.filtered.map((tool) => {
+          const active = keyOf(tool) === state.selectedName ? " active" : "";
+          return `
+            <button class="tool-item${active}" data-key="${html(keyOf(tool))}">
+              <div class="tool-title">
+                <span class="tool-name">${html(tool.name)}</span>
+                <span class="tag ${html(tool.risk)}">${html(tool.risk)}</span>
+              </div>
+              <div class="tool-desc">${html(tool.description)}</div>
+              <div class="tags">
+                <span class="tag ${html(migrationStatusClass(tool.migration?.status))}">${html(tool.migration?.status || "未标记")}</span>
+                <span class="tag ${html(reductionStatusClass(tool.reduction?.status))}">${html(tool.reduction?.status || "未评估")}</span>
+                <span class="tag">${html(tool.capability?.owner || "未归属")}</span>
+                <span class="tag">${html(tool.followUp?.action || "未计划")}</span>
+                <span class="tag">${html(tool.surface)}</span>
+                <span class="tag">${html(tool.status)}</span>
+                ${tool.requiresPreflight ? '<span class="tag">preflight</span>' : ""}
+                ${asArray(tool.agentVisibleTo).map((agent) => `<span class="tag">${html(agent)}</span>`).join("")}
+              </div>
+            </button>
+          `;
+        }).join("");
+      }
+
+      function renderDetail() {
+        const tool = state.db.tools.find((item) => keyOf(item) === state.selectedName);
+        if (!tool) {
+          els.detail.innerHTML = '<div class="empty">Select a tool.</div>';
+          return;
+        }
+        els.detail.innerHTML = `
+          ${renderDesignOverview(state.db)}
+          <article class="panel detail-head">
+            <div class="detail-name">${html(tool.name)}</div>
+            <div>${html(tool.description)}</div>
+            <div class="tags">
+              <span class="tag">${html(tool.surface)}</span>
+              <span class="tag">${html(tool.status)}</span>
+              <span class="tag ${html(tool.risk)}">${html(tool.risk)}</span>
+              <span class="tag ${html(migrationStatusClass(tool.migration?.status))}">${html(tool.migration?.status || "未标记")}</span>
+              <span class="tag ${html(reductionStatusClass(tool.reduction?.status))}">${html(tool.reduction?.status || "未评估")}</span>
+              <span class="tag">${html(tool.capability?.owner || "未归属")}</span>
+              <span class="tag">${html(tool.followUp?.action || "未计划")}</span>
+              ${tool.requiresPreflight ? '<span class="tag">requires preflight</span>' : '<span class="tag">no preflight</span>'}
+              ${asArray(tool.agentVisibleTo).map((agent) => `<span class="tag">${html(agent)}</span>`).join("")}
+            </div>
+          </article>
+          ${renderCapability(tool)}
+          ${renderFollowUp(tool)}
+          ${renderReduction(tool)}
+          ${renderMigration(tool)}
+          ${renderModelVisible(tool)}
+          ${renderInputs(tool)}
+          ${renderOutput(tool)}
+          ${renderImplementation(tool)}
+          ${renderNotes(tool)}
+        `;
+      }
+
+      function renderDesignOverview(db) {
+        const model = db.architectureModel || {};
+        const principles = asArray(db.designPrinciples).slice(0, 8);
+        const plan = asArray(db.toolProcessingPlan);
+        return `
+          <details class="panel">
+            <summary>Design Principles & Tool Processing Plan</summary>
+            <div class="details-body">
+              <div class="kv">
+                <div>thesis</div><div>${html(model.thesis || "")}</div>
+                <div>principles</div><div>${renderNamedRules(principles)}</div>
+                <div>plan phases</div><div>${renderPlanPhases(plan)}</div>
+              </div>
+            </div>
+          </details>
+        `;
+      }
+
+      function renderNamedRules(items) {
+        const list = asArray(items);
+        return list.length ? `<ul>${list.map((item) => `<li><strong>${html(item.name)}</strong>: ${html(item.rule)}</li>`).join("")}</ul>` : '<span class="meta">none</span>';
+      }
+
+      function renderPlanPhases(items) {
+        const list = asArray(items);
+        return list.length ? `<ul>${list.map((item) => `<li><strong>${html(item.phase)}</strong> ${html(item.title)}: ${html(item.goal)}</li>`).join("")}</ul>` : '<span class="meta">none</span>';
+      }
+
+      function migrationStatusClass(status) {
+        if (status === "已完成") {
+          return "migration-done";
+        }
+        if (status === "建议做") {
+          return "migration-recommended";
+        }
+        if (status === "暂不做") {
+          return "migration-hold";
+        }
+        return "";
+      }
+
+      function reductionStatusClass(status) {
+        if (status === "保留") {
+          return "reduction-keep";
+        }
+        if (status === "建议删除") {
+          return "reduction-delete";
+        }
+        if (status === "基础能力") {
+          return "reduction-basic";
+        }
+        if (status === "暂不启用") {
+          return "reduction-disabled";
+        }
+        return "";
+      }
+
+      function renderReduction(tool) {
+        const reduction = tool.reduction;
+        if (!reduction) {
+          return "";
+        }
+        return `
+          <section class="panel">
+            <h2>Reduction</h2>
+            <div class="kv">
+              <div>decision</div><div><span class="tag ${html(reductionStatusClass(reduction.status))}">${html(reduction.status)}</span></div>
+              <div>original purpose</div><div>${html(reduction.originalPurpose || "")}</div>
+              <div>replacement</div><div>${html(reduction.replacement || "")}</div>
+              <div>rationale</div><div>${html(reduction.rationale || "")}</div>
+              <div>removal plan</div><div>${html(reduction.removalPlan || "")}</div>
+              <div>risk if removed</div><div>${html(reduction.riskIfRemoved || "")}</div>
+            </div>
+          </section>
+        `;
+      }
+
+      function renderCapability(tool) {
+        const capability = tool.capability;
+        if (!capability) {
+          return "";
+        }
+        return `
+          <section class="panel">
+            <h2>Capability Ownership</h2>
+            <div class="kv">
+              <div>owner</div><div>${html(capability.owner || "")}</div>
+              <div>layer</div><div>${html(capability.layer || "")}</div>
+              <div>interface plan</div><div>${html(capability.interfacePlan || "")}</div>
+              <div>exposure</div><div>${html(capability.exposure || "")}</div>
+              <div>notes</div><div>${renderListItems(capability.notes)}</div>
+            </div>
+          </section>
+        `;
+      }
+
+      function renderFollowUp(tool) {
+        const followUp = tool.followUp;
+        if (!followUp) {
+          return "";
+        }
+        return `
+          <section class="panel">
+            <h2>Follow-up Plan</h2>
+            <div class="kv">
+              <div>action</div><div>${html(followUp.action || "")}</div>
+              <div>phase</div><div>${html(followUp.phase || "")}</div>
+              <div>next step</div><div>${html(followUp.nextStep || "")}</div>
+              <div>tests</div><div>${renderListItems(followUp.tests)}</div>
+            </div>
+          </section>
+        `;
+      }
+
+      function renderMigration(tool) {
+        const migration = tool.migration;
+        if (!migration) {
+          return "";
+        }
+        return `
+          <section class="panel">
+            <h2>Migration</h2>
+            <div class="kv">
+              <div>status</div><div><span class="tag ${html(migrationStatusClass(migration.status))}">${html(migration.status)}</span></div>
+              <div>batch</div><div>${html(migration.batch || "")}</div>
+              <div>target</div><div>${html(migration.target || "")}</div>
+              <div>rationale</div><div>${html(migration.rationale || "")}</div>
+              <div>adapter work</div><div>${renderListItems(migration.adapterWork)}</div>
+              <div>verification</div><div>${renderListItems(migration.verification)}</div>
+            </div>
+          </section>
+        `;
+      }
+
+      function renderModelVisible(tool) {
+        const modelVisible = tool.modelVisible;
+        if (!modelVisible) {
+          return "";
+        }
+        return `
+          <section class="panel">
+            <h2>Model Visible Additions</h2>
+            <div class="kv">
+              <div>promptSnippet</div><div>${html(modelVisible.promptSnippet || "")}</div>
+              <div>promptGuidelines</div><div>${renderListItems(modelVisible.promptGuidelines)}</div>
+            </div>
+          </section>
+        `;
+      }
+
+      function renderInputs(tool) {
+        const rows = asArray(tool.input);
+        return `
+          <section class="panel">
+            <h2>Input</h2>
+            ${rows.length ? `
+              <table>
+                <thead><tr><th>Name</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
+                <tbody>
+                  ${rows.map((row) => `
+                    <tr>
+                      <td><code>${html(row.name)}</code></td>
+                      <td>${html(row.type)}</td>
+                      <td>${row.required ? "yes" : "no"}</td>
+                      <td>${html(row.description)}</td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            ` : '<div class="meta">No parameters.</div>'}
+          </section>
+        `;
+      }
+
+      function renderOutput(tool) {
+        const output = tool.output || {};
+        return `
+          <section class="panel">
+            <h2>Output</h2>
+            <div class="kv">
+              <div>content text</div><div>${html(output.contentText || "")}</div>
+              <div>details</div><div>${renderCodeList(output.details)}</div>
+            </div>
+          </section>
+        `;
+      }
+
+      function renderImplementation(tool) {
+        const impl = tool.implementation || {};
+        return `
+          <section class="panel">
+            <h2>Implementation</h2>
+            <div class="kv">
+              <div>current</div><div>${html(impl.current || "")}</div>
+              <div>files</div><div>${renderCodeList(impl.files)}</div>
+            </div>
+          </section>
+        `;
+      }
+
+      function renderNotes(tool) {
+        const notes = asArray(tool.consistencyNotes);
+        if (!notes.length) {
+          return "";
+        }
+        return `
+          <section class="panel">
+            <h2>Consistency Notes</h2>
+            ${renderListItems(notes)}
+          </section>
+        `;
+      }
+
+      function renderCodeList(items) {
+        const list = asArray(items);
+        return list.length ? list.map((item) => `<code>${html(item)}</code>`).join("<br />") : '<span class="meta">none</span>';
+      }
+
+      function renderListItems(items) {
+        const list = asArray(items);
+        return list.length ? `<ul>${list.map((item) => `<li>${html(item)}</li>`).join("")}</ul>` : '<span class="meta">none</span>';
+      }
+
+      function bindEvents() {
+        [els.search, els.surface, els.risk, els.visibleTo, els.migration, els.reduction, els.owner, els.followUp].forEach((el) => {
+          el.addEventListener("input", applyFilters);
+          el.addEventListener("change", applyFilters);
+        });
+        els.list.addEventListener("click", (event) => {
+          const button = event.target.closest("[data-key]");
+          if (!button) {
+            return;
+          }
+          state.selectedName = button.getAttribute("data-key");
+          renderList();
+          renderDetail();
+        });
+      }
+
+      function bootstrap(db) {
+        state.db = db;
+        state.selectedName = db.tools[0] ? keyOf(db.tools[0]) : null;
+        els.title.textContent = db.title || "Tools Design";
+        els.meta.textContent = `schema ${db.schemaVersion || "?"} · updated ${db.updatedAt || "unknown"} · ${db.tools.length} tools`;
+        populateFilters(db);
+        applyFilters();
+      }
+
+      bindEvents();
+      loadDatabase().then(bootstrap).catch(() => {
+        els.list.innerHTML = '<div class="load-state">无法加载同目录下的 tools-design.json。</div>';
+      });
+    </script>
+  </body>
+</html>

@@ -1,7 +1,7 @@
 import type { WebContents } from "electron";
-import type { EssePermissionRequest, EssePermissionResponse } from "../ipcTypes";
+import type { AgentPermissionRequest, AgentPermissionResponse } from "../ipcTypes";
 import type { EsseWorkspacePermissionDecision, EsseWorkspacePermissionRequest } from "./esseWorkspaceTools";
-import type { EssePermissionPolicy } from "./essePermissionPolicy";
+import type { AgentWorkspacePermissionPolicy } from "./agentWorkspacePermissionPolicy";
 
 interface PendingPermission {
   allowKey: string;
@@ -30,7 +30,7 @@ export class EssePermissionBroker {
   request(
     webContents: Pick<WebContents, "send">,
     payload: EsseWorkspacePermissionRequest,
-    options: { policy: EssePermissionPolicy; sessionAllowList: Set<string>; signal?: AbortSignal }
+    options: { policy: AgentWorkspacePermissionPolicy; sessionAllowList: Set<string>; signal?: AbortSignal }
   ): Promise<EsseWorkspacePermissionDecision> {
     if (payload.risk === "read" || options.policy[payload.risk] === "allow") {
       return Promise.resolve({ decision: "allow" });
@@ -45,7 +45,7 @@ export class EssePermissionBroker {
     const timeout = (this.options.setTimeoutFn ?? setTimeout)(() => {
       this.resolve(requestId, { decision: "deny", reason: "Permission request timed out" });
     }, this.options.timeoutMs ?? DEFAULT_PERMISSION_TIMEOUT_MS);
-    const request: EssePermissionRequest = { payload, requestId };
+    const request: AgentPermissionRequest = { payload, requestId };
 
     return new Promise((resolve, reject) => {
       const abort = () => {
@@ -63,11 +63,12 @@ export class EssePermissionBroker {
         timeout
       });
       options.signal?.addEventListener("abort", abort, { once: true });
+      webContents.send("agent:permission-request", request);
       webContents.send("esse:permission-request", request);
     });
   }
 
-  respond(response: EssePermissionResponse): boolean {
+  respond(response: AgentPermissionResponse): boolean {
     const pending = this.pending.get(response.requestId);
     if (!pending) {
       return false;
@@ -117,6 +118,6 @@ export class EssePermissionBroker {
 
   private createRequestId(): string {
     this.sequence += 1;
-    return `esse-permission-${Date.now()}-${this.sequence}`;
+    return `agent-permission-${Date.now()}-${this.sequence}`;
   }
 }

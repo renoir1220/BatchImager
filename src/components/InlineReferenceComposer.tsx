@@ -28,6 +28,7 @@ export interface InlineReferenceComposerHandle {
 }
 
 interface InlineReferenceComposerProps {
+  ariaLabel?: string;
   footer?: ReactNode;
   onChange: (snapshot: InlineComposerSnapshot) => void;
   onOpenReference: (filePath: string) => void;
@@ -37,7 +38,7 @@ interface InlineReferenceComposerProps {
 }
 
 export const InlineReferenceComposer = forwardRef<InlineReferenceComposerHandle, InlineReferenceComposerProps>(
-  function InlineReferenceComposer({ footer, onChange, onOpenReference, onRemoveReference, onSubmit, placeholder }, ref) {
+  function InlineReferenceComposer({ ariaLabel = "智能体输入", footer, onChange, onOpenReference, onRemoveReference, onSubmit, placeholder }, ref) {
     const editorRef = useRef<HTMLDivElement>(null);
     const referencesRef = useRef(new Map<string, InlineComposerReference>());
     const savedRangeRef = useRef<Range | null>(null);
@@ -387,7 +388,7 @@ export const InlineReferenceComposer = forwardRef<InlineReferenceComposerHandle,
     return (
       <div className="inline-composer-shell">
         <div
-          aria-label="Esse 输入"
+          aria-label={ariaLabel}
           className="inline-reference-composer"
           contentEditable
           data-placeholder={placeholder}

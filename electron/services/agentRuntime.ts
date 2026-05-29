@@ -5,6 +5,14 @@ export interface CodingAgentSdk {
     create: (...args: unknown[]) => unknown;
     inMemory?: () => unknown;
   };
+  DefaultResourceLoader?: new (options: {
+    agentDir: string;
+    cwd: string;
+    extensionFactories?: unknown[];
+  }) => {
+    reload: () => Promise<void>;
+  };
+  getAgentDir?: () => string;
   ModelRegistry?: {
     create: (authStorage: unknown, modelsJsonPath?: string) => CodingAgentModelRegistry;
     inMemory?: (authStorage: unknown) => CodingAgentModelRegistry;
@@ -44,6 +52,7 @@ export interface AgentSessionDescriptor {
 
 interface BuildAgentSessionDescriptorOptions {
   customToolNames?: string[];
+  extensionToolNames?: string[];
   model: string;
   projectDirectory: string;
   sessionId: string;
@@ -51,6 +60,7 @@ interface BuildAgentSessionDescriptorOptions {
 
 export interface CreateAgentRuntimeOptions extends BuildAgentSessionDescriptorOptions {
   customToolDefinitions?: unknown[];
+  extensionFactories?: unknown[];
   llmConfig?: TuziLlmApiConfig;
   sdk?: CodingAgentSdk;
 }
@@ -107,7 +117,7 @@ export function buildAgentSessionDescriptor(
 ): AgentSessionDescriptor {
   return {
     builtInTools: [...DEFAULT_BUILT_IN_TOOLS],
-    customTools: [...(options.customToolNames ?? [])],
+    customTools: uniqueToolNames([...(options.extensionToolNames ?? []), ...(options.customToolNames ?? [])]),
     model: options.model,
     projectDirectory: options.projectDirectory,
     sessionId: options.sessionId
@@ -141,6 +151,21 @@ function extractCustomToolNames(definitions: unknown[] | undefined): string[] {
   }
 
   return names;
+}
+
+function uniqueToolNames(names: string[]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const name of names) {
+    const trimmed = name.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
 }
 
 export async function loadCodingAgentSdk(loader: AgentSdkLoader = defaultAgentSdkLoader): Promise<CodingAgentSdk> {
@@ -192,12 +217,14 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
   const descriptor = buildAgentSessionDescriptor({ ...options, customToolNames });
   const sdk = options.sdk ?? (await loadCodingAgentSdk());
   const modelOptions = options.llmConfig ? createTuziAgentModelOptions(options.llmConfig, sdk) : {};
+  const resourceLoader = await createResourceLoaderForExtensions(options, sdk);
   const { session } = await sdk.createAgentSession({
     cwd: descriptor.projectDirectory,
     customTools: options.customToolDefinitions ?? [],
     noTools: "builtin",
     // tools 白名单与实际注册的 custom 工具同步，避免给 LLM 暴露不存在的工具名。
     tools: [...descriptor.builtInTools, ...descriptor.customTools],
+    ...(resourceLoader ? { resourceLoader } : {}),
     ...modelOptions
   });
 
@@ -240,6 +267,27 @@ export async function createAgentRuntime(options: CreateAgentRuntimeOptions): Pr
       };
     }
   };
+}
+
+async function createResourceLoaderForExtensions(
+  options: CreateAgentRuntimeOptions,
+  sdk: CodingAgentSdk
+): Promise<unknown | undefined> {
+  if (!options.extensionFactories?.length) {
+    return undefined;
+  }
+
+  if (!sdk.DefaultResourceLoader || !sdk.getAgentDir) {
+    throw new Error("智能体 SDK 加载失败：当前 Pi SDK 不支持受控 extension factories");
+  }
+
+  const resourceLoader = new sdk.DefaultResourceLoader({
+    agentDir: sdk.getAgentDir(),
+    cwd: options.projectDirectory,
+    extensionFactories: options.extensionFactories
+  });
+  await resourceLoader.reload();
+  return resourceLoader;
 }
 
 function getLastAssistantError(session: CodingAgentSession): string | undefined {

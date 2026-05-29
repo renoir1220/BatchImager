@@ -1416,6 +1416,24 @@ textarea {
   background: color-mix(in oklch, var(--green), white 94%);
 }
 
+.esse-permission-card.collapsed {
+  gap: 3px;
+  padding: 7px 8px;
+}
+
+.esse-permission-card.collapsed .plan-toggle-icon {
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+.esse-permission-card-summary {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
 .esse-batch-task-card {
   display: grid;
   gap: 7px;
@@ -1493,6 +1511,15 @@ textarea {
   background: color-mix(in oklch, var(--danger), white 95%);
 }
 
+.esse-bash-card.collapsed {
+  gap: 3px;
+  padding: 7px 8px;
+}
+
+.esse-bash-card.collapsed .plan-toggle-icon {
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
 .esse-preflight-card header,
 .esse-preflight-card footer,
 .esse-batch-task-card header,
@@ -1536,6 +1563,7 @@ textarea {
   line-height: 1.45;
   padding: 7px;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .esse-bash-card pre {
@@ -1921,6 +1949,9 @@ textarea {
 }
 
 .agent-status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
   padding: 0 5px 1px;
   color: #9ca098;
@@ -1935,11 +1966,19 @@ textarea {
 .agent-status-text {
   position: relative;
   display: inline-block;
+  min-width: 0;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   text-shadow: none;
   vertical-align: top;
+  white-space: nowrap;
+}
+
+.agent-status-token {
+  flex: 0 0 auto;
+  color: color-mix(in oklch, currentColor, #6b6b64 28%);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 

@@ -31,6 +31,7 @@ describe("agentRuntime", () => {
   test("builds a session descriptor that mirrors the registered custom tools", () => {
     const descriptor = buildAgentSessionDescriptor({
       customToolNames: ["run_project_command", "generate_image"],
+      extensionToolNames: ["list_sessions"],
       model: "gpt-5.5",
       projectDirectory: "C:\\BatchImagerProjects\\project-1",
       sessionId: "img-1"
@@ -38,7 +39,7 @@ describe("agentRuntime", () => {
 
     expect(descriptor).toEqual({
       builtInTools: ["read", "grep", "find", "ls"],
-      customTools: ["run_project_command", "generate_image"],
+      customTools: ["list_sessions", "run_project_command", "generate_image"],
       model: "gpt-5.5",
       projectDirectory: "C:\\BatchImagerProjects\\project-1",
       sessionId: "img-1"
@@ -146,6 +147,88 @@ describe("agentRuntime", () => {
     expect(typeof externalUnsubscribe).toBe("function");
     externalUnsubscribe();
     expect(runtime.getLastAssistantText()).toBe("done");
+  });
+
+  test("loads controlled extension factories through Pi's resource loader", async () => {
+    const createCalls: Record<string, unknown>[] = [];
+    const loaderOptions: Record<string, unknown>[] = [];
+    let reloadCount = 0;
+    class FakeDefaultResourceLoader {
+      constructor(options: Record<string, unknown>) {
+        loaderOptions.push(options);
+      }
+
+      async reload() {
+        reloadCount += 1;
+      }
+    }
+
+    await createAgentRuntime({
+      customToolDefinitions: [{ name: "bash" }],
+      extensionFactories: [() => undefined],
+      extensionToolNames: ["list_sessions", "get_session_records"],
+      llmConfig: {
+        apiKey: "test-key",
+        baseUrl: "https://api.tu-zi.com/coding",
+        model: "gpt-5.5"
+      },
+      model: "gpt-5.5",
+      projectDirectory: "C:\\BatchImagerProjects\\project-1",
+      sdk: {
+        AuthStorage: {
+          create: () => ({})
+        },
+        DefaultResourceLoader: FakeDefaultResourceLoader,
+        getAgentDir: () => "/tmp/pi-agent",
+        ModelRegistry: {
+          create: () => {
+            const models = new Map<string, unknown>();
+            return {
+              find: (_provider, modelId) => models.get(modelId),
+              registerProvider: (_providerName, config) => {
+                const providerModels = config.models as Array<{ id: string }>;
+                for (const model of providerModels) {
+                  models.set(model.id, model);
+                }
+              }
+            };
+          }
+        },
+        createAgentSession: async (options) => {
+          createCalls.push(options ?? {});
+          return {
+            session: {
+              getLastAssistantText: () => "done",
+              prompt: async () => undefined,
+              subscribe: () => () => undefined
+            }
+          };
+        }
+      },
+      sessionId: "esse-agent"
+    });
+
+    expect(loaderOptions).toEqual([
+      {
+        agentDir: "/tmp/pi-agent",
+        cwd: "C:\\BatchImagerProjects\\project-1",
+        extensionFactories: [expect.any(Function)]
+      }
+    ]);
+    expect(reloadCount).toBe(1);
+    expect(createCalls[0]).toMatchObject({
+      customTools: [{ name: "bash" }],
+      resourceLoader: expect.any(FakeDefaultResourceLoader),
+      tools: [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "list_sessions",
+        "get_session_records",
+        "bash"
+      ]
+    });
   });
 
   test("reads the last assistant text from SDK session messages when no helper exists", async () => {

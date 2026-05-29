@@ -128,7 +128,7 @@ export function markSessionProjectCommand(
             {
               id: contextMessageId,
               role: "context" as const,
-              content: `来自 Esse方案：${command.instruction}${referenceCount > 0 ? `\n参考图：${referenceCount} 张` : ""}`,
+              content: `来自批量方案：${command.instruction}${referenceCount > 0 ? `\n参考图：${referenceCount} 张` : ""}`,
               contextType: "project-command" as const,
               ...(command.sourceFilePath ? { sourceFilePath: command.sourceFilePath } : {}),
               ...(referenceCount > 0 ? { referenceFilePaths } : {})
@@ -142,14 +142,16 @@ export function markSessionProjectCommand(
   );
 }
 
-export function markSessionEsseTask(
+export function markSessionAgentTask(
   sessions: ImageSession[],
   sessionId: string,
   task: { instruction: string; referenceFilePaths?: string[]; sourceFilePath?: string },
-  contextMessageId: string
+  contextMessageId: string,
+  providerLabel = "智能体"
 ): ImageSession[] {
   const referenceFilePaths = task.referenceFilePaths ?? [];
   const referenceCount = referenceFilePaths.length;
+  const sourceLabel = providerLabel === "智能体" ? "来自智能体" : `来自 ${providerLabel}智能体`;
 
   return sessions.map((session) =>
     session.id === sessionId
@@ -160,8 +162,8 @@ export function markSessionEsseTask(
             {
               id: contextMessageId,
               role: "context" as const,
-              content: `来自 Esse智能体：${task.instruction}${referenceCount > 0 ? `\n参考图：${referenceCount} 张` : ""}`,
-              contextType: "esse-task" as const,
+              content: `${sourceLabel}：${task.instruction}${referenceCount > 0 ? `\n参考图：${referenceCount} 张` : ""}`,
+              contextType: "agent-task" as const,
               ...(referenceCount > 0 ? { referenceFilePaths } : {}),
               ...(task.sourceFilePath ? { sourceFilePath: task.sourceFilePath } : {})
             }
@@ -172,6 +174,15 @@ export function markSessionEsseTask(
         }
       : session
   );
+}
+
+export function markSessionEsseTask(
+  sessions: ImageSession[],
+  sessionId: string,
+  task: { instruction: string; referenceFilePaths?: string[]; sourceFilePath?: string },
+  contextMessageId: string
+): ImageSession[] {
+  return markSessionAgentTask(sessions, sessionId, task, contextMessageId, "Esse");
 }
 
 export function applyGeneratedImageResult(

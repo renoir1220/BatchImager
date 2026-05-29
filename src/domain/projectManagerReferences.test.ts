@@ -3,7 +3,7 @@ import type { ProjectManagerState } from "../types/projectManager";
 import { resolveProjectManagerReferenceImages } from "./projectManagerReferences";
 
 describe("projectManagerReferences", () => {
-  test("reuses the latest prior reference images when the next Esse prompt points back to them", () => {
+  test("does not auto-reuse older conversation references based on wording", () => {
     const state = makeState([
       {
         content: "用这张参考图生成三个内部设计图",
@@ -19,11 +19,11 @@ describe("projectManagerReferences", () => {
     ]);
 
     expect(resolveProjectManagerReferenceImages(state, "不是三种风格，是沿用第一个 prompt 里的参考图", [])).toEqual({
-      referenceImagePaths: ["C:/project/references/cafe.jpg"]
+      referenceImagePaths: []
     });
   });
 
-  test("does not attach old references when the user starts an unrelated Esse request", () => {
+  test("does not attach old references when the user starts an unrelated agent request", () => {
     const state = makeState([
       {
         content: "用这张参考图生成三个内部设计图",
@@ -38,16 +38,15 @@ describe("projectManagerReferences", () => {
     });
   });
 
-  test("asks the user for the missing attachment instead of continuing blindly", () => {
+  test("lets the agent provider decide how to handle reference wording when no attachment is available", () => {
     const state = makeState([]);
 
     expect(resolveProjectManagerReferenceImages(state, "按附件里的参考图继续生成三张", [])).toEqual({
-      errorMessage: "我没有收到可用的参考图附件，请先粘贴或添加参考图后再发送。",
       referenceImagePaths: []
     });
   });
 
-  test("prefers newly pasted references over older conversation references", () => {
+  test("uses only newly pasted references and deduplicates them", () => {
     const state = makeState([
       {
         content: "参考这张旧图",
@@ -57,7 +56,11 @@ describe("projectManagerReferences", () => {
       }
     ]);
 
-    expect(resolveProjectManagerReferenceImages(state, "按这个附件继续", ["C:/project/references/new.jpg"])).toEqual({
+    expect(resolveProjectManagerReferenceImages(state, "按这个附件继续", [
+      "C:/project/references/new.jpg",
+      " ",
+      "C:/project/references/new.jpg"
+    ])).toEqual({
       referenceImagePaths: ["C:/project/references/new.jpg"]
     });
   });

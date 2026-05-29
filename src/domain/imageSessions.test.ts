@@ -11,6 +11,7 @@ import {
   getSessionDisplayPath,
   getSessionGenerationSourcePath,
   getInitialSelectedSessionId,
+  markSessionAgentTask,
   markSessionEsseTask,
   markSessionGenerating,
   markSessionProjectCommand,
@@ -168,7 +169,7 @@ describe("image sessions", () => {
           {
             id: "project-command-1",
             role: "context",
-            content: "来自 Esse方案：生成客厅茶几场景鲜花商品图\n参考图：1 张",
+            content: "来自批量方案：生成客厅茶几场景鲜花商品图\n参考图：1 张",
             contextType: "project-command",
             sourceFilePath: "C:/shots/IMG_0001.JPG",
             referenceFilePaths: ["C:/refs/living-room.png"]
@@ -228,9 +229,29 @@ describe("image sessions", () => {
 
     expect(result[0].chatMessages[0]).toMatchObject({
       content: "来自 Esse智能体：根据参考图生成内部构造图\n参考图：1 张",
-      contextType: "esse-task",
+      contextType: "agent-task",
       referenceFilePaths: ["C:/refs/pasted.png"],
       sourceFilePath: "C:/shots/IMG_0001.JPG"
+    });
+  });
+
+  it("labels provider-neutral agent task context with the active provider", () => {
+    const sessions = createTestImageSessions(["C:/shots/IMG_0001.JPG"]);
+    const result = markSessionAgentTask(
+      sessions,
+      "img-1",
+      {
+        instruction: "根据参考图生成内部构造图",
+        referenceFilePaths: ["C:/refs/pasted.png"]
+      },
+      "agent-task-1",
+      "Codex"
+    );
+
+    expect(result[0].chatMessages[0]).toMatchObject({
+      content: "来自 Codex智能体：根据参考图生成内部构造图\n参考图：1 张",
+      contextType: "agent-task",
+      referenceFilePaths: ["C:/refs/pasted.png"]
     });
   });
 

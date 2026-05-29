@@ -18,7 +18,7 @@ interface ZipEntry {
   localHeaderOffset: number;
 }
 
-const DEFAULT_PACKAGE_NAME = "Esse-生成图片.zip";
+const DEFAULT_PACKAGE_NAME = "BatchImager-生成图片.zip";
 
 export async function packageGeneratedImages(options: PackageGeneratedImagesOptions): Promise<PackageGeneratedImagesResult> {
   const imagePaths = [...new Set(options.imagePaths.filter(Boolean))];

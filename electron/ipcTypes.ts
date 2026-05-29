@@ -15,22 +15,27 @@ export interface CancelOperationResponse {
   canceled: boolean;
 }
 
-export interface CancelEsseBatchTaskItemRequest {
+export interface CancelAgentBatchTaskItemRequest {
   batchTaskId: string;
   sessionId: string;
 }
 
-export interface CancelEsseBatchTaskItemResponse {
+export interface CancelAgentBatchTaskItemResponse {
   canceled: boolean;
 }
 
-export interface CancelEsseBatchTaskAllRequest {
+export interface CancelAgentBatchTaskAllRequest {
   batchTaskId: string;
 }
 
-export interface CancelEsseBatchTaskAllResponse {
+export interface CancelAgentBatchTaskAllResponse {
   canceledCount: number;
 }
+
+export type CancelEsseBatchTaskItemRequest = CancelAgentBatchTaskItemRequest;
+export type CancelEsseBatchTaskItemResponse = CancelAgentBatchTaskItemResponse;
+export type CancelEsseBatchTaskAllRequest = CancelAgentBatchTaskAllRequest;
+export type CancelEsseBatchTaskAllResponse = CancelAgentBatchTaskAllResponse;
 
 export interface ApiSettingsSnapshot {
   activeImageApiProfileId: ImageApiProfileId;
@@ -171,9 +176,9 @@ export interface ShowFileInFolderRequest {
   filePath: string;
 }
 
-export type EsseBashExecutionStatus = "running" | "completed" | "failed";
+export type AgentBashExecutionStatus = "running" | "completed" | "failed";
 
-export interface EsseBashExecutionEvent {
+export interface AgentBashExecutionEvent {
   command: string;
   cwd: string;
   exitCode?: number | null;
@@ -182,30 +187,38 @@ export interface EsseBashExecutionEvent {
   output?: string;
   outputPath?: string;
   skillName?: string | null;
-  status: EsseBashExecutionStatus;
+  status: AgentBashExecutionStatus;
   toolCallId: string;
 }
 
-export interface RetryEsseBatchTaskItemRequest {
+export type EsseBashExecutionStatus = AgentBashExecutionStatus;
+export type EsseBashExecutionEvent = AgentBashExecutionEvent;
+
+export interface RetryAgentBatchTaskItemRequest {
   batchTaskId: string;
   sessionId: string;
 }
 
-export interface RetryEsseBatchTaskItemResponse {
+export interface RetryAgentBatchTaskItemResponse {
   accepted: boolean;
   reason?: string;
   retryCount?: number;
   sessionId?: string;
 }
 
-export interface RetryEsseBatchTaskFailedRequest {
+export interface RetryAgentBatchTaskFailedRequest {
   batchTaskId: string;
 }
 
-export interface RetryEsseBatchTaskFailedResponse {
+export interface RetryAgentBatchTaskFailedResponse {
   acceptedCount: number;
   rejected: Array<{ reason: string; sessionId: string }>;
 }
+
+export type RetryEsseBatchTaskItemRequest = RetryAgentBatchTaskItemRequest;
+export type RetryEsseBatchTaskItemResponse = RetryAgentBatchTaskItemResponse;
+export type RetryEsseBatchTaskFailedRequest = RetryAgentBatchTaskFailedRequest;
+export type RetryEsseBatchTaskFailedResponse = RetryAgentBatchTaskFailedResponse;
 
 export interface CopyImageToClipboardRequest {
   imagePath: string;
@@ -302,7 +315,12 @@ export interface AppLogEntry {
 export type PersistedImageSessionStatus = "idle" | "queued" | "generating" | "completed" | "needs-review" | "failed";
 export type PersistedImageSessionChatStatus = "idle" | "sending";
 export type PersistedImageSessionChatRole = "user" | "assistant" | "error" | "context";
-export type PersistedImageSessionContextType = "batch-prompt" | "generated-image" | "project-command" | "esse-task";
+export type PersistedImageSessionContextType =
+  | "batch-prompt"
+  | "generated-image"
+  | "project-command"
+  | "agent-task"
+  | "esse-task";
 
 export interface PersistedImageSessionChatMessage {
   contextType?: PersistedImageSessionContextType;
@@ -347,32 +365,43 @@ export type ProjectManagerMessageRole = "user" | "assistant" | "error" | "contex
 export type BatchPlanStatus = "draft" | "running" | "completed" | "failed" | "paused";
 export type WorkerReportStatus = "completed" | "failed" | "skipped";
 
-export interface EsseBatchTaskCardItem {
-  command: EssePreflightCommand;
+export interface AgentBatchTaskCardItem {
+  command: AgentPreflightCommand;
   displayLabel: string;
   mode: "edit" | "generate";
   promptSummary: string;
   sessionId: string;
 }
 
-export interface EsseBatchTaskCardData {
+export interface AgentBatchTaskCardData {
   batchTaskId: string;
-  items: EsseBatchTaskCardItem[];
+  items: AgentBatchTaskCardItem[];
   referenceImages?: BatchPlanReferenceImage[];
 }
+
+export type EsseBatchTaskCardItem = AgentBatchTaskCardItem;
+export type EsseBatchTaskCardData = AgentBatchTaskCardData;
+
+export type ProjectManagerContextType =
+  | "agent-bash-execution"
+  | "agent-batch-task"
+  | "agent-tool-call"
+  | "esse-bash-execution"
+  | "esse-batch-task"
+  | "esse-tool-call";
 
 export interface ProjectManagerMessage {
   id: string;
   role: ProjectManagerMessageRole;
   content: string;
-  bashExecution?: EsseBashExecutionEvent;
-  batchTask?: EsseBatchTaskCardData;
-  contextType?: "esse-bash-execution" | "esse-batch-task" | "esse-tool-call";
+  bashExecution?: AgentBashExecutionEvent;
+  batchTask?: AgentBatchTaskCardData;
+  contextType?: ProjectManagerContextType;
   planId?: string;
   permissionDecision?: "pending" | "allow-once" | "allow-session" | "deny";
-  permissionRequest?: EssePermissionRequest;
+  permissionRequest?: AgentPermissionRequest;
   preflightDecision?: "pending" | "execute" | "modify" | "cancel";
-  preflightRequest?: EssePreflightRequest;
+  preflightRequest?: AgentPreflightRequest;
   referenceFilePaths?: string[];
 }
 
@@ -458,9 +487,23 @@ export interface ProjectManagerPlanSession {
 export interface EsseAgentHistoryMessage {
   role: "user" | "assistant";
   content: string;
+  referenceFilePaths?: string[];
 }
 
 export type EssePersona = "old-ox" | "excellent-employee" | "question-girl" | "robot";
+
+export type AgentProviderId = string;
+export type AgentProviderStatus = "available" | "coming-soon";
+
+export interface AgentProviderDescriptor {
+  description: string;
+  id: AgentProviderId;
+  label: string;
+  shortLabel: string;
+  status: AgentProviderStatus;
+  supportsPersona: boolean;
+  workbenchCapabilityIds: string[];
+}
 
 export interface CreatePlaceholderImageRequest {
   sessionId: string;
@@ -471,9 +514,9 @@ export interface CreatePlaceholderImageResponse {
   filePath: string;
 }
 
-export type EssePreflightToolName = "generate_image" | "run_batch_generation" | "package_generated_images";
+export type AgentPreflightToolName = "generate_image" | "run_batch_generation" | "package_generated_images";
 
-export interface EssePreflightCommand {
+export interface AgentPreflightCommand {
   displayLabel?: string;
   mode?: "edit" | "generate";
   prompt?: string;
@@ -483,57 +526,69 @@ export interface EssePreflightCommand {
   target?: { fileName?: string; sessionId?: string; sourceSessionId?: string; type: "existing" | "new" };
 }
 
-export interface EssePreflightPayload {
-  commands: EssePreflightCommand[];
+export interface AgentPreflightPayload {
+  commands: AgentPreflightCommand[];
   estimatedApiCalls: number;
   estimatedDurationSeconds?: number;
   referenceImages?: BatchPlanReferenceImage[];
-  tool: EssePreflightToolName;
+  tool: AgentPreflightToolName;
 }
 
-export interface EssePreflightRequest {
-  payload: EssePreflightPayload;
+export interface AgentPreflightRequest {
+  payload: AgentPreflightPayload;
   requestId: string;
 }
 
-export interface EssePreflightResponse {
+export interface AgentPreflightResponse {
   decision: "execute" | "modify" | "cancel";
   detail?: string;
-  modifiedCommands?: EssePreflightCommand[];
+  modifiedCommands?: AgentPreflightCommand[];
   requestId: string;
 }
 
-export interface EssePreflightResponseAck {
+export interface AgentPreflightResponseAck {
   accepted: boolean;
 }
 
-export type EssePermissionRisk = "read" | "safe-write" | "destructive" | "external-write";
+export type AgentPermissionRisk = "read" | "safe-write" | "destructive" | "external-write";
 
-export interface EssePermissionPayload {
+export interface AgentPermissionPayload {
   affectedDisplayLabel?: string;
   affectedFileName?: string;
   label: string;
   params: Record<string, unknown>;
   requiresPreflight: boolean;
-  risk: EssePermissionRisk;
+  risk: AgentPermissionRisk;
   targetKey?: string;
   toolName: string;
 }
 
-export interface EssePermissionRequest {
-  payload: EssePermissionPayload;
+export interface AgentPermissionRequest {
+  payload: AgentPermissionPayload;
   requestId: string;
 }
 
-export interface EssePermissionResponse {
+export interface AgentPermissionResponse {
   decision: "allow-once" | "allow-session" | "deny";
   reason?: string;
   requestId: string;
 }
 
-export interface EssePermissionResponseAck {
+export interface AgentPermissionResponseAck {
   accepted: boolean;
 }
+
+export type EssePreflightToolName = AgentPreflightToolName;
+export type EssePreflightCommand = AgentPreflightCommand;
+export type EssePreflightPayload = AgentPreflightPayload;
+export type EssePreflightRequest = AgentPreflightRequest;
+export type EssePreflightResponse = AgentPreflightResponse;
+export type EssePreflightResponseAck = AgentPreflightResponseAck;
+export type EssePermissionRisk = AgentPermissionRisk;
+export type EssePermissionPayload = AgentPermissionPayload;
+export type EssePermissionRequest = AgentPermissionRequest;
+export type EssePermissionResponse = AgentPermissionResponse;
+export type EssePermissionResponseAck = AgentPermissionResponseAck;
 
 export interface SendEsseMessageRequest {
   generationMode?: ImageGenerationMode;
@@ -541,6 +596,7 @@ export interface SendEsseMessageRequest {
   operationId?: string;
   outputSize?: string;
   persona?: EssePersona;
+  projectManagerState?: ProjectManagerState;
   referenceImagePaths?: string[];
   selectedSessionId?: string | null;
   sessions: ProjectManagerPlanSession[];
@@ -550,10 +606,20 @@ export interface SendEsseMessageResponse {
   reply: string;
 }
 
-export interface EsseAssistantMessageUpdateEvent {
+export interface SendAgentMessageRequest extends SendEsseMessageRequest {
+  providerId: AgentProviderId;
+}
+
+export interface SendAgentMessageResponse extends SendEsseMessageResponse {
+  providerId: AgentProviderId;
+}
+
+export interface AgentAssistantMessageUpdateEvent {
   content: string;
   operationId?: string;
 }
+
+export type EsseAssistantMessageUpdateEvent = AgentAssistantMessageUpdateEvent;
 
 export interface ProjectListEntry {
   directory: string;
